@@ -159,7 +159,7 @@ def get_master_df(date_str: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
-def get_price_df(date_str: str) -> pd.DataFrame:
+def get_price_df(date_str: str, allow_empty: bool = False) -> pd.DataFrame:
     rows = jquants_get_all("/equities/bars/daily", {"date": date_str})
     df = pd.DataFrame(rows)
 
@@ -218,6 +218,23 @@ def resolve_latest_price_snapshot(
     )
 
 
+def resolve_price_available_base_date(
+    trading_dates: list[str],
+    candidate_idx: int,
+    label: str,
+    max_lookback_days: int = 5,
+) -> tuple[str, pd.DataFrame]:
+    lookback = min(max_lookback_days, candidate_idx + 1)
+
+    for idx in range(candidate_idx, candidate_idx - lookback, -1):
+        date_str = trading_dates[idx]
+        price_df = get_price_df(date_str, allow_empty=True)
+        if not price_df.empty:
+            return date_str, price_df
+
+    raise RuntimeError(f"{label}比較の価格配信済み基準日が見つかりません。")
+
+
 def build_sector_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     trading_dates = get_recent_trading_dates(n=260)
     latest_idx, latest_date, px_latest_raw = resolve_latest_price_snapshot(trading_dates, max_lookback_days=5)
@@ -225,21 +242,28 @@ def build_sector_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dic
     if latest_idx < 21:
         raise RuntimeError(f"比較に必要な営業日数が不足しています。 latest_idx={latest_idx}")
 
-    week_base_date = trading_dates[latest_idx - 5]
-    month_base_date = trading_dates[latest_idx - 21]
+    week_candidate_idx = latest_idx - 5
+    month_candidate_idx = latest_idx - 21
+    week_base_date, px_week_raw = resolve_price_available_base_date(
+        trading_dates,
+        week_candidate_idx,
+        "1週",
+        max_lookback_days=5,
+    )
+    month_base_date, px_month_raw = resolve_price_available_base_date(
+        trading_dates,
+        month_candidate_idx,
+        "1か月",
+        max_lookback_days=5,
+    )
 
     master = get_master_df(latest_date)
 
     px_latest = px_latest_raw.rename(
         columns={"Date": "Date_latest", "Close": "Close_latest", "TradingValue": "TradingValue_latest"}
     )
-    px_week = get_price_df(week_base_date).rename(columns={"Close": "Close_week"})
-    px_month = get_price_df(month_base_date).rename(columns={"Close": "Close_month"})
-
-    if px_week.empty:
-        raise RuntimeError(f"1週比較の株価データが空です。 date={week_base_date}")
-    if px_month.empty:
-        raise RuntimeError(f"1か月比較の株価データが空です。 date={month_base_date}")
+    px_week = px_week_raw.rename(columns={"Close": "Close_week"})
+    px_month = px_month_raw.rename(columns={"Close": "Close_month"})
 
     merged = master.merge(px_latest[["Code", "Date_latest", "Close_latest", "TradingValue_latest"]], on="Code", how="inner")
     merged = merged.merge(px_week[["Code", "Close_week"]], on="Code", how="inner")
@@ -314,6 +338,43 @@ def make_relative_table(sec: pd.DataFrame, rel_col: str, ret_col: str, label: st
     return out
 
 
+def render_sector_spotlight(
+    summary_df: pd.DataFrame,
+    sec_df: pd.DataFrame,
+    title: str,
+    ret_col: str,
+    rel_col: str,
+    ret_label: str,
+) -> None:
+    st.subheader(title)
+
+    top_sectors = summary_df.head(3)
+    for _, row in top_sectors.iterrows():
+        sector_name = row["S33Nm"]
+        sector_sec = sec_df.loc[sec_df["S33Nm"] == sector_name].copy()
+        leaders = make_turnover_table(sector_sec).head(10)
+        strong = (
+            make_relative_table(sector_sec, rel_col, ret_col, ret_label)
+            .sort_values(["セクター差", "売買代金(億円)"], ascending=[False, False])
+            .head(10)
+            .reset_index(drop=True)
+        )
+
+        st.markdown(
+            f"**{sector_name}**  "
+            f"{ret_label}平均 {row['平均騰落率']:.2f}% / "
+            f"上昇銘柄比率 {row['上昇銘柄比率']:.2f}% / "
+            f"売買代金合計 {row['売買代金合計_億円']:.2f} 億円"
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption("主力株（売買代金上位）")
+            st.dataframe(leaders, use_container_width=True, height=320)
+        with col2:
+            st.caption("相対的に強い銘柄")
+            st.dataframe(strong, use_container_width=True, height=320)
+
+
 def make_all_table(sec: pd.DataFrame) -> pd.DataFrame:
     out = sec[[
         "Code", "CoName", "MktNm", "ScaleCat",
@@ -353,10 +414,28 @@ st.write({
     "マスター銘柄数": meta["master_count"],
     "比較可能銘柄数": meta["merged_count"],
 })
+st.info(f"J-Quantsベース部分は価格配信済み最新営業日ベースです。現在の基準日: {meta['latest_date']}")
 
 top3 = week_summary.head(3)["S33Nm"].tolist()
 st.subheader("1週強弱 上位3業種")
 st.write(" / ".join(top3))
+
+render_sector_spotlight(
+    week_summary,
+    merged,
+    "1週上位セクターの主力株と相対強銘柄",
+    "ret_1w",
+    "rel_1w",
+    "1週騰落率",
+)
+render_sector_spotlight(
+    month_summary,
+    merged,
+    "1か月上位セクターの主力株と相対強銘柄",
+    "ret_1m",
+    "rel_1m",
+    "1か月騰落率",
+)
 
 tab1, tab2 = st.tabs(["1週強弱", "1か月強弱"])
 
