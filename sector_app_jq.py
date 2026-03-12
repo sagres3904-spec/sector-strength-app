@@ -1,7 +1,11 @@
 import os
+import re
 import time
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
+import unicodedata
 from zoneinfo import ZoneInfo
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 import requests
@@ -9,6 +13,10 @@ import streamlit as st
 
 BASE_URL = "https://api.jquants.com/v2"
 JST = ZoneInfo("Asia/Tokyo")
+FREE_NEWS_FEEDS = [
+    {"source": "JPX", "url": "https://www.jpx.co.jp/rss/news_release.xml"},
+    {"source": "PR TIMES", "url": "https://prtimes.jp/companyrdf.php"},
+]
 
 st.set_page_config(page_title="日本株セクター強弱（J-Quants版）", layout="wide")
 st.title("日本株セクター強弱（J-Quants版）")
@@ -303,6 +311,7 @@ def build_sector_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dic
         "latest_date": latest_date,
         "week_base_date": week_base_date,
         "month_base_date": month_base_date,
+        "fresh_52w_min_date": trading_dates[max(0, latest_idx - 1)],
         "master_count": len(master),
         "merged_count": len(merged),
     }
@@ -462,6 +471,529 @@ def make_all_table(sec: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _xml_local_name(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
+def _child_text_by_localnames(elem: ET.Element, localnames: list[str]) -> str:
+    wanted = set(localnames)
+    for child in list(elem):
+        if _xml_local_name(child.tag) in wanted:
+            text = "".join(child.itertext()).strip()
+            if text:
+                return text
+    return ""
+
+
+def _parse_feed_datetime(value: str) -> pd.Timestamp:
+    text = (value or "").strip()
+    if not text:
+        return pd.NaT
+
+    parsed = pd.to_datetime(text, errors="coerce", utc=True)
+    if pd.isna(parsed):
+        try:
+            dt = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError):
+            return pd.NaT
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=JST)
+        return pd.Timestamp(dt).tz_convert(JST)
+
+    return parsed.tz_convert(JST)
+
+
+def _previous_weekday(value: str | datetime | pd.Timestamp) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(JST)
+    else:
+        ts = ts.tz_convert(JST)
+
+    prev = ts - pd.Timedelta(days=1)
+    while prev.weekday() >= 5:
+        prev -= pd.Timedelta(days=1)
+    return prev
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_free_news_items(max_items_per_feed: int = 40) -> pd.DataFrame:
+    headers = {"User-Agent": "sector-strength-app/1.0"}
+    rows: list[dict] = []
+
+    for feed in FREE_NEWS_FEEDS:
+        try:
+            response = requests.get(feed["url"], headers=headers, timeout=15)
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+        except Exception:
+            continue
+
+        items: list[ET.Element] = []
+        for elem in root.iter():
+            if _xml_local_name(elem.tag) in {"item", "entry"}:
+                items.append(elem)
+
+        for item in items[:max_items_per_feed]:
+            title = _child_text_by_localnames(item, ["title"])
+            link = _child_text_by_localnames(item, ["link", "id"])
+            summary = _child_text_by_localnames(item, ["description", "summary", "content"])
+            published_text = _child_text_by_localnames(
+                item,
+                ["pubDate", "published", "updated", "dc:date", "date"],
+            )
+
+            if not link:
+                for child in list(item):
+                    if _xml_local_name(child.tag) == "link":
+                        href = child.attrib.get("href", "").strip()
+                        if href:
+                            link = href
+                            break
+
+            rows.append(
+                {
+                    "source": feed["source"],
+                    "title": title,
+                    "link": link,
+                    "published_at": _parse_feed_datetime(published_text),
+                    "summary": summary,
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=["source", "title", "link", "published_at", "summary"])
+
+    out = pd.DataFrame(rows, columns=["source", "title", "link", "published_at", "summary"])
+    out["published_at"] = pd.to_datetime(out["published_at"], errors="coerce")
+    out = out.sort_values("published_at", ascending=False, na_position="last").reset_index(drop=True)
+    return out
+
+
+def select_915_free_news(
+    news_df: pd.DataFrame,
+    latest_date: str | datetime | pd.Timestamp,
+    previous_trading_date: str | datetime | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    if news_df is None:
+        return pd.DataFrame(columns=["source", "title", "link", "published_at", "summary"])
+
+    required_cols = ["source", "title", "link", "published_at", "summary"]
+    missing_cols = [col for col in required_cols if col not in news_df.columns]
+    if missing_cols:
+        return news_df.iloc[0:0].copy() if isinstance(news_df, pd.DataFrame) else pd.DataFrame(columns=required_cols)
+
+    if news_df.empty:
+        return news_df.iloc[0:0].copy()
+
+    out = news_df[required_cols].copy()
+    out["published_at"] = pd.to_datetime(out["published_at"], errors="coerce")
+    if pd.api.types.is_datetime64tz_dtype(out["published_at"]):
+        out["published_at"] = out["published_at"].dt.tz_convert(JST)
+    else:
+        out["published_at"] = out["published_at"].apply(
+            lambda x: x.tz_localize(JST) if pd.notna(x) and x.tzinfo is None else x
+        )
+
+    out = out.dropna(subset=["published_at"]).copy()
+    if out.empty:
+        return news_df.iloc[0:0][required_cols].copy()
+
+    latest_ts = pd.Timestamp(latest_date)
+    if latest_ts.tzinfo is None:
+        latest_ts = latest_ts.tz_localize(JST)
+    else:
+        latest_ts = latest_ts.tz_convert(JST)
+    latest_day = latest_ts.normalize()
+
+    if previous_trading_date is None:
+        previous_day = _previous_weekday(latest_day).normalize()
+    else:
+        previous_day = pd.Timestamp(previous_trading_date)
+        if previous_day.tzinfo is None:
+            previous_day = previous_day.tz_localize(JST)
+        else:
+            previous_day = previous_day.tz_convert(JST)
+        previous_day = previous_day.normalize()
+
+    window_start = previous_day + pd.Timedelta(hours=15)
+    window_end = latest_day + pd.Timedelta(hours=9, minutes=15)
+
+    out = out.loc[(out["published_at"] >= window_start) & (out["published_at"] <= window_end)].copy()
+    if out.empty:
+        return news_df.iloc[0:0][required_cols].copy()
+
+    out = out.drop_duplicates(subset=["source", "title", "link"], keep="first")
+    out = out.sort_values("published_at", ascending=False).reset_index(drop=True)
+    return out
+
+
+def prepare_915_news_preview(news_df: pd.DataFrame, max_rows: int = 15) -> pd.DataFrame:
+    preview_cols = ["時刻", "ソース", "タイトル", "要約", "link"]
+    required_cols = ["source", "title", "link", "published_at", "summary"]
+
+    if news_df is None or not isinstance(news_df, pd.DataFrame):
+        return pd.DataFrame(columns=preview_cols)
+
+    missing_cols = [col for col in required_cols if col not in news_df.columns]
+    if missing_cols or news_df.empty:
+        return pd.DataFrame(columns=preview_cols)
+
+    out = news_df[required_cols].copy()
+    out["published_at"] = pd.to_datetime(out["published_at"], errors="coerce")
+    if pd.api.types.is_datetime64tz_dtype(out["published_at"]):
+        out["published_at"] = out["published_at"].dt.tz_convert(JST)
+    else:
+        out["published_at"] = out["published_at"].apply(
+            lambda x: x.tz_localize(JST) if pd.notna(x) and x.tzinfo is None else x
+        )
+
+    out = out.dropna(subset=["published_at"]).copy()
+    if out.empty:
+        return pd.DataFrame(columns=preview_cols)
+
+    def _shorten(text: str, limit: int) -> str:
+        s = "" if pd.isna(text) else str(text).strip()
+        if len(s) <= limit:
+            return s
+        return s[: max(0, limit - 1)].rstrip() + "…"
+
+    out = out.sort_values("published_at", ascending=False).head(max_rows).copy()
+    out["時刻"] = out["published_at"].dt.strftime("%m-%d %H:%M")
+    out["ソース"] = out["source"].fillna("").astype(str)
+    out["タイトル"] = out["title"].apply(lambda x: _shorten(x, 80))
+    out["要約"] = out["summary"].apply(lambda x: _shorten(x, 120))
+    out["link"] = out["link"].fillna("").astype(str)
+    return out[preview_cols].reset_index(drop=True)
+
+
+def _normalize_match_text(value: str) -> str:
+    text = "" if pd.isna(value) else str(value)
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"https?://\S+|www\.\S+", " ", text, flags=re.IGNORECASE)
+    text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    text = " ".join(text.split())
+    return text.strip()
+
+
+def _find_equity_background_candidates(
+    news_df: pd.DataFrame,
+    merged: pd.DataFrame,
+    top_n_per_news: int = 3,
+    week_summary: pd.DataFrame | None = None,
+    reversal_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    cols = [
+        "published_at",
+        "source",
+        "title",
+        "link",
+        "candidate_type",
+        "candidate_name",
+        "candidate_code",
+        "candidate_sector",
+        "reason",
+        "_score",
+    ]
+    if not isinstance(news_df, pd.DataFrame) or news_df.empty:
+        return pd.DataFrame(columns=cols)
+    if not isinstance(merged, pd.DataFrame) or merged.empty:
+        return pd.DataFrame(columns=cols)
+
+    required_news_cols = ["source", "title", "link", "published_at", "summary"]
+    if any(col not in news_df.columns for col in required_news_cols):
+        return pd.DataFrame(columns=cols)
+
+    def _pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+        for name in candidates:
+            if name in df.columns:
+                return name
+        return None
+
+    code_col = _pick_col(merged, ["Code", "code", "Ticker", "銘柄コード"])
+    name_col = _pick_col(merged, ["CoName", "CompanyName", "Name", "銘柄名"])
+    sector_col = _pick_col(merged, ["S33Nm", "Sector33Name", "SectorName", "33業種", "33業種名"])
+    if not code_col or not name_col or not sector_col:
+        return pd.DataFrame(columns=cols)
+
+    noisy_company_words = {
+        "news",
+        "holdings",
+        "group",
+        "capital",
+        "partners",
+        "japan",
+        "pr",
+        "market",
+    }
+
+    top_sectors: set[str] = set()
+    if isinstance(week_summary, pd.DataFrame) and "S33Nm" in week_summary.columns:
+        top_sectors = set(week_summary.head(5)["S33Nm"].dropna().astype(str).tolist())
+
+    reversal_codes: set[str] = set()
+    if isinstance(reversal_df, pd.DataFrame):
+        reversal_code_col = _pick_col(reversal_df, ["Code", "コード", "candidate_code"])
+        if reversal_code_col:
+            reversal_codes = set(reversal_df[reversal_code_col].dropna().astype(str).tolist())
+
+    equities = (
+        merged[[code_col, name_col, sector_col]]
+        .dropna(subset=[name_col])
+        .drop_duplicates()
+        .copy()
+    )
+    equities["match_name"] = equities[name_col].map(_normalize_match_text)
+    equities["match_name_lower"] = equities["match_name"].str.lower()
+    equities["is_ascii_name"] = equities["match_name"].map(lambda s: bool(s) and all(ord(ch) < 128 for ch in s))
+    equities = equities[equities["match_name"].str.len() >= 3].copy()
+    equities = equities[
+        ~(
+            equities["is_ascii_name"]
+            & equities["match_name_lower"].isin(noisy_company_words)
+        )
+    ].copy()
+
+    sector_map = (
+        merged[[sector_col]]
+        .dropna()
+        .drop_duplicates()
+        .copy()
+    )
+    sector_map["match_sector"] = sector_map[sector_col].map(_normalize_match_text)
+    sector_map = sector_map[sector_map["match_sector"].str.len() >= 2].copy()
+
+    rows: list[dict] = []
+    for news in news_df[required_news_cols].itertuples(index=False):
+        normalized_title = _normalize_match_text(news.title)
+        normalized_summary = _normalize_match_text(news.summary)
+        text = f"{normalized_title} {normalized_summary}".strip()
+        if not text:
+            continue
+        text_lower = text.lower()
+
+        news_rows: dict[tuple[str, str, str], dict] = {}
+
+        for eq in equities.to_dict("records"):
+            match_name = eq["match_name"]
+            if not match_name:
+                continue
+
+            matched = False
+            if eq["is_ascii_name"]:
+                pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(eq['match_name_lower'])}(?![A-Za-z0-9])")
+                matched = bool(pattern.search(text_lower))
+            else:
+                matched = match_name in text
+
+            if matched:
+                candidate_code = str(eq[code_col]).strip()
+                candidate_sector = str(eq[sector_col]).strip()
+                reason_parts = ["社名一致"]
+                score = 100.0
+                if candidate_sector in top_sectors:
+                    reason_parts.append("上位セクター")
+                    score += 15.0
+                if candidate_code in reversal_codes:
+                    reason_parts.append("逆行高候補")
+                    score += 12.0
+                key = ("社名一致", str(eq[name_col]).strip(), candidate_code)
+                news_rows[key] = {
+                    "published_at": news.published_at,
+                    "source": news.source,
+                    "title": news.title,
+                    "link": news.link,
+                    "candidate_type": "社名一致",
+                    "candidate_name": eq[name_col],
+                    "candidate_code": candidate_code,
+                    "candidate_sector": candidate_sector,
+                    "reason": " + ".join(reason_parts),
+                    "_score": score,
+                }
+
+        for sec in sector_map.to_dict("records"):
+            if sec["match_sector"] and sec["match_sector"] in text:
+                candidate_sector = str(sec[sector_col]).strip()
+                reason_parts = ["業種一致"]
+                score = 60.0
+                if candidate_sector in top_sectors:
+                    reason_parts.append("上位セクター")
+                    score += 15.0
+                key = ("業種一致", candidate_sector, "")
+                if key not in news_rows:
+                    news_rows[key] = {
+                        "published_at": news.published_at,
+                        "source": news.source,
+                        "title": news.title,
+                        "link": news.link,
+                        "candidate_type": "業種一致",
+                        "candidate_name": candidate_sector,
+                        "candidate_code": "",
+                        "candidate_sector": candidate_sector,
+                        "reason": " + ".join(reason_parts),
+                        "_score": score,
+                    }
+
+        if not news_rows:
+            continue
+
+        published_ts = pd.to_datetime(news.published_at, errors="coerce")
+        if pd.notna(published_ts):
+            now_jst = pd.Timestamp.now(tz=JST)
+            if published_ts.tzinfo is None:
+                published_ts = published_ts.tz_localize(JST)
+            else:
+                published_ts = published_ts.tz_convert(JST)
+            age_hours = max((now_jst - published_ts).total_seconds() / 3600.0, 0.0)
+            recency_bonus = max(0.0, 6.0 - min(age_hours, 6.0))
+        else:
+            recency_bonus = 0.0
+
+        ranked_rows = []
+        for row in news_rows.values():
+            row["_score"] += recency_bonus
+            ranked_rows.append(row)
+
+        ranked_rows.sort(key=lambda row: (-row["_score"], row["candidate_name"]))
+        rows.extend(ranked_rows[:top_n_per_news])
+
+    if not rows:
+        return pd.DataFrame(columns=cols)
+
+    out = pd.DataFrame(rows, columns=cols)
+    out["published_at"] = pd.to_datetime(out["published_at"], errors="coerce")
+    out = out.drop_duplicates(
+        subset=["source", "title", "link", "candidate_type", "candidate_name", "candidate_code"],
+        keep="first",
+    )
+    out = out.sort_values(["_score", "published_at"], ascending=[False, False], na_position="last").reset_index(drop=True)
+    return out
+
+
+def prepare_background_candidates_preview(candidates_df: pd.DataFrame, max_rows: int = 12) -> pd.DataFrame:
+    preview_cols = ["時刻", "種別", "候補", "コード", "33業種", "根拠", "タイトル", "link"]
+    required_cols = [
+        "published_at",
+        "source",
+        "title",
+        "link",
+        "candidate_type",
+        "candidate_name",
+        "candidate_code",
+        "candidate_sector",
+        "reason",
+        "_score",
+    ]
+
+    if not isinstance(candidates_df, pd.DataFrame) or candidates_df.empty:
+        return pd.DataFrame(columns=preview_cols)
+    if any(col not in candidates_df.columns for col in required_cols):
+        return pd.DataFrame(columns=preview_cols)
+
+    out = candidates_df[required_cols].copy()
+    out["published_at"] = pd.to_datetime(out["published_at"], errors="coerce")
+    if pd.api.types.is_datetime64tz_dtype(out["published_at"]):
+        out["published_at"] = out["published_at"].dt.tz_convert(JST)
+    else:
+        out["published_at"] = out["published_at"].apply(
+            lambda x: x.tz_localize(JST) if pd.notna(x) and x.tzinfo is None else x
+        )
+    out = out.dropna(subset=["published_at"]).copy()
+    if out.empty:
+        return pd.DataFrame(columns=preview_cols)
+
+    def _shorten(text: str, limit: int) -> str:
+        s = "" if pd.isna(text) else str(text).strip()
+        if len(s) <= limit:
+            return s
+        return s[: max(0, limit - 1)].rstrip() + "…"
+
+    out = out.sort_values("published_at", ascending=False).head(max_rows).copy()
+    out["時刻"] = out["published_at"].dt.strftime("%m-%d %H:%M")
+    out["種別"] = out["candidate_type"].fillna("").astype(str)
+    out["候補"] = out["candidate_name"].fillna("").astype(str)
+    out["コード"] = out["candidate_code"].fillna("").astype(str)
+    out["33業種"] = out["candidate_sector"].fillna("").astype(str)
+    out["根拠"] = out["reason"].fillna("").astype(str)
+    out["タイトル"] = out["title"].apply(lambda x: _shorten(x, 80))
+    out["link"] = out["link"].fillna("").astype(str)
+    return out[preview_cols].reset_index(drop=True)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_52w_cache(path: str = "data/sector_52w_cache.csv.gz") -> pd.DataFrame:
+    cols = [
+        "Code",
+        "Date",
+        "Close",
+        "High",
+        "Trailing52wHigh",
+        "DistTo52wHighPct",
+        "IsNear52wHigh",
+        "IsNew52wHigh",
+    ]
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=cols)
+
+    try:
+        df = pd.read_csv(path, dtype={"Code": str}, compression="infer", encoding="utf-8-sig")
+    except Exception:
+        return pd.DataFrame(columns=cols)
+
+    if any(col not in df.columns for col in cols):
+        return pd.DataFrame(columns=cols)
+
+    out = df[cols].copy()
+    out["Code"] = out["Code"].astype(str).str.zfill(5)
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    for col in ["Close", "High", "Trailing52wHigh", "DistTo52wHighPct"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    for col in ["IsNear52wHigh", "IsNew52wHigh"]:
+        out[col] = (
+            out[col]
+            .map(lambda v: str(v).strip().lower() in {"true", "1", "yes"})
+            .fillna(False)
+        )
+    return out.dropna(subset=["Code", "Date"]).reset_index(drop=True)
+
+
+def prepare_52w_high_candidates(cache_df: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFrame:
+    preview_cols = ["コード", "銘柄", "33業種", "終値", "52週高値", "高値乖離率%", "判定"]
+    required_cache_cols = [
+        "Code",
+        "Date",
+        "Close",
+        "Trailing52wHigh",
+        "DistTo52wHighPct",
+        "IsNear52wHigh",
+        "IsNew52wHigh",
+    ]
+    if not isinstance(cache_df, pd.DataFrame) or cache_df.empty:
+        return pd.DataFrame(columns=preview_cols)
+    if any(col not in cache_df.columns for col in required_cache_cols):
+        return pd.DataFrame(columns=preview_cols)
+    if not isinstance(merged, pd.DataFrame) or merged.empty:
+        return pd.DataFrame(columns=preview_cols)
+    if any(col not in merged.columns for col in ["Code", "CoName", "S33Nm"]):
+        return pd.DataFrame(columns=preview_cols)
+
+    meta_df = merged[["Code", "CoName", "S33Nm"]].drop_duplicates(subset=["Code"]).copy()
+    out = cache_df.merge(meta_df, on="Code", how="inner")
+    out = out.loc[out["IsNear52wHigh"] | out["IsNew52wHigh"]].copy()
+    if out.empty:
+        return pd.DataFrame(columns=preview_cols)
+
+    out["判定"] = out["IsNew52wHigh"].map({True: "52週高値更新", False: "52週高値まで3%以内"})
+    out["終値"] = pd.to_numeric(out["Close"], errors="coerce").round(2)
+    out["52週高値"] = pd.to_numeric(out["Trailing52wHigh"], errors="coerce").round(2)
+    out["高値乖離率%"] = pd.to_numeric(out["DistTo52wHighPct"], errors="coerce").round(2)
+    out = out.rename(columns={"Code": "コード", "CoName": "銘柄", "S33Nm": "33業種"})
+    out = out.sort_values(["IsNew52wHigh", "DistTo52wHighPct"], ascending=[False, False]).reset_index(drop=True)
+    return out[preview_cols].head(20)
+
+
 try:
     merged, week_summary, month_summary, meta = build_sector_tables()
 except Exception as e:
@@ -479,6 +1011,78 @@ st.write({
     "比較可能銘柄数": meta["merged_count"],
 })
 st.info(f"J-Quantsベース部分は価格配信済み最新営業日ベースです。現在の基準日: {meta['latest_date']}")
+
+st.subheader("9:15速報（無料ソース）")
+try:
+    free_news = fetch_free_news_items()
+    news_915 = select_915_free_news(
+        free_news,
+        latest_date=meta["latest_date"],
+        previous_trading_date=None,
+    )
+    preview_915 = prepare_915_news_preview(news_915, max_rows=12)
+
+    st.caption("対象: 前営業日15:00〜当日9:15")
+    st.caption(f"取得件数: {len(free_news)} / 9:15対象件数: {len(news_915)}")
+    if preview_915.empty:
+        st.caption("該当ニュースはありません")
+    else:
+        st.dataframe(
+            preview_915,
+            use_container_width=True,
+            height=360,
+            hide_index=True,
+            column_config={
+                "link": st.column_config.LinkColumn("link"),
+            },
+        )
+except Exception:
+    st.caption("無料ニュースの取得に失敗しました")
+
+st.subheader("背景材料候補（初期版）")
+st.caption("根拠: 社名一致 / 業種名一致。上位セクター・逆行高候補を優先表示")
+try:
+    background_candidates = _find_equity_background_candidates(
+        news_915,
+        merged,
+        week_summary=week_summary,
+        reversal_df=reversal_candidates,
+    )
+    background_preview = prepare_background_candidates_preview(background_candidates, max_rows=12)
+    st.caption(f"背景材料候補件数: {len(background_candidates)}")
+    if background_preview.empty:
+        st.caption("該当する背景材料候補はありません")
+    else:
+        st.dataframe(
+            background_preview,
+            use_container_width=True,
+            height=360,
+            hide_index=True,
+            column_config={
+                "link": st.column_config.LinkColumn("link"),
+            },
+        )
+except Exception:
+    st.caption("背景材料候補の抽出に失敗しました")
+
+st.subheader("52週高値圏")
+try:
+    cache_52w = load_52w_cache()
+    if cache_52w.empty:
+        st.caption("52週高値圏キャッシュがありません")
+    else:
+        cache_latest_date = pd.to_datetime(cache_52w["Date"], errors="coerce").dropna().max()
+        fresh_min_date = pd.Timestamp(meta["fresh_52w_min_date"])
+        if pd.isna(cache_latest_date) or cache_latest_date < fresh_min_date:
+            st.caption("52週高値圏キャッシュが未更新です")
+        else:
+            candidates_52w = prepare_52w_high_candidates(cache_52w, merged)
+            if candidates_52w.empty:
+                st.caption("該当する52週高値圏銘柄はありません")
+            else:
+                st.dataframe(candidates_52w, use_container_width=True, height=420, hide_index=True)
+except Exception:
+    st.caption("52週高値圏キャッシュの読込に失敗しました")
 
 top3 = week_summary.head(3)["S33Nm"].tolist()
 st.subheader("1週強弱 上位3業種")
