@@ -338,6 +338,68 @@ def make_relative_table(sec: pd.DataFrame, rel_col: str, ret_col: str, label: st
     return out
 
 
+def build_reversal_candidates(merged: pd.DataFrame, week_summary: pd.DataFrame) -> pd.DataFrame:
+    week_sector_rank = (
+        week_summary[["S33Nm", "平均騰落率"]]
+        .reset_index()
+        .rename(columns={"index": "セクター1週順位", "平均騰落率": "セクター1週平均騰落率"})
+    )
+    week_sector_rank["セクター1週順位"] = week_sector_rank["セクター1週順位"] + 1
+    sector_rank_threshold = min(10, len(week_summary))
+
+    out = merged.merge(week_sector_rank, on="S33Nm", how="left")
+    out["売買代金(億円)"] = out["TradingValue_latest"] / 100000000
+
+    # 逆行高候補:
+    # 1) 上位セクターではない、またはセクター1週平均がマイナス/横ばい
+    # 2) 個別の1週騰落率はプラス
+    # 3) 1週セクター差が十分大きい
+    # 4) 1か月では大きく崩れていない
+    # 5) 売買代金は5億円以上
+    reversal_mask = (
+        ((out["セクター1週順位"] > sector_rank_threshold) | (out["セクター1週平均騰落率"] <= 0))
+        & (out["ret_1w"] > 0)
+        & (out["rel_1w"] >= 3.0)
+        & (out["ret_1m"] >= -10.0)
+        & (out["売買代金(億円)"] >= 5.0)
+    )
+    out = out.loc[reversal_mask].copy()
+
+    out = out.rename(
+        columns={
+            "ret_1w": "1週騰落率",
+            "ret_1m": "1か月騰落率",
+            "rel_1w": "1週セクター差",
+        }
+    )
+
+    out["セクター1週順位"] = out["セクター1週順位"].astype(int)
+    out["セクター1週平均騰落率"] = out["セクター1週平均騰落率"].round(2)
+    out["1週騰落率"] = out["1週騰落率"].round(2)
+    out["1か月騰落率"] = out["1か月騰落率"].round(2)
+    out["1週セクター差"] = out["1週セクター差"].round(2)
+    out["売買代金(億円)"] = out["売買代金(億円)"].round(2)
+
+    cols = [
+        "Code",
+        "CoName",
+        "S33Nm",
+        "MktNm",
+        "ScaleCat",
+        "セクター1週順位",
+        "セクター1週平均騰落率",
+        "1週騰落率",
+        "1週セクター差",
+        "1か月騰落率",
+        "売買代金(億円)",
+    ]
+    return (
+        out[cols]
+        .sort_values(["1週セクター差", "1週騰落率", "売買代金(億円)"], ascending=[False, False, False])
+        .reset_index(drop=True)
+    )
+
+
 def render_sector_spotlight(
     summary_df: pd.DataFrame,
     sec_df: pd.DataFrame,
@@ -406,6 +468,8 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
+reversal_candidates = build_reversal_candidates(merged, week_summary)
+
 st.subheader("採用した営業日")
 st.write({
     "最新営業日": meta["latest_date"],
@@ -436,6 +500,16 @@ render_sector_spotlight(
     "rel_1m",
     "1か月騰落率",
 )
+
+st.subheader("逆行高候補（初期版）")
+st.caption(
+    "上位セクターではない、または弱いセクターの中で、個別が1週で逆行高している候補"
+)
+st.write(f"候補件数: {len(reversal_candidates)}")
+if reversal_candidates.empty:
+    st.info("条件に合う逆行高候補はありません。")
+else:
+    st.dataframe(reversal_candidates.head(30), use_container_width=True, height=420)
 
 tab1, tab2 = st.tabs(["1週強弱", "1か月強弱"])
 
