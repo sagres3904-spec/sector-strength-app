@@ -1,1179 +1,693 @@
+import json
+import logging
 import os
 import re
+import shutil
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from email.utils import parsedate_to_datetime
-import unicodedata
-from zoneinfo import ZoneInfo
-import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote_plus
 
 import pandas as pd
 import requests
 import streamlit as st
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover
+    tomllib = None
+
 BASE_URL = "https://api.jquants.com/v2"
-JST = ZoneInfo("Asia/Tokyo")
-FREE_NEWS_FEEDS = [
-    {"source": "JPX", "url": "https://www.jpx.co.jp/rss/news_release.xml"},
-    {"source": "PR TIMES", "url": "https://prtimes.jp/companyrdf.php"},
-]
+ROOT_DIR = Path(__file__).resolve().parent
+SETTINGS_PATH = ROOT_DIR / "config" / "settings.toml"
+RANKING_TYPE_MAP = {"price_up": 1, "turnover": 4, "volume_surge": 6, "turnover_surge": 7, "industry_up": 14}
+RANKING_SCORE_WEIGHTS = {"price_up": 1.0, "turnover": 1.35, "volume_surge": 1.0, "turnover_surge": 1.25}
+BOARD_REQUEST_EXCHANGES = {1, 3, 5, 6}
+BOARD_ACCEPTED_RESPONSE_EXCHANGES = {1, 3, 5, 6, 27}
+BOARD_MAJOR_FIELDS = ["CurrentPrice", "PrevClose", "Volume", "Turnover", "Open", "High", "Low"]
+MODE_SCORE_WEIGHTS = {
+    "0915": {"live_ret_from_open": 1.5, "live_ret_vs_prev_close": 1.2, "gap_pct": 1.4, "live_volume_ratio_20d": 1.1, "live_turnover_ratio_20d": 1.3, "ret_1w": 0.6, "ret_1m": 0.5, "material_score": 0.3},
+    "1130": {"live_ret_from_open": 1.4, "live_ret_vs_prev_close": 1.0, "morning_strength": 1.2, "live_volume_ratio_20d": 1.1, "live_turnover_ratio_20d": 1.3, "ret_1w": 0.6, "ret_1m": 0.5, "material_score": 0.3},
+    "1530": {"live_ret_from_open": 1.3, "live_ret_vs_prev_close": 1.2, "closing_strength": 1.2, "high_close_score": 1.0, "live_volume_ratio_20d": 1.0, "live_turnover_ratio_20d": 1.2, "ret_1w": 0.7, "ret_1m": 0.6, "material_score": 0.3},
+    "now": {"live_ret_from_open": 1.4, "live_ret_vs_prev_close": 1.1, "gap_pct": 1.0, "live_volume_ratio_20d": 1.1, "live_turnover_ratio_20d": 1.3, "ret_1w": 0.6, "ret_1m": 0.5, "material_score": 0.3},
+}
 
-st.set_page_config(page_title="日本株セクター強弱（J-Quants版）", layout="wide")
-st.title("日本株セクター強弱（J-Quants版）")
-st.caption("前日までの土台として、S33業種の1週・1か月強弱、売買代金上位、相対強弱を表示します。")
+logger = logging.getLogger("sector_app_jq")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-api_key = os.environ.get("JQUANTS_API_KEY", "").strip()
-if not api_key:
-    st.error("環境変数 JQUANTS_API_KEY が見つかりません。")
-    st.stop()
+
+class JQuantsAuthError(RuntimeError):
+    pass
+
+
+class PipelineFailClosed(RuntimeError):
+    pass
+
+
+def _short_body(text: str, limit: int = 160) -> str:
+    return " ".join(str(text or "").split())[:limit]
+
+
+def _is_streamlit_runtime() -> bool:
+    return bool(os.environ.get("STREAMLIT_SERVER_PORT") or os.environ.get("STREAMLIT_RUNTIME"))
+
+
+@contextmanager
+def safe_spinner(text: str, *, enabled: bool = False):
+    if enabled:
+        with st.spinner(text):
+            yield
+        return
+    yield
+
+
+def _read_settings_toml() -> dict[str, Any]:
+    if tomllib is None or not SETTINGS_PATH.exists():
+        return {}
+    with SETTINGS_PATH.open("rb") as fh:
+        return tomllib.load(fh)
+
+
+def get_settings() -> dict[str, Any]:
+    settings = {
+        "JQUANTS_API_KEY": "",
+        "KABU_API_PASSWORD": "",
+        "KABU_API_BASE_URL": "http://localhost:18080/kabusapi",
+        "KABU_API_WS_URL": "ws://localhost:18080/kabusapi/websocket",
+        "SNAPSHOT_OUTPUT_DIR": "data/snapshots",
+        "DRIVE_SYNC_DIR": "",
+        "KABU_REGISTER_LIMIT": 50,
+        "KABU_PUSH_TIMEOUT_SECONDS": 4.0,
+    }
+    settings.update(_read_settings_toml())
+    for key in list(settings.keys()):
+        env_value = os.environ.get(key)
+        if env_value is not None:
+            settings[key] = env_value
+    return settings
+
+
+def _read_streamlit_secret(name: str) -> str:
+    try:
+        return str(st.secrets.get(name, "")).strip()
+    except Exception:
+        return ""
+
+
+def get_api_key(settings: dict[str, Any] | None = None) -> str:
+    settings = settings or get_settings()
+    streamlit_secret = _read_streamlit_secret("JQUANTS_API_KEY") if _is_streamlit_runtime() else ""
+    api_key = streamlit_secret or str(os.environ.get("JQUANTS_API_KEY", "")).strip() or str(settings.get("JQUANTS_API_KEY", "")).strip()
+    if not api_key:
+        raise RuntimeError("J-Quants API key is missing. Set JQUANTS_API_KEY or config/settings.toml.")
+    return api_key
+
+
+def _normalize_code4(value: Any) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits[:4] if len(digits) >= 4 else digits
+
+
+def _is_code4(value: Any) -> bool:
+    return bool(re.fullmatch(r"\d{4}", str(value or "")))
+
+
+def _coerce_numeric(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
 
 
 def pick_first_existing(df: pd.DataFrame, candidates: list[str]) -> str:
-    for c in candidates:
-        if c in df.columns:
-            return c
-    raise KeyError(f"想定カラムが見つかりません。存在カラム: {list(df.columns)}")
+    for candidate in candidates:
+        if candidate in df.columns:
+            return candidate
+    raise KeyError(f"Expected columns {candidates} not found. actual={list(df.columns)}")
 
 
 def pick_optional_existing(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    for c in candidates:
-        if c in df.columns:
-            return c
+    for candidate in candidates:
+        if candidate in df.columns:
+            return candidate
     return None
 
 
-def jquants_get_all(path: str, params: dict) -> list[dict]:
-    headers = {
-        "x-api-key": api_key,
-        "Accept": "application/json",
-    }
+def _request_json(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    response = requests.request(method, url, headers=headers, params=params, json=json_body, timeout=timeout)
+    if response.status_code in {401, 403}:
+        raise JQuantsAuthError(f"J-Quants authentication failed (401/403). The API key is invalid or expired. body={_short_body(response.text)}")
+    if response.status_code >= 400:
+        raise RuntimeError(f"HTTP error status={response.status_code} url={response.url} body={_short_body(response.text)}")
+    return response.json() if response.text else {}
+
+
+def jquants_get_all(path: str, params: dict[str, Any], api_key: str | None = None) -> list[dict[str, Any]]:
+    api_key = api_key or get_api_key()
+    headers = {"x-api-key": api_key, "Accept": "application/json"}
     url = f"{BASE_URL}{path}"
-
-    rows_all: list[dict] = []
+    rows_all: list[dict[str, Any]] = []
     pagination_key = None
-
     while True:
-        p = dict(params)
+        request_params = dict(params)
         if pagination_key:
-            p["pagination_key"] = pagination_key
-
-        r = requests.get(url, headers=headers, params=p, timeout=30)
-        if r.status_code != 200:
-            raise RuntimeError(
-                f"J-Quants API error: status={r.status_code}, url={r.url}, body={r.text[:500]}"
-            )
-
-        js = r.json()
-        rows = js.get("data", [])
+            request_params["pagination_key"] = pagination_key
+        payload = _request_json("GET", url, headers=headers, params=request_params, timeout=30.0)
+        rows = payload.get("data", [])
         if isinstance(rows, list):
             rows_all.extend(rows)
-
-        pagination_key = js.get("pagination_key")
+        pagination_key = payload.get("pagination_key")
         if not pagination_key:
-            break
-
+            return rows_all
         time.sleep(0.03)
 
-    return rows_all
 
-
-@st.cache_data(ttl=3600)
-def get_recent_trading_dates(n: int = 260) -> list[str]:
-    today_jst = datetime.now(JST).date()
-    start_date = (today_jst - timedelta(days=max(n * 2, 420))).isoformat()
-    end_date = today_jst.isoformat()
-
-    rows = jquants_get_all("/markets/calendar", {"from": start_date, "to": end_date})
+def get_recent_trading_dates(n: int = 260, *, api_key: str | None = None) -> list[str]:
+    logger.info("get_recent_trading_dates start n=%s", n)
+    today = datetime.now().date()
+    start_date = (today - timedelta(days=max(n * 2, 420))).isoformat()
+    rows = jquants_get_all("/markets/calendar", {"from": start_date, "to": today.isoformat()}, api_key=api_key)
     df = pd.DataFrame(rows)
     if df.empty:
-        raise RuntimeError("markets/calendar から営業日を取得できませんでした。")
-
+        raise RuntimeError("markets/calendar returned no rows.")
     date_col = pick_first_existing(df, ["Date", "date"])
-    trading_flag_col = pick_optional_existing(
-        df,
-        ["HolidayDivisionName", "HolidayDivision", "IsTradingDay", "TradingDay", "isTradingDay"],
-    )
-
-    cal = df.copy()
-    cal[date_col] = pd.to_datetime(cal[date_col], errors="coerce")
-    cal = cal.dropna(subset=[date_col]).copy()
-    cal = cal[cal[date_col].dt.dayofweek < 5].copy()
-
-    if trading_flag_col:
-        flag = cal[trading_flag_col]
-        if pd.api.types.is_bool_dtype(flag):
-            cal = cal[flag]
-        else:
-            normalized = flag.astype(str).str.strip().str.lower()
-            trading_tokens = {
-                "1", "true", "t", "yes", "y", "trading", "business", "open",
-                "営業日", "立会日", "取引日", "平日",
-            }
-            holiday_tokens = {
-                "0", "false", "f", "no", "n", "holiday", "closed",
-                "休日", "休場日", "非営業日", "土曜", "日曜", "祝日",
-                "saturday", "sunday",
-            }
-            has_trading_token = normalized.apply(
-                lambda s: any(token in s for token in trading_tokens)
-            )
-            has_holiday_token = normalized.apply(
-                lambda s: any(token in s for token in holiday_tokens)
-            )
-            if has_trading_token.any():
-                cal = cal[has_trading_token]
-            elif has_holiday_token.any():
-                cal = cal[~has_holiday_token]
-
-    trading_dates = (
-        cal[date_col]
-        .dt.strftime("%Y-%m-%d")
-        .drop_duplicates()
-        .sort_values()
-        .tolist()
-    )
-
-    if len(trading_dates) < n:
-        raise RuntimeError(f"営業日を十分に取得できませんでした。取得件数={len(trading_dates)}")
-
-    return trading_dates[-n:]
+    flag_col = pick_optional_existing(df, ["HolidayDivisionName", "HolidayDivision", "IsTradingDay", "TradingDay"])
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df = df.dropna(subset=[date_col]).copy()
+    df = df[df[date_col].dt.dayofweek < 5].copy()
+    if flag_col:
+        normalized = df[flag_col].astype(str).str.lower()
+        keep = normalized.str.contains("open|trading|営業") | ~normalized.str.contains("holiday|closed|休日|休場")
+        df = df[keep].copy()
+    dates = df[date_col].dt.strftime("%Y-%m-%d").drop_duplicates().sort_values().tolist()
+    if len(dates) < n:
+        raise RuntimeError(f"Not enough trading dates. count={len(dates)} expected={n}")
+    logger.info("get_recent_trading_dates end count=%s", len(dates[-n:]))
+    return dates[-n:]
 
 
-@st.cache_data(ttl=3600)
-def get_master_df(date_str: str) -> pd.DataFrame:
-    rows = jquants_get_all("/equities/master", {"date": date_str})
-    df = pd.DataFrame(rows)
-
+def get_master_df(date_str: str, *, api_key: str | None = None) -> pd.DataFrame:
+    df = pd.DataFrame(jquants_get_all("/equities/master", {"date": date_str}, api_key=api_key))
     if df.empty:
-        raise RuntimeError("銘柄マスターが空です。")
-
-    if "Code" not in df.columns:
-        raise RuntimeError(f"銘柄マスターに Code 列がありません。columns={list(df.columns)}")
-
-    df["Code"] = df["Code"].astype(str).str.zfill(5)
-
-    if "MktNm" in df.columns:
-        df = df[df["MktNm"].isin(["プライム", "スタンダード", "グロース"])]
-
-    if "S33Nm" in df.columns:
-        df = df[df["S33Nm"].notna() & (df["S33Nm"].astype(str).str.strip() != "")]
-    else:
-        raise RuntimeError("銘柄マスターに S33Nm 列がありません。")
-
-    keep_cols = [c for c in ["Code", "CoName", "S33", "S33Nm", "MktNm", "ScaleCat"] if c in df.columns]
-    df = df[keep_cols].drop_duplicates(subset=["Code"]).copy()
-
-    return df
-
-
-@st.cache_data(ttl=3600)
-def get_price_df(date_str: str, allow_empty: bool = False) -> pd.DataFrame:
-    rows = jquants_get_all("/equities/bars/daily", {"date": date_str})
-    df = pd.DataFrame(rows)
-
-    if df.empty:
-        return pd.DataFrame(columns=["Code", "Date", "Close", "TradingValue"])
-
-    if "Code" not in df.columns:
-        raise RuntimeError(f"株価データに Code 列がありません。columns={list(df.columns)}")
-
-    df["Code"] = df["Code"].astype(str).str.zfill(5)
-
-    close_col = pick_first_existing(df, ["AdjC", "C"])
-    value_col = pick_optional_existing(df, ["Va"])
-
-    keep_cols = ["Code", "Date", close_col]
-    if value_col:
-        keep_cols.append(value_col)
-
-    out = df[keep_cols].copy()
-    out = out.rename(columns={close_col: "Close"})
-    out["Close"] = pd.to_numeric(out["Close"], errors="coerce")
-
-    if value_col:
-        out = out.rename(columns={value_col: "TradingValue"})
-        out["TradingValue"] = pd.to_numeric(out["TradingValue"], errors="coerce")
-    else:
-        out["TradingValue"] = pd.NA
-
-    out = out.dropna(subset=["Close"]).drop_duplicates(subset=["Code"])
-    return out
-
-
-def add_sector_relative_columns(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out["sector_mean_1w"] = out.groupby("S33Nm")["ret_1w"].transform("mean")
-    out["sector_mean_1m"] = out.groupby("S33Nm")["ret_1m"].transform("mean")
-    out["rel_1w"] = out["ret_1w"] - out["sector_mean_1w"]
-    out["rel_1m"] = out["ret_1m"] - out["sector_mean_1m"]
-    return out
-
-
-def resolve_latest_price_snapshot(
-    trading_dates: list[str], max_lookback_days: int = 5
-) -> tuple[int, str, pd.DataFrame]:
-    lookback = min(max_lookback_days, len(trading_dates))
-    search_dates = trading_dates[-lookback:]
-
-    for idx in range(len(search_dates) - 1, -1, -1):
-        date_str = search_dates[idx]
-        price_df = get_price_df(date_str)
-        if not price_df.empty:
-            return len(trading_dates) - lookback + idx, date_str, price_df
-
-    raise RuntimeError(
-        f"価格配信済み最新営業日を特定できませんでした。探索範囲={search_dates[0]}..{search_dates[-1]}"
-    )
-
-
-def resolve_price_available_base_date(
-    trading_dates: list[str],
-    candidate_idx: int,
-    label: str,
-    max_lookback_days: int = 5,
-) -> tuple[str, pd.DataFrame]:
-    lookback = min(max_lookback_days, candidate_idx + 1)
-
-    for idx in range(candidate_idx, candidate_idx - lookback, -1):
-        date_str = trading_dates[idx]
-        price_df = get_price_df(date_str, allow_empty=True)
-        if not price_df.empty:
-            return date_str, price_df
-
-    raise RuntimeError(f"{label}比較の価格配信済み基準日が見つかりません。")
-
-
-def build_sector_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
-    trading_dates = get_recent_trading_dates(n=260)
-    latest_idx, latest_date, px_latest_raw = resolve_latest_price_snapshot(trading_dates, max_lookback_days=5)
-
-    if latest_idx < 21:
-        raise RuntimeError(f"比較に必要な営業日数が不足しています。 latest_idx={latest_idx}")
-
-    week_candidate_idx = latest_idx - 5
-    month_candidate_idx = latest_idx - 21
-    week_base_date, px_week_raw = resolve_price_available_base_date(
-        trading_dates,
-        week_candidate_idx,
-        "1週",
-        max_lookback_days=5,
-    )
-    month_base_date, px_month_raw = resolve_price_available_base_date(
-        trading_dates,
-        month_candidate_idx,
-        "1か月",
-        max_lookback_days=5,
-    )
-
-    master = get_master_df(latest_date)
-
-    px_latest = px_latest_raw.rename(
-        columns={"Date": "Date_latest", "Close": "Close_latest", "TradingValue": "TradingValue_latest"}
-    )
-    px_week = px_week_raw.rename(columns={"Close": "Close_week"})
-    px_month = px_month_raw.rename(columns={"Close": "Close_month"})
-
-    merged = master.merge(px_latest[["Code", "Date_latest", "Close_latest", "TradingValue_latest"]], on="Code", how="inner")
-    merged = merged.merge(px_week[["Code", "Close_week"]], on="Code", how="inner")
-    merged = merged.merge(px_month[["Code", "Close_month"]], on="Code", how="inner")
-
-    merged["ret_1w"] = (merged["Close_latest"] / merged["Close_week"] - 1.0) * 100.0
-    merged["ret_1m"] = (merged["Close_latest"] / merged["Close_month"] - 1.0) * 100.0
-    merged["TradingValue_latest"] = pd.to_numeric(merged["TradingValue_latest"], errors="coerce").fillna(0)
-
-    merged = merged.replace([float("inf"), float("-inf")], pd.NA)
-    merged = merged.dropna(subset=["ret_1w", "ret_1m"]).copy()
-    merged = add_sector_relative_columns(merged)
-
-    merged["売買代金合計(億円)_tmp"] = merged["TradingValue_latest"] / 100000000
-
-    def summarize(col: str) -> pd.DataFrame:
-        return (
-            merged.groupby(["S33", "S33Nm"], dropna=False)
-            .agg(
-                **{
-                    "銘柄数": ("Code", "nunique"),
-                    "平均騰落率": (col, "mean"),
-                    "中央値騰落率": (col, "median"),
-                    "上昇銘柄比率": (col, lambda s: (s > 0).mean() * 100.0),
-                    "売買代金合計_億円": ("売買代金合計(億円)_tmp", "sum"),
-                }
-            )
-            .reset_index()
-            .sort_values(["平均騰落率", "売買代金合計_億円"], ascending=[False, False])
-            .reset_index(drop=True)
-        )
-
-    week_summary = summarize("ret_1w")
-    month_summary = summarize("ret_1m")
-
-    meta = {
-        "latest_date": latest_date,
-        "week_base_date": week_base_date,
-        "month_base_date": month_base_date,
-        "fresh_52w_min_date": trading_dates[max(0, latest_idx - 1)],
-        "master_count": len(master),
-        "merged_count": len(merged),
-    }
-
-    return merged, week_summary, month_summary, meta
-
-
-def format_sector_summary(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    for c in ["平均騰落率", "中央値騰落率", "上昇銘柄比率", "売買代金合計_億円"]:
-        out[c] = out[c].round(2)
-    return out
-
-
-def make_turnover_table(sec: pd.DataFrame) -> pd.DataFrame:
-    out = sec[["Code", "CoName", "MktNm", "ScaleCat", "TradingValue_latest", "ret_1w", "ret_1m"]].copy()
-    out["売買代金(億円)"] = (out["TradingValue_latest"] / 100000000).round(2)
-    out = out.rename(columns={"ret_1w": "1週騰落率", "ret_1m": "1か月騰落率"})
-    out["1週騰落率"] = out["1週騰落率"].round(2)
-    out["1か月騰落率"] = out["1か月騰落率"].round(2)
-    out = out.drop(columns=["TradingValue_latest"])
-    out = out.sort_values("売買代金(億円)", ascending=False).reset_index(drop=True)
-    return out
-
-
-def make_relative_table(sec: pd.DataFrame, rel_col: str, ret_col: str, label: str) -> pd.DataFrame:
-    out = sec[["Code", "CoName", "MktNm", "ScaleCat", ret_col, rel_col, "TradingValue_latest"]].copy()
-    out = out.rename(columns={ret_col: label, rel_col: "セクター差"})
-    out[label] = out[label].round(2)
-    out["セクター差"] = out["セクター差"].round(2)
-    out["売買代金(億円)"] = (out["TradingValue_latest"] / 100000000).round(2)
-    out = out.drop(columns=["TradingValue_latest"])
-    return out
-
-
-def build_reversal_candidates(merged: pd.DataFrame, week_summary: pd.DataFrame) -> pd.DataFrame:
-    week_sector_rank = (
-        week_summary[["S33Nm", "平均騰落率"]]
-        .reset_index()
-        .rename(columns={"index": "セクター1週順位", "平均騰落率": "セクター1週平均騰落率"})
-    )
-    week_sector_rank["セクター1週順位"] = week_sector_rank["セクター1週順位"] + 1
-    sector_rank_threshold = min(10, len(week_summary))
-
-    out = merged.merge(week_sector_rank, on="S33Nm", how="left")
-    out["売買代金(億円)"] = out["TradingValue_latest"] / 100000000
-
-    # 逆行高候補:
-    # 1) 上位セクターではない、またはセクター1週平均がマイナス/横ばい
-    # 2) 個別の1週騰落率はプラス
-    # 3) 1週セクター差が十分大きい
-    # 4) 1か月では大きく崩れていない
-    # 5) 売買代金は5億円以上
-    reversal_mask = (
-        ((out["セクター1週順位"] > sector_rank_threshold) | (out["セクター1週平均騰落率"] <= 0))
-        & (out["ret_1w"] > 0)
-        & (out["rel_1w"] >= 3.0)
-        & (out["ret_1m"] >= -10.0)
-        & (out["売買代金(億円)"] >= 5.0)
-    )
-    out = out.loc[reversal_mask].copy()
-
-    out = out.rename(
-        columns={
-            "ret_1w": "1週騰落率",
-            "ret_1m": "1か月騰落率",
-            "rel_1w": "1週セクター差",
+        raise RuntimeError("equities/master returned no rows.")
+    df["code"] = df["Code"].astype(str).map(_normalize_code4)
+    df = df[df["code"].map(_is_code4)].copy()
+    out = pd.DataFrame(
+        {
+            "code": df["code"],
+            "name": df.get("CoName", "").astype(str),
+            "sector_name": df.get("S33Nm", "").astype(str),
+            "sector_code": df.get("S33", "").astype(str),
+            "exchange_name": df.get("MktNm", "").astype(str),
         }
     )
+    return out.drop_duplicates(subset=["code"]).reset_index(drop=True)
 
-    out["セクター1週順位"] = out["セクター1週順位"].astype(int)
-    out["セクター1週平均騰落率"] = out["セクター1週平均騰落率"].round(2)
-    out["1週騰落率"] = out["1週騰落率"].round(2)
-    out["1か月騰落率"] = out["1か月騰落率"].round(2)
-    out["1週セクター差"] = out["1週セクター差"].round(2)
-    out["売買代金(億円)"] = out["売買代金(億円)"].round(2)
 
-    cols = [
-        "Code",
-        "CoName",
-        "S33Nm",
-        "MktNm",
-        "ScaleCat",
-        "セクター1週順位",
-        "セクター1週平均騰落率",
-        "1週騰落率",
-        "1週セクター差",
-        "1か月騰落率",
-        "売買代金(億円)",
-    ]
-    return (
-        out[cols]
-        .sort_values(["1週セクター差", "1週騰落率", "売買代金(億円)"], ascending=[False, False, False])
+def get_price_df(date_str: str, *, api_key: str | None = None) -> pd.DataFrame:
+    df = pd.DataFrame(jquants_get_all("/equities/bars/daily", {"date": date_str}, api_key=api_key))
+    if df.empty:
+        return pd.DataFrame(columns=["code", "date", "close", "volume", "turnover"])
+    df["code"] = df["Code"].astype(str).map(_normalize_code4)
+    df = df[df["code"].map(_is_code4)].copy()
+    close_col = pick_first_existing(df, ["AdjClose", "AdjustmentClose", "Close", "AdjC", "C"])
+    volume_col = pick_optional_existing(df, ["Volume", "Vol", "V"])
+    turnover_col = pick_optional_existing(df, ["TradingValue", "TurnoverValue", "Va"])
+    out = pd.DataFrame(
+        {
+            "code": df["code"],
+            "date": date_str,
+            "close": _coerce_numeric(df[close_col]),
+            "volume": _coerce_numeric(df[volume_col]) if volume_col else pd.NA,
+            "turnover": _coerce_numeric(df[turnover_col]) if turnover_col else pd.NA,
+        }
+    )
+    return out.dropna(subset=["close"]).drop_duplicates(subset=["code"]).reset_index(drop=True)
+
+
+def get_price_history(trading_dates: list[str], *, api_key: str | None = None, lookback_days: int = 80) -> pd.DataFrame:
+    date_list = trading_dates[-lookback_days:]
+    logger.info("get_price_history start: date count=%s", len(date_list))
+    frames: list[pd.DataFrame] = []
+    total = len(date_list)
+    for idx, date_str in enumerate(date_list, start=1):
+        frames.append(get_price_df(date_str, api_key=api_key))
+        if idx == total or idx % 10 == 0:
+            logger.info("get_price_df progress %s/%s", idx, total)
+    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["code", "date", "close", "volume", "turnover"])
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    return out.dropna(subset=["date"]).sort_values(["code", "date"]).reset_index(drop=True)
+
+
+def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, dict[str, Any]]:
+    logger.info("build_daily_base_data start fast_check=%s", fast_check)
+    logger.info("building daily base via J-Quants")
+    api_key = get_api_key()
+    trading_dates = get_recent_trading_dates(n=40 if fast_check else 260, api_key=api_key)
+    master_df = get_master_df(trading_dates[-1], api_key=api_key)
+    price_history = get_price_history(trading_dates, api_key=api_key, lookback_days=25 if fast_check else 80)
+    grouped = price_history.groupby("code", group_keys=False)
+    latest = grouped.tail(1).rename(columns={"close": "close_latest", "volume": "volume_latest", "turnover": "turnover_latest", "date": "latest_date"})
+    week = grouped.nth(-6).reset_index()[["code", "close"]].rename(columns={"close": "close_1w"})
+    month = grouped.nth(-21).reset_index()[["code", "close"]].rename(columns={"close": "close_1m"})
+    avg20 = grouped.tail(20).groupby("code", as_index=False).agg(avg_volume_20d=("volume", "mean"), avg_turnover_20d=("turnover", "mean"), high_20d=("close", "max"))
+    base = master_df.merge(latest[["code", "close_latest", "volume_latest", "turnover_latest", "latest_date"]], on="code", how="inner")
+    base = base.merge(week, on="code", how="left").merge(month, on="code", how="left").merge(avg20, on="code", how="left")
+    base["ret_1w"] = (base["close_latest"] / base["close_1w"] - 1.0) * 100.0
+    base["ret_1m"] = (base["close_latest"] / base["close_1m"] - 1.0) * 100.0
+    base["sector_ret_1w"] = base.groupby("sector_name", dropna=False)["ret_1w"].transform("mean")
+    base["rel_1w"] = base["ret_1w"] - base["sector_ret_1w"]
+    sector_rank = base.groupby("sector_name", dropna=False)["ret_1w"].mean().sort_values(ascending=False).reset_index()
+    sector_rank["sector_rank_1w"] = range(1, len(sector_rank) + 1)
+    base = base.merge(sector_rank[["sector_name", "sector_rank_1w"]], on="sector_name", how="left")
+    base["TradingValue_latest"] = _coerce_numeric(base["turnover_latest"]).fillna(0.0)
+    base["is_near_52w_high"] = False if fast_check else (base["close_latest"] >= base["high_20d"] * 0.97)
+    base["is_new_52w_high"] = False if fast_check else (base["close_latest"] >= base["high_20d"])
+    base["reversal_candidates"] = (base["ret_1w"] > 0) & (base["ret_1m"] < 0)
+    base["material_title"] = ""
+    base["material_link"] = ""
+    base["material_score"] = 0.0
+    base["latest_date"] = pd.to_datetime(base["latest_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    logger.info("build_daily_base_data end rows=%s", len(base))
+    return base, {"latest_date": max(trading_dates), "trading_date_count": len(trading_dates), "lookback_days": 25 if fast_check else 80, "fast_check": fast_check}
+
+
+def _kabu_headers(token: str) -> dict[str, str]:
+    return {"X-API-KEY": token, "Content-Type": "application/json"}
+
+
+def kabu_get_token(settings: dict[str, Any]) -> str:
+    password = str(settings.get("KABU_API_PASSWORD", "")).strip()
+    if not password:
+        raise PipelineFailClosed("fail-closed: KABU_API_PASSWORD is missing.")
+    url = f"{str(settings['KABU_API_BASE_URL']).rstrip('/')}/token"
+    response = requests.post(url, json={"APIPassword": password}, timeout=10)
+    if response.status_code >= 400:
+        raise PipelineFailClosed(f"fail-closed: kabu token request failed status={response.status_code} body={_short_body(response.text)}")
+    token = response.json().get("Token", "")
+    if not token:
+        raise PipelineFailClosed("fail-closed: kabu token response did not include Token.")
+    return token
+
+
+def _extract_kabu_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return payload
+    for key in ["Ranking", "ranking", "data", "Data"]:
+        rows = payload.get(key)
+        if isinstance(rows, list):
+            return rows
+    return []
+
+
+def fetch_kabu_ranking(settings: dict[str, Any], token: str, source_type: str) -> pd.DataFrame:
+    ranking_type = RANKING_TYPE_MAP[source_type]
+    url = f"{str(settings['KABU_API_BASE_URL']).rstrip('/')}/ranking/{ranking_type}"
+    params: dict[str, Any] = {}
+    if ranking_type not in {14, 15}:
+        params["ExchangeDivision"] = 1
+    response = requests.get(url, headers=_kabu_headers(token), params=params, timeout=15)
+    if response.status_code >= 400:
+        raise PipelineFailClosed(f"fail-closed: ranking type={ranking_type} request failed status={response.status_code} body={_short_body(response.text)}")
+    rows = _extract_kabu_rows(response.json())
+    logger.info("ranking fetched type=%s source_type=%s count=%s", ranking_type, source_type, len(rows))
+    if not rows:
+        if source_type == "industry_up":
+            return pd.DataFrame(columns=["sector_name", "source_type", "ranking_type", "rank_position"])
+        return pd.DataFrame(columns=["code", "name", "sector_name", "exchange", "source_type", "ranking_type", "rank_position", "rank_score"])
+    frame = pd.DataFrame(rows)
+    if source_type == "industry_up":
+        sector_col = pick_optional_existing(frame, ["IndustryName", "SectorName", "Name", "symbol_name"]) or frame.columns[0]
+        return pd.DataFrame({"sector_name": frame[sector_col].astype(str), "source_type": source_type, "ranking_type": ranking_type, "rank_position": range(1, len(frame) + 1)})
+    code_col = pick_optional_existing(frame, ["Symbol", "Code", "symbol"])
+    name_col = pick_optional_existing(frame, ["SymbolName", "Name", "symbol_name"])
+    sector_col = pick_optional_existing(frame, ["IndustryName", "SectorName", "industry_name"])
+    exchange_col = pick_optional_existing(frame, ["Exchange", "exchange"])
+    out = pd.DataFrame(
+        {
+            "code": frame[code_col].map(_normalize_code4) if code_col else "",
+            "name": frame[name_col].astype(str) if name_col else "",
+            "sector_name": frame[sector_col].astype(str) if sector_col else "",
+            "exchange": frame[exchange_col] if exchange_col else pd.NA,
+            "source_type": source_type,
+            "ranking_type": ranking_type,
+            "rank_position": range(1, len(frame) + 1),
+        }
+    )
+    out["rank_score"] = (len(out) - out["rank_position"] + 1) * RANKING_SCORE_WEIGHTS.get(source_type, 1.0)
+    return out
+
+
+def build_market_scan_universe(base_df: pd.DataFrame, settings: dict[str, Any], token: str) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    """Build a market-wide rough scan from kabu ranking endpoints."""
+    logger.info("build_market_scan_universe start")
+    ranking_frames: list[pd.DataFrame] = []
+    diagnostics: dict[str, Any] = {"ranking_counts": {}}
+    for source_type in ["price_up", "turnover", "volume_surge", "turnover_surge"]:
+        frame = fetch_kabu_ranking(settings, token, source_type)
+        diagnostics["ranking_counts"][source_type] = int(len(frame))
+        ranking_frames.append(frame)
+    ranking_df = pd.concat(ranking_frames, ignore_index=True) if ranking_frames else pd.DataFrame()
+    if ranking_df.empty:
+        raise PipelineFailClosed("fail-closed: market scan rankings returned no rows.")
+    ranking_df = ranking_df[ranking_df["code"].map(_is_code4)].copy()
+    ranking_combo = (
+        ranking_df.groupby("code", as_index=False)
+        .agg(
+            ranking_combo_score=("rank_score", "sum"),
+            ranking_sources=("source_type", lambda s: ",".join(sorted(set(s)))),
+            ranking_name=("name", "first"),
+            ranking_sector_name=("sector_name", "first"),
+            exchange=("exchange", "first"),
+        )
+        .sort_values("ranking_combo_score", ascending=False)
         .reset_index(drop=True)
     )
-
-
-def render_sector_spotlight(
-    summary_df: pd.DataFrame,
-    sec_df: pd.DataFrame,
-    title: str,
-    ret_col: str,
-    rel_col: str,
-    ret_label: str,
-) -> None:
-    st.subheader(title)
-
-    top_sectors = summary_df.head(3)
-    for _, row in top_sectors.iterrows():
-        sector_name = row["S33Nm"]
-        sector_sec = sec_df.loc[sec_df["S33Nm"] == sector_name].copy()
-        leaders = make_turnover_table(sector_sec).head(10)
-        strong = (
-            make_relative_table(sector_sec, rel_col, ret_col, ret_label)
-            .sort_values(["セクター差", "売買代金(億円)"], ascending=[False, False])
-            .head(10)
-            .reset_index(drop=True)
-        )
-
-        st.markdown(
-            f"**{sector_name}**  "
-            f"{ret_label}平均 {row['平均騰落率']:.2f}% / "
-            f"上昇銘柄比率 {row['上昇銘柄比率']:.2f}% / "
-            f"売買代金合計 {row['売買代金合計_億円']:.2f} 億円"
-        )
-        col1, col2 = st.columns(2)
-        with col1:
-            st.caption("主力株（売買代金上位）")
-            st.dataframe(leaders, use_container_width=True, height=320)
-        with col2:
-            st.caption("相対的に強い銘柄")
-            st.dataframe(strong, use_container_width=True, height=320)
-
-
-def make_all_table(sec: pd.DataFrame) -> pd.DataFrame:
-    out = sec[[
-        "Code", "CoName", "MktNm", "ScaleCat",
-        "TradingValue_latest", "ret_1w", "ret_1m", "rel_1w", "rel_1m"
-    ]].copy()
-
-    out["売買代金(億円)"] = (out["TradingValue_latest"] / 100000000).round(2)
-
-    out = out.rename(
-        columns={
-            "ret_1w": "1週騰落率",
-            "ret_1m": "1か月騰落率",
-            "rel_1w": "1週セクター差",
-            "rel_1m": "1か月セクター差",
-        }
+    ranking_combo = ranking_combo.merge(
+        base_df[["code", "name", "sector_name", "sector_rank_1w", "ret_1w", "ret_1m", "TradingValue_latest", "exchange_name"]],
+        on="code",
+        how="left",
+        suffixes=("", "_base"),
     )
-
-    for c in ["1週騰落率", "1か月騰落率", "1週セクター差", "1か月セクター差"]:
-        out[c] = out[c].round(2)
-
-    out = out.drop(columns=["TradingValue_latest"])
-    out = out.sort_values("1週騰落率", ascending=False).reset_index(drop=True)
-    return out
-
-
-def _xml_local_name(tag: str) -> str:
-    if "}" in tag:
-        return tag.rsplit("}", 1)[-1]
-    return tag
+    ranking_combo["name"] = ranking_combo["name"].fillna(ranking_combo["ranking_name"]).fillna("")
+    ranking_combo["sector_name"] = ranking_combo["sector_name"].fillna(ranking_combo["ranking_sector_name"]).fillna("")
+    industry_df = fetch_kabu_ranking(settings, token, "industry_up")
+    diagnostics["ranking_counts"]["industry_up"] = int(len(industry_df))
+    logger.info("build_market_scan_universe end candidates=%s industries=%s", len(ranking_combo), len(industry_df))
+    return ranking_combo, industry_df, diagnostics
 
 
-def _child_text_by_localnames(elem: ET.Element, localnames: list[str]) -> str:
-    wanted = set(localnames)
-    for child in list(elem):
-        if _xml_local_name(child.tag) in wanted:
-            text = "".join(child.itertext()).strip()
-            if text:
-                return text
-    return ""
+def _resolve_primary_exchange(code: str, exchange: Any, exchange_name: Any, source_hint: str | None = None) -> int:
+    raw_exchange = str(exchange).strip()
+    if raw_exchange:
+        digits = re.sub(r"\D", "", raw_exchange)
+        if digits:
+            value = int(digits)
+            if value == 9:
+                logger.warning("exchange=SOR ignored for board request code=%s source=%s fallback=1", code, source_hint or "")
+                return 1
+            if value in BOARD_REQUEST_EXCHANGES:
+                return value
+            logger.warning("invalid exchange value for board request code=%s exchange=%s source=%s fallback=1", code, raw_exchange, source_hint or "")
+            return 1
+    normalized_name = str(exchange_name or "").strip().lower()
+    for key, value in {"東証": 1, "tse": 1, "名証": 3, "nse": 3, "福証": 5, "fse": 5, "札証": 6, "sse": 6}.items():
+        if key.lower() in normalized_name:
+            return value
+    return 1
 
 
-def _parse_feed_datetime(value: str) -> pd.Timestamp:
-    text = (value or "").strip()
-    if not text:
-        return pd.NaT
-
-    parsed = pd.to_datetime(text, errors="coerce", utc=True)
-    if pd.isna(parsed):
-        try:
-            dt = parsedate_to_datetime(text)
-        except (TypeError, ValueError, IndexError):
-            return pd.NaT
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=JST)
-        return pd.Timestamp(dt).tz_convert(JST)
-
-    return parsed.tz_convert(JST)
+def _build_board_symbol(code: str, exchange_code: int) -> str:
+    code4 = _normalize_code4(code)
+    if not _is_code4(code4):
+        raise ValueError(f"board target must be 4-digit code. code={code}")
+    return f"{code4}@{exchange_code if exchange_code in BOARD_REQUEST_EXCHANGES else 1}"
 
 
-def _previous_weekday(value: str | datetime | pd.Timestamp) -> pd.Timestamp:
-    ts = pd.Timestamp(value)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize(JST)
-    else:
-        ts = ts.tz_convert(JST)
-
-    prev = ts - pd.Timedelta(days=1)
-    while prev.weekday() >= 5:
-        prev -= pd.Timedelta(days=1)
-    return prev
+def _fetch_board(settings: dict[str, Any], token: str, request_symbol: str) -> dict[str, Any]:
+    url = f"{str(settings['KABU_API_BASE_URL']).rstrip('/')}/board/{quote_plus(request_symbol)}"
+    response = requests.get(url, headers=_kabu_headers(token), timeout=10)
+    if response.status_code >= 400:
+        raise PipelineFailClosed(f"fail-closed: board request failed symbol={request_symbol} status={response.status_code} body={_short_body(response.text)}")
+    return response.json()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_free_news_items(max_items_per_feed: int = 40) -> pd.DataFrame:
-    headers = {"User-Agent": "sector-strength-app/1.0"}
-    rows: list[dict] = []
-
-    for feed in FREE_NEWS_FEEDS:
-        try:
-            response = requests.get(feed["url"], headers=headers, timeout=15)
-            response.raise_for_status()
-            root = ET.fromstring(response.content)
-        except Exception:
-            continue
-
-        items: list[ET.Element] = []
-        for elem in root.iter():
-            if _xml_local_name(elem.tag) in {"item", "entry"}:
-                items.append(elem)
-
-        for item in items[:max_items_per_feed]:
-            title = _child_text_by_localnames(item, ["title"])
-            link = _child_text_by_localnames(item, ["link", "id"])
-            summary = _child_text_by_localnames(item, ["description", "summary", "content"])
-            published_text = _child_text_by_localnames(
-                item,
-                ["pubDate", "published", "updated", "dc:date", "date"],
-            )
-
-            if not link:
-                for child in list(item):
-                    if _xml_local_name(child.tag) == "link":
-                        href = child.attrib.get("href", "").strip()
-                        if href:
-                            link = href
-                            break
-
-            rows.append(
-                {
-                    "source": feed["source"],
-                    "title": title,
-                    "link": link,
-                    "published_at": _parse_feed_datetime(published_text),
-                    "summary": summary,
-                }
-            )
-
-    if not rows:
-        return pd.DataFrame(columns=["source", "title", "link", "published_at", "summary"])
-
-    out = pd.DataFrame(rows, columns=["source", "title", "link", "published_at", "summary"])
-    out["published_at"] = pd.to_datetime(out["published_at"], errors="coerce")
-    out = out.sort_values("published_at", ascending=False, na_position="last").reset_index(drop=True)
-    return out
+def _board_has_major_fields(payload: dict[str, Any]) -> bool:
+    return all(payload.get(key) not in {None, ""} for key in BOARD_MAJOR_FIELDS)
 
 
-def select_915_free_news(
-    news_df: pd.DataFrame,
-    latest_date: str | datetime | pd.Timestamp,
-    previous_trading_date: str | datetime | pd.Timestamp | None = None,
-) -> pd.DataFrame:
-    if news_df is None:
-        return pd.DataFrame(columns=["source", "title", "link", "published_at", "summary"])
-
-    required_cols = ["source", "title", "link", "published_at", "summary"]
-    missing_cols = [col for col in required_cols if col not in news_df.columns]
-    if missing_cols:
-        return news_df.iloc[0:0].copy() if isinstance(news_df, pd.DataFrame) else pd.DataFrame(columns=required_cols)
-
-    if news_df.empty:
-        return news_df.iloc[0:0].copy()
-
-    out = news_df[required_cols].copy()
-    out["published_at"] = pd.to_datetime(out["published_at"], errors="coerce")
-    if pd.api.types.is_datetime64tz_dtype(out["published_at"]):
-        out["published_at"] = out["published_at"].dt.tz_convert(JST)
-    else:
-        out["published_at"] = out["published_at"].apply(
-            lambda x: x.tz_localize(JST) if pd.notna(x) and x.tzinfo is None else x
-        )
-
-    out = out.dropna(subset=["published_at"]).copy()
-    if out.empty:
-        return news_df.iloc[0:0][required_cols].copy()
-
-    latest_ts = pd.Timestamp(latest_date)
-    if latest_ts.tzinfo is None:
-        latest_ts = latest_ts.tz_localize(JST)
-    else:
-        latest_ts = latest_ts.tz_convert(JST)
-    latest_day = latest_ts.normalize()
-
-    if previous_trading_date is None:
-        previous_day = _previous_weekday(latest_day).normalize()
-    else:
-        previous_day = pd.Timestamp(previous_trading_date)
-        if previous_day.tzinfo is None:
-            previous_day = previous_day.tz_localize(JST)
-        else:
-            previous_day = previous_day.tz_convert(JST)
-        previous_day = previous_day.normalize()
-
-    window_start = previous_day + pd.Timedelta(hours=15)
-    window_end = latest_day + pd.Timedelta(hours=9, minutes=15)
-
-    out = out.loc[(out["published_at"] >= window_start) & (out["published_at"] <= window_end)].copy()
-    if out.empty:
-        return news_df.iloc[0:0][required_cols].copy()
-
-    out = out.drop_duplicates(subset=["source", "title", "link"], keep="first")
-    out = out.sort_values("published_at", ascending=False).reset_index(drop=True)
-    return out
-
-
-def prepare_915_news_preview(news_df: pd.DataFrame, max_rows: int = 15) -> pd.DataFrame:
-    preview_cols = ["時刻", "ソース", "タイトル", "要約", "link"]
-    required_cols = ["source", "title", "link", "published_at", "summary"]
-
-    if news_df is None or not isinstance(news_df, pd.DataFrame):
-        return pd.DataFrame(columns=preview_cols)
-
-    missing_cols = [col for col in required_cols if col not in news_df.columns]
-    if missing_cols or news_df.empty:
-        return pd.DataFrame(columns=preview_cols)
-
-    out = news_df[required_cols].copy()
-    out["published_at"] = pd.to_datetime(out["published_at"], errors="coerce")
-    if pd.api.types.is_datetime64tz_dtype(out["published_at"]):
-        out["published_at"] = out["published_at"].dt.tz_convert(JST)
-    else:
-        out["published_at"] = out["published_at"].apply(
-            lambda x: x.tz_localize(JST) if pd.notna(x) and x.tzinfo is None else x
-        )
-
-    out = out.dropna(subset=["published_at"]).copy()
-    if out.empty:
-        return pd.DataFrame(columns=preview_cols)
-
-    def _shorten(text: str, limit: int) -> str:
-        s = "" if pd.isna(text) else str(text).strip()
-        if len(s) <= limit:
-            return s
-        return s[: max(0, limit - 1)].rstrip() + "…"
-
-    out = out.sort_values("published_at", ascending=False).head(max_rows).copy()
-    out["時刻"] = out["published_at"].dt.strftime("%m-%d %H:%M")
-    out["ソース"] = out["source"].fillna("").astype(str)
-    out["タイトル"] = out["title"].apply(lambda x: _shorten(x, 80))
-    out["要約"] = out["summary"].apply(lambda x: _shorten(x, 120))
-    out["link"] = out["link"].fillna("").astype(str)
-    return out[preview_cols].reset_index(drop=True)
-
-
-def _normalize_match_text(value: str) -> str:
-    text = "" if pd.isna(value) else str(value)
-    text = unicodedata.normalize("NFKC", text)
-    text = re.sub(r"https?://\S+|www\.\S+", " ", text, flags=re.IGNORECASE)
-    text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
-    text = " ".join(text.split())
-    return text.strip()
-
-
-def _find_equity_background_candidates(
-    news_df: pd.DataFrame,
-    merged: pd.DataFrame,
-    top_n_per_news: int = 3,
-    week_summary: pd.DataFrame | None = None,
-    reversal_df: pd.DataFrame | None = None,
-) -> pd.DataFrame:
-    cols = [
-        "published_at",
-        "source",
-        "title",
-        "link",
-        "candidate_type",
-        "candidate_name",
-        "candidate_code",
-        "candidate_sector",
-        "reason",
-        "_score",
-    ]
-    if not isinstance(news_df, pd.DataFrame) or news_df.empty:
-        return pd.DataFrame(columns=cols)
-    if not isinstance(merged, pd.DataFrame) or merged.empty:
-        return pd.DataFrame(columns=cols)
-
-    required_news_cols = ["source", "title", "link", "published_at", "summary"]
-    if any(col not in news_df.columns for col in required_news_cols):
-        return pd.DataFrame(columns=cols)
-
-    def _pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
-        for name in candidates:
-            if name in df.columns:
-                return name
-        return None
-
-    code_col = _pick_col(merged, ["Code", "code", "Ticker", "銘柄コード"])
-    name_col = _pick_col(merged, ["CoName", "CompanyName", "Name", "銘柄名"])
-    sector_col = _pick_col(merged, ["S33Nm", "Sector33Name", "SectorName", "33業種", "33業種名"])
-    if not code_col or not name_col or not sector_col:
-        return pd.DataFrame(columns=cols)
-
-    noisy_company_words = {
-        "news",
-        "holdings",
-        "group",
-        "capital",
-        "partners",
-        "japan",
-        "pr",
-        "market",
+def _board_to_row(code: str, payload: dict[str, Any], request_symbol: str, resolved_exchange: int) -> dict[str, Any]:
+    if payload.get("BidPrice") in {None, ""} or payload.get("AskPrice") in {None, ""}:
+        logger.warning("board bid/ask missing code=%s request_symbol=%s", code, request_symbol)
+    exchange_value = payload.get("Exchange", resolved_exchange)
+    try:
+        exchange_value = int(exchange_value)
+    except Exception:
+        exchange_value = resolved_exchange
+    if exchange_value not in BOARD_ACCEPTED_RESPONSE_EXCHANGES:
+        exchange_value = resolved_exchange
+    return {
+        "code": code,
+        "request_symbol": request_symbol,
+        "resolved_exchange": resolved_exchange,
+        "response_exchange": exchange_value,
+        "CurrentPrice": payload.get("CurrentPrice"),
+        "CurrentPriceTime": payload.get("CurrentPriceTime"),
+        "PrevClose": payload.get("PrevClose"),
+        "Open": payload.get("Open"),
+        "High": payload.get("High"),
+        "Low": payload.get("Low"),
+        "Volume": payload.get("Volume"),
+        "Turnover": payload.get("Turnover"),
+        "BidPrice": payload.get("BidPrice"),
+        "AskPrice": payload.get("AskPrice"),
     }
 
-    top_sectors: set[str] = set()
-    if isinstance(week_summary, pd.DataFrame) and "S33Nm" in week_summary.columns:
-        top_sectors = set(week_summary.head(5)["S33Nm"].dropna().astype(str).tolist())
 
-    reversal_codes: set[str] = set()
-    if isinstance(reversal_df, pd.DataFrame):
-        reversal_code_col = _pick_col(reversal_df, ["Code", "コード", "candidate_code"])
-        if reversal_code_col:
-            reversal_codes = set(reversal_df[reversal_code_col].dropna().astype(str).tolist())
+def _register_symbols(settings: dict[str, Any], token: str, register_df: pd.DataFrame) -> None:
+    if register_df.empty:
+        return
+    url = f"{str(settings['KABU_API_BASE_URL']).rstrip('/')}/register"
+    payload = {"Symbols": [{"Symbol": row["code"], "Exchange": int(row["resolved_exchange"])} for _, row in register_df.iterrows()]}
+    response = requests.put(url, headers=_kabu_headers(token), json=payload, timeout=10)
+    if response.status_code >= 400:
+        raise PipelineFailClosed(f"fail-closed: register request failed status={response.status_code} body={_short_body(response.text)}")
 
-    equities = (
-        merged[[code_col, name_col, sector_col]]
-        .dropna(subset=[name_col])
-        .drop_duplicates()
-        .copy()
-    )
-    equities["match_name"] = equities[name_col].map(_normalize_match_text)
-    equities["match_name_lower"] = equities["match_name"].str.lower()
-    equities["is_ascii_name"] = equities["match_name"].map(lambda s: bool(s) and all(ord(ch) < 128 for ch in s))
-    equities = equities[equities["match_name"].str.len() >= 3].copy()
-    equities = equities[
-        ~(
-            equities["is_ascii_name"]
-            & equities["match_name_lower"].isin(noisy_company_words)
-        )
-    ].copy()
 
-    sector_map = (
-        merged[[sector_col]]
-        .dropna()
-        .drop_duplicates()
-        .copy()
-    )
-    sector_map["match_sector"] = sector_map[sector_col].map(_normalize_match_text)
-    sector_map = sector_map[sector_map["match_sector"].str.len() >= 2].copy()
+def _unregister_all(settings: dict[str, Any], token: str) -> None:
+    url = f"{str(settings['KABU_API_BASE_URL']).rstrip('/')}/unregister/all"
+    response = requests.put(url, headers=_kabu_headers(token), timeout=10)
+    if response.status_code >= 400:
+        raise PipelineFailClosed(f"fail-closed: unregister all failed status={response.status_code} body={_short_body(response.text)}")
 
-    rows: list[dict] = []
-    for news in news_df[required_news_cols].itertuples(index=False):
-        normalized_title = _normalize_match_text(news.title)
-        normalized_summary = _normalize_match_text(news.summary)
-        text = f"{normalized_title} {normalized_summary}".strip()
-        if not text:
+
+def select_deep_watch_universe(market_scan_df: pd.DataFrame, base_df: pd.DataFrame, settings: dict[str, Any], mode: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Select the 50-name deep-watch universe for board enrichment."""
+    logger.info("select_deep_watch_universe start mode=%s", mode)
+    register_limit = int(settings.get("KABU_REGISTER_LIMIT", 50))
+    deep_candidates = base_df.copy()
+    deep_candidates["candidate_seed_score"] = 0.0
+    deep_candidates.loc[deep_candidates["rel_1w"].rank(ascending=False, method="min") <= 80, "candidate_seed_score"] += 1.0
+    deep_candidates.loc[deep_candidates["ret_1w"].rank(ascending=False, method="min") <= 80, "candidate_seed_score"] += 1.0
+    deep_candidates.loc[deep_candidates["TradingValue_latest"].rank(ascending=False, method="min") <= 100, "candidate_seed_score"] += 1.2
+    deep_candidates.loc[deep_candidates["reversal_candidates"].fillna(False), "candidate_seed_score"] += 0.8
+    deep_candidates.loc[deep_candidates["is_near_52w_high"].fillna(False), "candidate_seed_score"] += 0.8
+    top_sector_names = base_df[["sector_name", "sector_rank_1w"]].dropna().drop_duplicates().sort_values("sector_rank_1w").head(8)["sector_name"].tolist()
+    deep_candidates.loc[deep_candidates["sector_name"].isin(top_sector_names), "candidate_seed_score"] += 0.7
+    combined = pd.concat([market_scan_df.head(80).merge(base_df, on="code", how="left"), deep_candidates], ignore_index=True, sort=False)
+    combined["combined_priority"] = combined.get("ranking_combo_score", 0).fillna(0) + combined["candidate_seed_score"].fillna(0)
+    combined["code"] = combined["code"].astype(str)
+    pre_count = len(combined)
+    invalid_code_count = int((~combined["code"].map(_is_code4)).sum())
+    duplicate_count = int(combined["code"].duplicated().sum())
+    combined = combined[combined["code"].map(_is_code4)].copy()
+    combined = combined.sort_values(["combined_priority", "TradingValue_latest"], ascending=[False, False]).drop_duplicates("code")
+    selected = combined.head(register_limit).copy()
+    logger.debug("deep-watch candidate_count=%s selected=%s excluded_duplicate=%s excluded_invalid=%s excluded_market_unknown=%s", pre_count, len(selected), duplicate_count, invalid_code_count, 0)
+    logger.info("select_deep_watch_universe end selected=%s", len(selected))
+    return selected, {"candidate_count": pre_count, "selected_count": int(len(selected)), "excluded_invalid_code": invalid_code_count, "excluded_duplicate": duplicate_count, "excluded_market_unknown": 0}
+
+
+def enrich_with_board_snapshot(quotes_df: pd.DataFrame, base_df: pd.DataFrame, settings: dict[str, Any], token: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Enrich selected quotes with board snapshots and retry once after register."""
+    logger.info("enrich_with_board_snapshot start")
+    rows: list[dict[str, Any]] = []
+    register_targets: list[dict[str, Any]] = []
+    for _, row in quotes_df.iterrows():
+        code = str(row["code"])
+        if not _is_code4(code):
+            logger.debug("board skipped invalid code=%s", code)
             continue
-        text_lower = text.lower()
-
-        news_rows: dict[tuple[str, str, str], dict] = {}
-
-        for eq in equities.to_dict("records"):
-            match_name = eq["match_name"]
-            if not match_name:
-                continue
-
-            matched = False
-            if eq["is_ascii_name"]:
-                pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(eq['match_name_lower'])}(?![A-Za-z0-9])")
-                matched = bool(pattern.search(text_lower))
-            else:
-                matched = match_name in text
-
-            if matched:
-                candidate_code = str(eq[code_col]).strip()
-                candidate_sector = str(eq[sector_col]).strip()
-                reason_parts = ["社名一致"]
-                score = 100.0
-                if candidate_sector in top_sectors:
-                    reason_parts.append("上位セクター")
-                    score += 15.0
-                if candidate_code in reversal_codes:
-                    reason_parts.append("逆行高候補")
-                    score += 12.0
-                key = ("社名一致", str(eq[name_col]).strip(), candidate_code)
-                news_rows[key] = {
-                    "published_at": news.published_at,
-                    "source": news.source,
-                    "title": news.title,
-                    "link": news.link,
-                    "candidate_type": "社名一致",
-                    "candidate_name": eq[name_col],
-                    "candidate_code": candidate_code,
-                    "candidate_sector": candidate_sector,
-                    "reason": " + ".join(reason_parts),
-                    "_score": score,
-                }
-
-        for sec in sector_map.to_dict("records"):
-            if sec["match_sector"] and sec["match_sector"] in text:
-                candidate_sector = str(sec[sector_col]).strip()
-                reason_parts = ["業種一致"]
-                score = 60.0
-                if candidate_sector in top_sectors:
-                    reason_parts.append("上位セクター")
-                    score += 15.0
-                key = ("業種一致", candidate_sector, "")
-                if key not in news_rows:
-                    news_rows[key] = {
-                        "published_at": news.published_at,
-                        "source": news.source,
-                        "title": news.title,
-                        "link": news.link,
-                        "candidate_type": "業種一致",
-                        "candidate_name": candidate_sector,
-                        "candidate_code": "",
-                        "candidate_sector": candidate_sector,
-                        "reason": " + ".join(reason_parts),
-                        "_score": score,
-                    }
-
-        if not news_rows:
-            continue
-
-        published_ts = pd.to_datetime(news.published_at, errors="coerce")
-        if pd.notna(published_ts):
-            now_jst = pd.Timestamp.now(tz=JST)
-            if published_ts.tzinfo is None:
-                published_ts = published_ts.tz_localize(JST)
-            else:
-                published_ts = published_ts.tz_convert(JST)
-            age_hours = max((now_jst - published_ts).total_seconds() / 3600.0, 0.0)
-            recency_bonus = max(0.0, 6.0 - min(age_hours, 6.0))
-        else:
-            recency_bonus = 0.0
-
-        ranked_rows = []
-        for row in news_rows.values():
-            row["_score"] += recency_bonus
-            ranked_rows.append(row)
-
-        ranked_rows.sort(key=lambda row: (-row["_score"], row["candidate_name"]))
-        rows.extend(ranked_rows[:top_n_per_news])
-
-    if not rows:
-        return pd.DataFrame(columns=cols)
-
-    out = pd.DataFrame(rows, columns=cols)
-    out["published_at"] = pd.to_datetime(out["published_at"], errors="coerce")
-    out = out.drop_duplicates(
-        subset=["source", "title", "link", "candidate_type", "candidate_name", "candidate_code"],
-        keep="first",
-    )
-    out = out.sort_values(["_score", "published_at"], ascending=[False, False], na_position="last").reset_index(drop=True)
-    return out
+        resolved_exchange = _resolve_primary_exchange(code, row.get("exchange"), row.get("exchange_name"), source_hint="deep_watch")
+        request_symbol = _build_board_symbol(code, resolved_exchange)
+        logger.debug("board request code=%s request_symbol=%s resolved_exchange=%s retry=%s", code, request_symbol, resolved_exchange, False)
+        payload = _fetch_board(settings, token, request_symbol)
+        rows.append(_board_to_row(code, payload, request_symbol, resolved_exchange))
+        if not _board_has_major_fields(payload):
+            register_targets.append({"code": code, "resolved_exchange": resolved_exchange, "request_symbol": request_symbol})
+    retry_count = 0
+    if register_targets:
+        register_df = pd.DataFrame(register_targets).drop_duplicates("code")
+        _unregister_all(settings, token)
+        _register_symbols(settings, token, register_df)
+        time.sleep(float(settings.get("KABU_PUSH_TIMEOUT_SECONDS", 4.0)))
+        row_map = {row["code"]: row for row in rows}
+        for _, register_row in register_df.iterrows():
+            code = str(register_row["code"])
+            request_symbol = str(register_row["request_symbol"])
+            resolved_exchange = int(register_row["resolved_exchange"])
+            logger.debug("board request code=%s request_symbol=%s resolved_exchange=%s retry=%s", code, request_symbol, resolved_exchange, True)
+            payload = _fetch_board(settings, token, request_symbol)
+            row_map[code] = _board_to_row(code, payload, request_symbol, resolved_exchange)
+            retry_count += 1
+            if not _board_has_major_fields(payload):
+                raise PipelineFailClosed(f"fail-closed: board snapshot still missing major fields after register retry code={code} request_symbol={request_symbol}")
+        rows = list(row_map.values())
+    board_df = pd.DataFrame(rows)
+    if board_df.empty:
+        raise PipelineFailClosed("fail-closed: board enrichment produced no rows.")
+    logger.info("enrich_with_board_snapshot end rows=%s retry_count=%s", len(board_df), retry_count)
+    return board_df, {"retry_count": retry_count, "row_count": int(len(board_df))}
 
 
-def prepare_background_candidates_preview(candidates_df: pd.DataFrame, max_rows: int = 12) -> pd.DataFrame:
-    preview_cols = ["時刻", "種別", "候補", "コード", "33業種", "根拠", "タイトル", "link"]
-    required_cols = [
-        "published_at",
-        "source",
-        "title",
-        "link",
-        "candidate_type",
-        "candidate_name",
-        "candidate_code",
-        "candidate_sector",
-        "reason",
-        "_score",
-    ]
-
-    if not isinstance(candidates_df, pd.DataFrame) or candidates_df.empty:
-        return pd.DataFrame(columns=preview_cols)
-    if any(col not in candidates_df.columns for col in required_cols):
-        return pd.DataFrame(columns=preview_cols)
-
-    out = candidates_df[required_cols].copy()
-    out["published_at"] = pd.to_datetime(out["published_at"], errors="coerce")
-    if pd.api.types.is_datetime64tz_dtype(out["published_at"]):
-        out["published_at"] = out["published_at"].dt.tz_convert(JST)
-    else:
-        out["published_at"] = out["published_at"].apply(
-            lambda x: x.tz_localize(JST) if pd.notna(x) and x.tzinfo is None else x
-        )
-    out = out.dropna(subset=["published_at"]).copy()
-    if out.empty:
-        return pd.DataFrame(columns=preview_cols)
-
-    def _shorten(text: str, limit: int) -> str:
-        s = "" if pd.isna(text) else str(text).strip()
-        if len(s) <= limit:
-            return s
-        return s[: max(0, limit - 1)].rstrip() + "…"
-
-    out = out.sort_values("published_at", ascending=False).head(max_rows).copy()
-    out["時刻"] = out["published_at"].dt.strftime("%m-%d %H:%M")
-    out["種別"] = out["candidate_type"].fillna("").astype(str)
-    out["候補"] = out["candidate_name"].fillna("").astype(str)
-    out["コード"] = out["candidate_code"].fillna("").astype(str)
-    out["33業種"] = out["candidate_sector"].fillna("").astype(str)
-    out["根拠"] = out["reason"].fillna("").astype(str)
-    out["タイトル"] = out["title"].apply(lambda x: _shorten(x, 80))
-    out["link"] = out["link"].fillna("").astype(str)
-    return out[preview_cols].reset_index(drop=True)
+def _score_percentile(series: pd.Series) -> pd.Series:
+    numeric = _coerce_numeric(series)
+    if numeric.dropna().empty:
+        return pd.Series([0.0] * len(series), index=series.index)
+    return numeric.rank(pct=True, ascending=True).fillna(0.0)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_52w_cache(path: str = "data/sector_52w_cache.csv.gz") -> pd.DataFrame:
-    cols = [
-        "Code",
-        "Date",
-        "Close",
-        "High",
-        "Trailing52wHigh",
-        "DistTo52wHighPct",
-        "IsNear52wHigh",
-        "IsNew52wHigh",
-    ]
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=cols)
+def _make_nikkei_search_link(name: str, code: str) -> str:
+    return f"https://www.nikkei.com/search?keyword={quote_plus(f'{name} {code}')}"
 
+
+def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.DataFrame, board_df: pd.DataFrame, base_df: pd.DataFrame, now_ts: datetime) -> dict[str, Any]:
+    merged = base_df.merge(board_df, on="code", how="inner")
+    merged["live_price"] = _coerce_numeric(merged["CurrentPrice"])
+    merged["prev_close"] = _coerce_numeric(merged["PrevClose"])
+    merged["open_price"] = _coerce_numeric(merged["Open"])
+    merged["high_price"] = _coerce_numeric(merged["High"])
+    merged["low_price"] = _coerce_numeric(merged["Low"])
+    merged["live_volume"] = _coerce_numeric(merged["Volume"])
+    merged["live_turnover"] = _coerce_numeric(merged["Turnover"])
+    merged["live_price_time"] = merged["CurrentPriceTime"].astype(str)
+    merged["live_ret_vs_prev_close"] = (merged["live_price"] / merged["prev_close"] - 1.0) * 100.0
+    merged["live_ret_from_open"] = (merged["live_price"] / merged["open_price"] - 1.0) * 100.0
+    merged["gap_pct"] = (merged["open_price"] / merged["prev_close"] - 1.0) * 100.0
+    merged["live_volume_ratio_20d"] = merged["live_volume"] / merged["avg_volume_20d"].replace(0, pd.NA)
+    merged["live_turnover_ratio_20d"] = merged["live_turnover"] / merged["avg_turnover_20d"].replace(0, pd.NA)
+    merged["morning_strength"] = merged["live_ret_from_open"]
+    merged["closing_strength"] = merged["live_ret_vs_prev_close"]
+    merged["high_close_score"] = 1 - ((merged["high_price"] - merged["live_price"]) / merged["high_price"].replace(0, pd.NA))
+    merged["total_score"] = 0.0
+    for column, weight in MODE_SCORE_WEIGHTS[mode].items():
+        merged["total_score"] += _score_percentile(merged[column]) * weight
+    merged["focus_reason"] = merged.apply(lambda row: ", ".join(filter(None, [f"sector:{row.get('sector_name', '')}" if pd.notna(row.get("sector_name")) else "", "turnover_breakout" if float(row.get("live_turnover_ratio_20d", 0) or 0) >= 1.5 else "", "volume_breakout" if float(row.get("live_volume_ratio_20d", 0) or 0) >= 1.5 else "", "near_52w_high" if bool(row.get("is_near_52w_high")) else ""])) or "live_strength", axis=1)
+    merged["nikkei_search"] = merged.apply(lambda row: _make_nikkei_search_link(str(row.get("name", "")), str(row.get("code", ""))), axis=1)
+    sector_summary = merged.groupby("sector_name", as_index=False).agg(live_sector_ret=("live_ret_vs_prev_close", "mean"), live_sector_turnover_score=("live_turnover_ratio_20d", "mean"), sector_rank_1w=("sector_rank_1w", "min"), leaders=("name", lambda s: ", ".join(s.head(3)))).sort_values(["live_sector_ret", "live_sector_turnover_score"], ascending=[False, False]).reset_index(drop=True)
+    if not industry_df.empty and "sector_name" in industry_df.columns:
+        sector_summary = sector_summary.merge(industry_df[["sector_name", "rank_position"]].rename(columns={"rank_position": "industry_rank_live"}), on="sector_name", how="left")
+    leaders_by_sector = merged.sort_values("total_score", ascending=False).groupby("sector_name", as_index=False).head(3)[["sector_name", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "total_score"]]
+    focus_candidates = merged.sort_values("total_score", ascending=False).copy()
+    focus_candidates["52w_flag"] = focus_candidates.apply(lambda row: "new_high" if bool(row.get("is_new_52w_high")) else ("near_high" if bool(row.get("is_near_52w_high")) else ""), axis=1)
+    return {
+        "meta": {"generated_at": now_ts.isoformat(), "mode": mode},
+        "sector_summary": sector_summary,
+        "leaders_by_sector": leaders_by_sector,
+        "focus_candidates": focus_candidates[["code", "name", "sector_name", "live_price", "live_ret_vs_prev_close", "live_ret_from_open", "live_volume", "live_turnover", "live_volume_ratio_20d", "live_turnover_ratio_20d", "ret_1w", "ret_1m", "52w_flag", "material_title", "focus_reason", "total_score", "nikkei_search", "material_link"]].head(30).reset_index(drop=True),
+        "diagnostics": {"mode": mode, "generated_at": now_ts.isoformat(), "focus_candidate_count": int(len(focus_candidates)), "ranking_candidate_count": int(len(ranking_df))},
+    }
+
+
+def _snapshot_paths(mode: str, settings: dict[str, Any], now_ts: datetime) -> dict[str, Path]:
+    output_dir = ROOT_DIR / str(settings.get("SNAPSHOT_OUTPUT_DIR", "data/snapshots"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = now_ts.strftime("%Y-%m-%d_%H%M%S_now") if mode == "now" else now_ts.strftime(f"%Y-%m-%d_{mode}")
+    latest_stem = "latest_now" if mode == "now" else f"latest_{mode}"
+    return {"archive_json": output_dir / f"{stem}.json", "archive_md": output_dir / f"{stem}.md", "latest_json": output_dir / f"{latest_stem}.json", "latest_md": output_dir / f"{latest_stem}.md"}
+
+
+def _bundle_to_json_ready(bundle: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "meta": bundle["meta"],
+        "sector_summary": bundle["sector_summary"].to_dict(orient="records"),
+        "leaders_by_sector": bundle["leaders_by_sector"].to_dict(orient="records"),
+        "focus_candidates": bundle["focus_candidates"].to_dict(orient="records"),
+        "diagnostics": bundle["diagnostics"],
+    }
+
+
+def _bundle_to_markdown(bundle: dict[str, Any]) -> str:
+    lines = [f"# Snapshot {bundle['meta']['mode']}", "", f"- generated_at: {bundle['meta']['generated_at']}", f"- mode: {bundle['meta']['mode']}", "", "## 強いセクター"]
+    for _, row in bundle["sector_summary"].head(10).iterrows():
+        lines.append(f"- {row.get('sector_name', '')}: live_ret={row.get('live_sector_ret', '')} turnover_score={row.get('live_sector_turnover_score', '')}")
+    lines.extend(["", "## セクター別中心銘柄"])
+    for _, row in bundle["leaders_by_sector"].head(15).iterrows():
+        lines.append(f"- {row.get('sector_name', '')}: {row.get('code', '')} {row.get('name', '')} score={row.get('total_score', '')}")
+    lines.extend(["", "## 需給ブレイク候補"])
+    for _, row in bundle["focus_candidates"].head(20).iterrows():
+        lines.append(f"- {row.get('code', '')} {row.get('name', '')}: {row.get('focus_reason', '')}")
+    lines.extend(["", "## 注意点", "- 過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。"])
+    return "\n".join(lines) + "\n"
+
+
+def write_snapshot_bundle(bundle: dict[str, Any], settings: dict[str, Any], *, write_drive: bool = False) -> dict[str, str]:
+    paths = _snapshot_paths(bundle["meta"]["mode"], settings, datetime.fromisoformat(bundle["meta"]["generated_at"]))
+    json_ready = _bundle_to_json_ready(bundle)
+    markdown_text = _bundle_to_markdown(bundle)
+    for key in ["archive_json", "latest_json"]:
+        paths[key].write_text(json.dumps(json_ready, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("snapshot write path %s", paths[key])
+    for key in ["archive_md", "latest_md"]:
+        paths[key].write_text(markdown_text, encoding="utf-8")
+        logger.info("snapshot write path %s", paths[key])
+    drive_dir = str(settings.get("DRIVE_SYNC_DIR", "")).strip()
+    if write_drive and drive_dir:
+        drive_path = Path(drive_dir)
+        drive_path.mkdir(parents=True, exist_ok=True)
+        for key in ["latest_json", "latest_md", "archive_json", "archive_md"]:
+            shutil.copy2(paths[key], drive_path / paths[key].name)
+    return {key: str(value) for key, value in paths.items()}
+
+
+def run_cli(mode: str, write_drive: bool = False, fast_check: bool = False) -> dict[str, Any]:
+    logger.info("run_cli start mode=%s fast_check=%s write_drive=%s", mode, fast_check, write_drive)
+    settings = get_settings()
     try:
-        df = pd.read_csv(path, dtype={"Code": str}, compression="infer", encoding="utf-8-sig")
-    except Exception:
-        return pd.DataFrame(columns=cols)
-
-    if any(col not in df.columns for col in cols):
-        return pd.DataFrame(columns=cols)
-
-    out = df[cols].copy()
-    out["Code"] = out["Code"].astype(str).str.zfill(5)
-    out["Date"] = pd.to_datetime(out["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    for col in ["Close", "High", "Trailing52wHigh", "DistTo52wHighPct"]:
-        out[col] = pd.to_numeric(out[col], errors="coerce")
-    for col in ["IsNear52wHigh", "IsNew52wHigh"]:
-        out[col] = (
-            out[col]
-            .map(lambda v: str(v).strip().lower() in {"true", "1", "yes"})
-            .fillna(False)
-        )
-    return out.dropna(subset=["Code", "Date"]).reset_index(drop=True)
-
-
-def prepare_52w_high_candidates(cache_df: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFrame:
-    preview_cols = ["コード", "銘柄", "33業種", "終値", "52週高値", "高値乖離率%", "判定"]
-    required_cache_cols = [
-        "Code",
-        "Date",
-        "Close",
-        "Trailing52wHigh",
-        "DistTo52wHighPct",
-        "IsNear52wHigh",
-        "IsNew52wHigh",
-    ]
-    if not isinstance(cache_df, pd.DataFrame) or cache_df.empty:
-        return pd.DataFrame(columns=preview_cols)
-    if any(col not in cache_df.columns for col in required_cache_cols):
-        return pd.DataFrame(columns=preview_cols)
-    if not isinstance(merged, pd.DataFrame) or merged.empty:
-        return pd.DataFrame(columns=preview_cols)
-    if any(col not in merged.columns for col in ["Code", "CoName", "S33Nm"]):
-        return pd.DataFrame(columns=preview_cols)
-
-    meta_df = merged[["Code", "CoName", "S33Nm"]].drop_duplicates(subset=["Code"]).copy()
-    out = cache_df.merge(meta_df, on="Code", how="inner")
-    out = out.loc[out["IsNear52wHigh"] | out["IsNew52wHigh"]].copy()
-    if out.empty:
-        return pd.DataFrame(columns=preview_cols)
-
-    out["判定"] = out["IsNew52wHigh"].map({True: "52週高値更新", False: "52週高値まで3%以内"})
-    out["終値"] = pd.to_numeric(out["Close"], errors="coerce").round(2)
-    out["52週高値"] = pd.to_numeric(out["Trailing52wHigh"], errors="coerce").round(2)
-    out["高値乖離率%"] = pd.to_numeric(out["DistTo52wHighPct"], errors="coerce").round(2)
-    out = out.rename(columns={"Code": "コード", "CoName": "銘柄", "S33Nm": "33業種"})
-    out = out.sort_values(["IsNew52wHigh", "DistTo52wHighPct"], ascending=[False, False]).reset_index(drop=True)
-    return out[preview_cols].head(20)
+        get_api_key(settings)
+        with safe_spinner("Building daily base", enabled=False):
+            # Even in now mode, the kabu live snapshot is built on top of the J-Quants daily base.
+            base_df, base_meta = build_daily_base_data(fast_check=fast_check)
+        with safe_spinner("Building market scan", enabled=False):
+            token = kabu_get_token(settings)
+            ranking_df, industry_df, ranking_diag = build_market_scan_universe(base_df, settings, token)
+        deep_watch_df, deep_watch_diag = select_deep_watch_universe(ranking_df, base_df, settings, mode)
+        board_df, board_diag = enrich_with_board_snapshot(deep_watch_df, base_df, settings, token)
+        bundle = build_live_snapshot(mode, ranking_df, industry_df, board_df, base_df, datetime.now())
+        bundle["diagnostics"].update({"base_meta": base_meta, "ranking": ranking_diag, "deep_watch": deep_watch_diag, "board": board_diag})
+        bundle["paths"] = write_snapshot_bundle(bundle, settings, write_drive=write_drive)
+        return bundle
+    except JQuantsAuthError as exc:
+        logger.error("fail-closed reason: %s", exc)
+        logger.debug("authentication exception", exc_info=True)
+        raise
+    except Exception as exc:
+        logger.error("fail-closed reason: %s", exc)
+        logger.debug("pipeline exception", exc_info=True)
+        raise
 
 
-try:
-    merged, week_summary, month_summary, meta = build_sector_tables()
-except Exception as e:
-    st.exception(e)
-    st.stop()
+def render_app() -> None:
+    st.set_page_config(page_title="Sector Strength Live", layout="wide")
+    st.title("Sector Strength Live")
+    st.caption("J-Quants を土台にして、kabu ステーション API の live データを重ねて snapshot を作成します。")
+    st.info("過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。")
+    mode = st.selectbox("mode", ["0915", "1130", "1530", "now"], index=0)
+    write_drive = st.checkbox("Google Drive 同期フォルダへも保存", value=False)
+    fast_check = st.checkbox("fast-check", value=False)
+    if st.button("snapshot を作成"):
+        try:
+            with safe_spinner("Building snapshot", enabled=True):
+                bundle = run_cli(mode=mode, write_drive=write_drive, fast_check=fast_check)
+            st.success("snapshot generated")
+            st.write(bundle["paths"])
+            st.subheader("live sector")
+            st.dataframe(bundle["sector_summary"], use_container_width=True, hide_index=True)
+            st.subheader("leaders by sector")
+            st.dataframe(bundle["leaders_by_sector"], use_container_width=True, hide_index=True)
+            st.subheader("focus candidates")
+            st.dataframe(bundle["focus_candidates"], use_container_width=True, hide_index=True)
+        except Exception as exc:
+            st.error(str(exc))
 
-reversal_candidates = build_reversal_candidates(merged, week_summary)
 
-st.subheader("採用した営業日")
-st.write({
-    "最新営業日": meta["latest_date"],
-    "1週比較の基準日": meta["week_base_date"],
-    "1か月比較の基準日": meta["month_base_date"],
-    "マスター銘柄数": meta["master_count"],
-    "比較可能銘柄数": meta["merged_count"],
-})
-st.info(f"J-Quantsベース部分は価格配信済み最新営業日ベースです。現在の基準日: {meta['latest_date']}")
-
-st.subheader("9:15速報（無料ソース）")
-try:
-    free_news = fetch_free_news_items()
-    news_915 = select_915_free_news(
-        free_news,
-        latest_date=meta["latest_date"],
-        previous_trading_date=None,
-    )
-    preview_915 = prepare_915_news_preview(news_915, max_rows=12)
-
-    st.caption("対象: 前営業日15:00〜当日9:15")
-    st.caption(f"取得件数: {len(free_news)} / 9:15対象件数: {len(news_915)}")
-    if preview_915.empty:
-        st.caption("該当ニュースはありません")
-    else:
-        st.dataframe(
-            preview_915,
-            use_container_width=True,
-            height=360,
-            hide_index=True,
-            column_config={
-                "link": st.column_config.LinkColumn("link"),
-            },
-        )
-except Exception:
-    st.caption("無料ニュースの取得に失敗しました")
-
-st.subheader("背景材料候補（初期版）")
-st.caption("根拠: 社名一致 / 業種名一致。上位セクター・逆行高候補を優先表示")
-try:
-    background_candidates = _find_equity_background_candidates(
-        news_915,
-        merged,
-        week_summary=week_summary,
-        reversal_df=reversal_candidates,
-    )
-    background_preview = prepare_background_candidates_preview(background_candidates, max_rows=12)
-    st.caption(f"背景材料候補件数: {len(background_candidates)}")
-    if background_preview.empty:
-        st.caption("該当する背景材料候補はありません")
-    else:
-        st.dataframe(
-            background_preview,
-            use_container_width=True,
-            height=360,
-            hide_index=True,
-            column_config={
-                "link": st.column_config.LinkColumn("link"),
-            },
-        )
-except Exception:
-    st.caption("背景材料候補の抽出に失敗しました")
-
-st.subheader("52週高値圏")
-try:
-    cache_52w = load_52w_cache()
-    if cache_52w.empty:
-        st.caption("52週高値圏キャッシュがありません")
-    else:
-        cache_latest_date = pd.to_datetime(cache_52w["Date"], errors="coerce").dropna().max()
-        fresh_min_date = pd.Timestamp(meta["fresh_52w_min_date"])
-        if pd.isna(cache_latest_date) or cache_latest_date < fresh_min_date:
-            st.caption("52週高値圏キャッシュが未更新です")
-        else:
-            candidates_52w = prepare_52w_high_candidates(cache_52w, merged)
-            if candidates_52w.empty:
-                st.caption("該当する52週高値圏銘柄はありません")
-            else:
-                st.dataframe(candidates_52w, use_container_width=True, height=420, hide_index=True)
-except Exception:
-    st.caption("52週高値圏キャッシュの読込に失敗しました")
-
-top3 = week_summary.head(3)["S33Nm"].tolist()
-st.subheader("1週強弱 上位3業種")
-st.write(" / ".join(top3))
-
-render_sector_spotlight(
-    week_summary,
-    merged,
-    "1週上位セクターの主力株と相対強銘柄",
-    "ret_1w",
-    "rel_1w",
-    "1週騰落率",
-)
-render_sector_spotlight(
-    month_summary,
-    merged,
-    "1か月上位セクターの主力株と相対強銘柄",
-    "ret_1m",
-    "rel_1m",
-    "1か月騰落率",
-)
-
-st.subheader("逆行高候補（初期版）")
-st.caption(
-    "上位セクターではない、または弱いセクターの中で、個別が1週で逆行高している候補"
-)
-st.write(f"候補件数: {len(reversal_candidates)}")
-if reversal_candidates.empty:
-    st.info("条件に合う逆行高候補はありません。")
-else:
-    st.dataframe(reversal_candidates.head(30), use_container_width=True, height=420)
-
-tab1, tab2 = st.tabs(["1週強弱", "1か月強弱"])
-
-with tab1:
-    st.subheader("S33業種 1週強弱")
-    show_week = format_sector_summary(week_summary)
-    st.dataframe(show_week, use_container_width=True, height=520)
-
-    sector_list = show_week["S33Nm"].tolist()
-    selected_week_sector = st.selectbox("1週で中身を見る業種", sector_list, key="week_sector")
-
-    sec = merged.loc[merged["S33Nm"] == selected_week_sector].copy()
-
-    sub1, sub2, sub3, sub4 = st.tabs(["全銘柄", "売買代金上位", "相対的に強い", "相対的に弱い"])
-
-    with sub1:
-        st.dataframe(make_all_table(sec), use_container_width=True, height=520)
-
-    with sub2:
-        st.dataframe(make_turnover_table(sec).head(20), use_container_width=True, height=520)
-
-    with sub3:
-        strong_1w = make_relative_table(sec, "rel_1w", "ret_1w", "1週騰落率")
-        strong_1w = strong_1w.sort_values("セクター差", ascending=False).reset_index(drop=True)
-        st.dataframe(strong_1w.head(20), use_container_width=True, height=520)
-
-    with sub4:
-        weak_1w = make_relative_table(sec, "rel_1w", "ret_1w", "1週騰落率")
-        weak_1w = weak_1w.sort_values("セクター差", ascending=True).reset_index(drop=True)
-        st.dataframe(weak_1w.head(20), use_container_width=True, height=520)
-
-with tab2:
-    st.subheader("S33業種 1か月強弱")
-    show_month = format_sector_summary(month_summary)
-    st.dataframe(show_month, use_container_width=True, height=520)
-
-    sector_list = show_month["S33Nm"].tolist()
-    selected_month_sector = st.selectbox("1か月で中身を見る業種", sector_list, key="month_sector")
-
-    sec = merged.loc[merged["S33Nm"] == selected_month_sector].copy()
-
-    sub1, sub2, sub3, sub4 = st.tabs(["全銘柄", "売買代金上位", "相対的に強い", "相対的に弱い"])
-
-    with sub1:
-        st.dataframe(make_all_table(sec), use_container_width=True, height=520)
-
-    with sub2:
-        st.dataframe(make_turnover_table(sec).head(20), use_container_width=True, height=520)
-
-    with sub3:
-        strong_1m = make_relative_table(sec, "rel_1m", "ret_1m", "1か月騰落率")
-        strong_1m = strong_1m.sort_values("セクター差", ascending=False).reset_index(drop=True)
-        st.dataframe(strong_1m.head(20), use_container_width=True, height=520)
-
-    with sub4:
-        weak_1m = make_relative_table(sec, "rel_1m", "ret_1m", "1か月騰落率")
-        weak_1m = weak_1m.sort_values("セクター差", ascending=True).reset_index(drop=True)
-        st.dataframe(weak_1m.head(20), use_container_width=True, height=520)
-
-with st.expander("診断表示"):
-    st.write("Python:", os.sys.executable)
-    st.write("APIキー先頭4文字:", api_key[:4])
-    st.write("APIキー末尾4文字:", api_key[-4:])
+if __name__ == "__main__":
+    render_app()
