@@ -2,3 +2,4 @@ streamlit
 requests
 pandas
 websocket-client
+google-cloud-storage
