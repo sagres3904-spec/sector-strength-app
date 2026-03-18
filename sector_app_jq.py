@@ -1,11 +1,11 @@
 import json
 import logging
+import math
 import os
 import re
-import shutil
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -13,6 +13,9 @@ from urllib.parse import quote_plus
 import pandas as pd
 import requests
 import streamlit as st
+from snapshot_bundle import bundle_to_json_text, bundle_to_markdown
+from snapshot_store import read_snapshot_json, write_snapshot_bundle as write_snapshot_bundle_to_store
+from snapshot_time import build_snapshot_meta, normalize_snapshot_meta, saved_snapshot_timing_warning
 
 try:
     import tomllib
@@ -26,7 +29,7 @@ RANKING_TYPE_MAP = {"price_up": 1, "turnover": 4, "volume_surge": 6, "turnover_s
 RANKING_SCORE_WEIGHTS = {"price_up": 1.0, "turnover": 1.35, "volume_surge": 1.0, "turnover_surge": 1.25}
 BOARD_REQUEST_EXCHANGES = {1, 3, 5, 6}
 BOARD_ACCEPTED_RESPONSE_EXCHANGES = {1, 3, 5, 6, 27}
-BOARD_MAJOR_FIELDS = ["CurrentPrice", "PrevClose", "Volume", "Turnover", "Open", "High", "Low"]
+BOARD_MAJOR_FIELDS = ["CurrentPrice", "Volume", "Turnover", "Open", "High", "Low"]
 MODE_SCORE_WEIGHTS = {
     "0915": {"live_ret_from_open": 1.5, "live_ret_vs_prev_close": 1.2, "gap_pct": 1.4, "live_volume_ratio_20d": 1.1, "live_turnover_ratio_20d": 1.3, "ret_1w": 0.6, "ret_1m": 0.5, "material_score": 0.3},
     "1130": {"live_ret_from_open": 1.4, "live_ret_vs_prev_close": 1.0, "morning_strength": 1.2, "live_volume_ratio_20d": 1.1, "live_turnover_ratio_20d": 1.3, "ret_1w": 0.6, "ret_1m": 0.5, "material_score": 0.3},
@@ -37,6 +40,51 @@ MODE_SCORE_WEIGHTS = {
 logger = logging.getLogger("sector_app_jq")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+UI_COLUMN_LABELS = {
+    "sector_name": "セクター名",
+    "live_sector_ret": "ライブ騰落率",
+    "live_sector_turnover_score": "ライブ売買代金倍率",
+    "sector_rank_1w": "1週セクター順位",
+    "leaders": "主力銘柄",
+    "industry_rank_live": "業種別順位",
+    "code": "コード",
+    "name": "銘柄名",
+    "live_price": "現在値",
+    "live_ret_vs_prev_close": "前日終値比(%)",
+    "live_ret_from_open": "始値比(%)",
+    "live_turnover": "売買代金",
+    "live_volume": "出来高",
+    "live_volume_ratio_20d": "20日平均比出来高",
+    "live_turnover_ratio_20d": "20日平均比売買代金",
+    "avg_volume_20d": "20日平均出来高",
+    "avg_turnover_20d": "20日平均売買代金",
+    "ret_1w": "1週騰落率(%)",
+    "ret_1m": "1か月騰落率(%)",
+    "52w_flag": "52週高値フラグ",
+    "material_title": "材料タイトル",
+    "focus_reason": "注目理由",
+    "total_score": "総合スコア",
+    "nikkei_search": "日経で検索",
+    "material_link": "材料リンク",
+}
+
+
+INDUSTRY_NAME_ALIASES = {
+    "海運": "海運業",
+    "鉱業": "鉱業",
+    "空運": "空運業",
+    "銀行": "銀行業",
+    "保険": "保険業",
+    "証券商品先物": "証券、商品先物取引業",
+    "証券・商品先物": "証券、商品先物取引業",
+    "その他金融": "その他金融業",
+    "卸売": "卸売業",
+    "小売": "小売業",
+    "情報通信": "情報・通信業",
+    "倉庫運輸": "倉庫・運輸関連業",
+}
 
 
 class JQuantsAuthError(RuntimeError):
@@ -77,6 +125,10 @@ def get_settings() -> dict[str, Any]:
         "KABU_API_PASSWORD": "",
         "KABU_API_BASE_URL": "http://localhost:18080/kabusapi",
         "KABU_API_WS_URL": "ws://localhost:18080/kabusapi/websocket",
+        "SNAPSHOT_BACKEND": "local",
+        "SNAPSHOT_LOCAL_DIR": "data/snapshots",
+        "SNAPSHOT_GCS_BUCKET": "",
+        "SNAPSHOT_GCS_PREFIX": "sector-app/snapshots",
         "SNAPSHOT_OUTPUT_DIR": "data/snapshots",
         "DRIVE_SYNC_DIR": "",
         "KABU_REGISTER_LIMIT": 50,
@@ -219,8 +271,8 @@ def get_price_df(date_str: str, *, api_key: str | None = None) -> pd.DataFrame:
     df["code"] = df["Code"].astype(str).map(_normalize_code4)
     df = df[df["code"].map(_is_code4)].copy()
     close_col = pick_first_existing(df, ["AdjClose", "AdjustmentClose", "Close", "AdjC", "C"])
-    volume_col = pick_optional_existing(df, ["Volume", "Vol", "V"])
-    turnover_col = pick_optional_existing(df, ["TradingValue", "TurnoverValue", "Va"])
+    volume_col = pick_optional_existing(df, ["Volume", "Vo", "Vol", "V"])
+    turnover_col = pick_optional_existing(df, ["TurnoverValue", "TradingValue", "Va"])
     out = pd.DataFrame(
         {
             "code": df["code"],
@@ -254,13 +306,18 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
     trading_dates = get_recent_trading_dates(n=40 if fast_check else 260, api_key=api_key)
     master_df = get_master_df(trading_dates[-1], api_key=api_key)
     price_history = get_price_history(trading_dates, api_key=api_key, lookback_days=25 if fast_check else 80)
+    price_history["volume"] = _coerce_numeric(price_history["volume"])
+    price_history["turnover"] = _coerce_numeric(price_history["turnover"])
+    price_history["close"] = _coerce_numeric(price_history["close"])
     grouped = price_history.groupby("code", group_keys=False)
+    price_history["avg_volume_20d"] = grouped["volume"].transform(lambda s: s.rolling(20, min_periods=20).mean())
+    price_history["avg_turnover_20d"] = grouped["turnover"].transform(lambda s: s.rolling(20, min_periods=20).mean())
+    price_history["high_20d"] = grouped["close"].transform(lambda s: s.rolling(20, min_periods=20).max())
     latest = grouped.tail(1).rename(columns={"close": "close_latest", "volume": "volume_latest", "turnover": "turnover_latest", "date": "latest_date"})
     week = grouped.nth(-6).reset_index()[["code", "close"]].rename(columns={"close": "close_1w"})
     month = grouped.nth(-21).reset_index()[["code", "close"]].rename(columns={"close": "close_1m"})
-    avg20 = grouped.tail(20).groupby("code", as_index=False).agg(avg_volume_20d=("volume", "mean"), avg_turnover_20d=("turnover", "mean"), high_20d=("close", "max"))
-    base = master_df.merge(latest[["code", "close_latest", "volume_latest", "turnover_latest", "latest_date"]], on="code", how="inner")
-    base = base.merge(week, on="code", how="left").merge(month, on="code", how="left").merge(avg20, on="code", how="left")
+    base = master_df.merge(latest[["code", "close_latest", "volume_latest", "turnover_latest", "latest_date", "avg_volume_20d", "avg_turnover_20d", "high_20d"]], on="code", how="inner")
+    base = base.merge(week, on="code", how="left").merge(month, on="code", how="left")
     base["ret_1w"] = (base["close_latest"] / base["close_1w"] - 1.0) * 100.0
     base["ret_1m"] = (base["close_latest"] / base["close_1m"] - 1.0) * 100.0
     base["sector_ret_1w"] = base.groupby("sector_name", dropna=False)["ret_1w"].transform("mean")
@@ -308,13 +365,19 @@ def _extract_kabu_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _normalize_industry_name(value: Any) -> str:
+    name = str(value or "").strip()
+    if name.startswith("IS "):
+        name = name[3:].strip()
+    name = INDUSTRY_NAME_ALIASES.get(name, name)
+    return name
+
+
 def fetch_kabu_ranking(settings: dict[str, Any], token: str, source_type: str) -> pd.DataFrame:
     ranking_type = RANKING_TYPE_MAP[source_type]
-    url = f"{str(settings['KABU_API_BASE_URL']).rstrip('/')}/ranking/{ranking_type}"
-    params: dict[str, Any] = {}
-    if ranking_type not in {14, 15}:
-        params["ExchangeDivision"] = 1
-    response = requests.get(url, headers=_kabu_headers(token), params=params, timeout=15)
+    url = f"{str(settings['KABU_API_BASE_URL']).rstrip('/')}/ranking"
+    params: dict[str, Any] = {"Type": str(ranking_type), "ExchangeDivision": "ALL"}
+    response = requests.get(url, headers={"X-API-KEY": token}, params=params, timeout=15)
     if response.status_code >= 400:
         raise PipelineFailClosed(f"fail-closed: ranking type={ranking_type} request failed status={response.status_code} body={_short_body(response.text)}")
     rows = _extract_kabu_rows(response.json())
@@ -325,8 +388,15 @@ def fetch_kabu_ranking(settings: dict[str, Any], token: str, source_type: str) -
         return pd.DataFrame(columns=["code", "name", "sector_name", "exchange", "source_type", "ranking_type", "rank_position", "rank_score"])
     frame = pd.DataFrame(rows)
     if source_type == "industry_up":
-        sector_col = pick_optional_existing(frame, ["IndustryName", "SectorName", "Name", "symbol_name"]) or frame.columns[0]
-        return pd.DataFrame({"sector_name": frame[sector_col].astype(str), "source_type": source_type, "ranking_type": ranking_type, "rank_position": range(1, len(frame) + 1)})
+        sector_col = pick_optional_existing(frame, ["CategoryName", "IndustryName", "SectorName", "Name", "symbol_name"]) or frame.columns[0]
+        return pd.DataFrame(
+            {
+                "sector_name": frame[sector_col].map(_normalize_industry_name),
+                "source_type": source_type,
+                "ranking_type": ranking_type,
+                "rank_position": range(1, len(frame) + 1),
+            }
+        )
     code_col = pick_optional_existing(frame, ["Symbol", "Code", "symbol"])
     name_col = pick_optional_existing(frame, ["SymbolName", "Name", "symbol_name"])
     sector_col = pick_optional_existing(frame, ["IndustryName", "SectorName", "industry_name"])
@@ -413,15 +483,93 @@ def _build_board_symbol(code: str, exchange_code: int) -> str:
 
 
 def _fetch_board(settings: dict[str, Any], token: str, request_symbol: str) -> dict[str, Any]:
+    payload, error_info = _try_fetch_board(settings, token, request_symbol)
+    if payload is not None:
+        return payload
+    assert error_info is not None
+    raise PipelineFailClosed(
+        f"fail-closed: board request failed symbol={request_symbol} status={error_info.get('status_code')} body={error_info.get('body_short')}"
+    )
+
+
+def _try_fetch_board(settings: dict[str, Any], token: str, request_symbol: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     url = f"{str(settings['KABU_API_BASE_URL']).rstrip('/')}/board/{quote_plus(request_symbol)}"
-    response = requests.get(url, headers=_kabu_headers(token), timeout=10)
-    if response.status_code >= 400:
-        raise PipelineFailClosed(f"fail-closed: board request failed symbol={request_symbol} status={response.status_code} body={_short_body(response.text)}")
-    return response.json()
+    retry_sleep = 0.15
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        response = requests.get(url, headers=_kabu_headers(token), timeout=10)
+        if response.status_code == 429 and attempt < max_attempts:
+            logger.warning("board request rate-limited symbol=%s attempt=%s/%s; sleeping %.2fs", request_symbol, attempt, max_attempts, retry_sleep)
+            time.sleep(retry_sleep)
+            continue
+        if response.status_code >= 400:
+            return None, _build_board_error_info(response, request_symbol, attempt=attempt)
+        return _normalize_board_payload(response.json()), None
+    return None, {"request_symbol": request_symbol, "status_code": 429, "body_short": "board request exhausted retries", "recoverable": False, "attempt": max_attempts}
+
+
+def _build_board_error_info(response: requests.Response, request_symbol: str, *, attempt: int) -> dict[str, Any]:
+    payload: dict[str, Any]
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+    message = str(payload.get("Message", "") or "").strip()
+    return {
+        "request_symbol": request_symbol,
+        "status_code": int(response.status_code),
+        "error_code": payload.get("Code"),
+        "message": message,
+        "body_short": _short_body(response.text),
+        "recoverable": response.status_code in {400, 404} and "銘柄が見つからない" in message,
+        "attempt": attempt,
+    }
+
+
+def _attempt_unregister_all(settings: dict[str, Any], token: str, *, context_label: str) -> dict[str, Any]:
+    try:
+        _unregister_all(settings, token)
+        return {"called": True, "succeeded": True, "context": context_label, "error_code": None, "message": ""}
+    except Exception as exc:
+        logger.warning("unregister/all failed context=%s reason=%s", context_label, exc)
+        return {"called": True, "succeeded": False, "context": context_label, "error_code": None, "message": str(exc)}
+
+
+def _normalize_board_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    key_aliases = {
+        "PreviousClose": "PrevClose",
+        "OpeningPrice": "Open",
+        "HighPrice": "High",
+        "LowPrice": "Low",
+        "TradingVolume": "Volume",
+        "TradingValue": "Turnover",
+    }
+    for src, dst in key_aliases.items():
+        if normalized.get(dst) in {None, ""} and normalized.get(src) not in {None, ""}:
+            normalized[dst] = normalized[src]
+    return normalized
 
 
 def _board_has_major_fields(payload: dict[str, Any]) -> bool:
     return all(payload.get(key) not in {None, ""} for key in BOARD_MAJOR_FIELDS)
+
+
+def _fill_prev_close_from_base(payload: dict[str, Any], base_df: pd.DataFrame, code: str) -> bool:
+    if payload.get("PrevClose") not in {None, ""}:
+        return True
+    base_row = base_df.loc[base_df["code"].astype(str) == str(code)]
+    if base_row.empty:
+        logger.warning("board prev_close missing and base fallback unavailable code=%s", code)
+        return False
+    close_value = base_row["close_latest"].iloc[0] if "close_latest" in base_row.columns else None
+    latest_date = base_row["latest_date"].iloc[0] if "latest_date" in base_row.columns else ""
+    if pd.isna(close_value) or close_value in {None, ""}:
+        logger.warning("board prev_close missing and base fallback unavailable code=%s", code)
+        return False
+    payload["PrevClose"] = close_value
+    logger.warning("board prev_close missing; filled from base_df code=%s latest_date=%s", code, latest_date)
+    return True
 
 
 def _board_to_row(code: str, payload: dict[str, Any], request_symbol: str, resolved_exchange: int) -> dict[str, Any]:
@@ -449,6 +597,132 @@ def _board_to_row(code: str, payload: dict[str, Any], request_symbol: str, resol
         "Turnover": payload.get("Turnover"),
         "BidPrice": payload.get("BidPrice"),
         "AskPrice": payload.get("AskPrice"),
+    }
+
+
+def _board_exchange_candidates(code: str, exchange: Any, exchange_name: Any) -> list[int]:
+    first_exchange = _resolve_primary_exchange(code, exchange, exchange_name, source_hint="deep_watch")
+    return [first_exchange] + [candidate for candidate in sorted(BOARD_REQUEST_EXCHANGES) if candidate != first_exchange]
+
+
+def _fetch_board_with_exchange_fallback(settings: dict[str, Any], token: str, base_df: pd.DataFrame, row: pd.Series) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    code = str(row["code"])
+    tried_exchanges = _board_exchange_candidates(code, row.get("exchange"), row.get("exchange_name"))
+    first_exchange = tried_exchanges[0]
+    recoverable_errors: list[dict[str, Any]] = []
+    registry_reset_used = False
+    for exchange_code in tried_exchanges:
+        request_symbol = _build_board_symbol(code, exchange_code)
+        logger.debug(
+            "board attempt code=%s first_exchange=%s tried_exchanges=%s chosen_exchange=%s result=%s",
+            code,
+            first_exchange,
+            tried_exchanges,
+            exchange_code,
+            "attempt",
+        )
+        time.sleep(0.13)
+        payload, error_info = _try_fetch_board(settings, token, request_symbol)
+        if payload is not None:
+            has_prev_close = _fill_prev_close_from_base(payload, base_df, code)
+            has_major_fields = _board_has_major_fields(payload)
+            result = "success" if has_major_fields and has_prev_close else ("retry_required" if not has_major_fields else "missing_prev_close")
+            logger.debug(
+                "board attempt code=%s first_exchange=%s tried_exchanges=%s chosen_exchange=%s result=%s",
+                code,
+                first_exchange,
+                tried_exchanges,
+                exchange_code,
+                result,
+            )
+            return payload, {
+                "code": code,
+                "first_exchange": first_exchange,
+                "tried_exchanges": tried_exchanges,
+                "chosen_exchange": exchange_code,
+                "request_symbol": request_symbol,
+                "result": result,
+                "recoverable_errors": recoverable_errors,
+                "fallback_exchange_used": exchange_code != first_exchange,
+                "has_prev_close": has_prev_close,
+                "has_major_fields": has_major_fields,
+                "registry_reset_used": registry_reset_used,
+                "hard_fail_reason": "",
+            }
+        assert error_info is not None
+        if int(error_info.get("error_code") or 0) == 4002006 and not registry_reset_used:
+            registry_reset_used = True
+            reset_result = _attempt_unregister_all(settings, token, context_label=f"board_fetch:{code}")
+            error_info["registry_reset"] = reset_result
+            time.sleep(float(settings.get("KABU_PUSH_TIMEOUT_SECONDS", 4.0)))
+            retry_payload, retry_error_info = _try_fetch_board(settings, token, request_symbol)
+            if retry_payload is not None:
+                has_prev_close = _fill_prev_close_from_base(retry_payload, base_df, code)
+                has_major_fields = _board_has_major_fields(retry_payload)
+                result = "success" if has_major_fields and has_prev_close else ("retry_required" if not has_major_fields else "missing_prev_close")
+                logger.debug(
+                    "board attempt code=%s first_exchange=%s tried_exchanges=%s chosen_exchange=%s result=%s",
+                    code,
+                    first_exchange,
+                    tried_exchanges,
+                    exchange_code,
+                    f"{result}_after_registry_reset",
+                )
+                return retry_payload, {
+                    "code": code,
+                    "first_exchange": first_exchange,
+                    "tried_exchanges": tried_exchanges,
+                    "chosen_exchange": exchange_code,
+                    "request_symbol": request_symbol,
+                    "result": result,
+                    "recoverable_errors": recoverable_errors,
+                    "fallback_exchange_used": exchange_code != first_exchange,
+                    "has_prev_close": has_prev_close,
+                    "has_major_fields": has_major_fields,
+                    "registry_reset_used": True,
+                    "hard_fail_reason": "",
+                }
+            if retry_error_info is not None and int(retry_error_info.get("error_code") or 0) == 4002006:
+                raise PipelineFailClosed(
+                    f"fail-closed: board request failed after registry reset symbol={request_symbol} status={retry_error_info.get('status_code')} body={retry_error_info.get('body_short')}"
+                )
+            if retry_error_info is not None:
+                error_info = retry_error_info
+        if bool(error_info.get("recoverable")):
+            recoverable_errors.append(error_info)
+            continue
+        logger.debug(
+            "board attempt code=%s first_exchange=%s tried_exchanges=%s chosen_exchange=%s result=%s",
+            code,
+            first_exchange,
+            tried_exchanges,
+            exchange_code,
+            "hard_fail",
+        )
+        raise PipelineFailClosed(
+            f"fail-closed: board request failed symbol={request_symbol} status={error_info.get('status_code')} body={error_info.get('body_short')}"
+        )
+    logger.debug(
+        "board attempt code=%s first_exchange=%s tried_exchanges=%s chosen_exchange=%s result=%s",
+        code,
+        first_exchange,
+        tried_exchanges,
+        "",
+        "not_found",
+    )
+    return None, {
+        "code": code,
+        "first_exchange": first_exchange,
+        "tried_exchanges": tried_exchanges,
+        "chosen_exchange": None,
+        "request_symbol": "",
+        "result": "not_found",
+        "recoverable_errors": recoverable_errors,
+        "fallback_exchange_used": False,
+        "has_prev_close": False,
+        "has_major_fields": False,
+        "registry_reset_used": registry_reset_used,
+        "hard_fail_reason": "",
     }
 
 
@@ -501,23 +775,83 @@ def enrich_with_board_snapshot(quotes_df: pd.DataFrame, base_df: pd.DataFrame, s
     logger.info("enrich_with_board_snapshot start")
     rows: list[dict[str, Any]] = []
     register_targets: list[dict[str, Any]] = []
+    excluded_missing_prev_close = 0
+    attempted_count = 0
+    skipped_not_found_count = 0
+    skipped_codes: list[dict[str, Any]] = []
+    fallback_exchange_success_count = 0
+    failed_hard_count = 0
+    unregister_all_called = False
+    unregister_all_retry_called = False
+    register_error_count = 0
+    register_error_codes: list[str] = []
+    hard_fail_reason = ""
+    used_live_data = True
+    initial_unregister_result = _attempt_unregister_all(settings, token, context_label="board_phase_start")
+    unregister_all_called = bool(initial_unregister_result.get("called"))
     for _, row in quotes_df.iterrows():
         code = str(row["code"])
         if not _is_code4(code):
             logger.debug("board skipped invalid code=%s", code)
             continue
-        resolved_exchange = _resolve_primary_exchange(code, row.get("exchange"), row.get("exchange_name"), source_hint="deep_watch")
-        request_symbol = _build_board_symbol(code, resolved_exchange)
-        logger.debug("board request code=%s request_symbol=%s resolved_exchange=%s retry=%s", code, request_symbol, resolved_exchange, False)
-        payload = _fetch_board(settings, token, request_symbol)
-        rows.append(_board_to_row(code, payload, request_symbol, resolved_exchange))
-        if not _board_has_major_fields(payload):
+        attempted_count += 1
+        try:
+            payload, attempt_diag = _fetch_board_with_exchange_fallback(settings, token, base_df, row)
+        except PipelineFailClosed as exc:
+            failed_hard_count += 1
+            hard_fail_reason = str(exc)
+            raise
+        if payload is None:
+            skipped_not_found_count += 1
+            if len(skipped_codes) < 20:
+                skipped_codes.append(
+                    {
+                        "code": code,
+                        "first_exchange": attempt_diag["first_exchange"],
+                        "tried_exchanges": attempt_diag["tried_exchanges"],
+                        "errors": [
+                            {
+                                "status_code": item.get("status_code"),
+                                "error_code": item.get("error_code"),
+                                "message": item.get("message"),
+                            }
+                            for item in attempt_diag["recoverable_errors"]
+                        ],
+                    }
+                )
+            continue
+        resolved_exchange = int(attempt_diag["chosen_exchange"])
+        request_symbol = str(attempt_diag["request_symbol"])
+        has_major_fields = bool(attempt_diag["has_major_fields"])
+        has_prev_close = bool(attempt_diag["has_prev_close"])
+        if bool(attempt_diag["fallback_exchange_used"]):
+            fallback_exchange_success_count += 1
+        if bool(attempt_diag.get("registry_reset_used")):
+            unregister_all_called = True
+        if has_major_fields and has_prev_close:
+            rows.append(_board_to_row(code, payload, request_symbol, resolved_exchange))
+            continue
+        if not has_major_fields:
             register_targets.append({"code": code, "resolved_exchange": resolved_exchange, "request_symbol": request_symbol})
+            rows.append(_board_to_row(code, payload, request_symbol, resolved_exchange))
+            continue
+        excluded_missing_prev_close += 1
+        logger.warning("board excluded due to missing prev_close after base fallback code=%s request_symbol=%s", code, request_symbol)
     retry_count = 0
     if register_targets:
-        register_df = pd.DataFrame(register_targets).drop_duplicates("code")
-        _unregister_all(settings, token)
-        _register_symbols(settings, token, register_df)
+        successful_codes = {str(row["code"]) for row in rows}
+        register_df = pd.DataFrame(register_targets)
+        register_df["code"] = register_df["code"].astype(str)
+        register_df = register_df[~register_df["code"].isin(successful_codes)].drop_duplicates(["code", "resolved_exchange"]).reset_index(drop=True)
+        retry_unregister_result = _attempt_unregister_all(settings, token, context_label="board_register_retry")
+        unregister_all_retry_called = bool(retry_unregister_result.get("called"))
+        try:
+            _register_symbols(settings, token, register_df)
+        except PipelineFailClosed as exc:
+            register_error_count += 1
+            register_error_codes.append("register_failed")
+            hard_fail_reason = str(exc)
+            raise
         time.sleep(float(settings.get("KABU_PUSH_TIMEOUT_SECONDS", 4.0)))
         row_map = {row["code"]: row for row in rows}
         for _, register_row in register_df.iterrows():
@@ -525,17 +859,63 @@ def enrich_with_board_snapshot(quotes_df: pd.DataFrame, base_df: pd.DataFrame, s
             request_symbol = str(register_row["request_symbol"])
             resolved_exchange = int(register_row["resolved_exchange"])
             logger.debug("board request code=%s request_symbol=%s resolved_exchange=%s retry=%s", code, request_symbol, resolved_exchange, True)
+            time.sleep(0.13)
             payload = _fetch_board(settings, token, request_symbol)
-            row_map[code] = _board_to_row(code, payload, request_symbol, resolved_exchange)
             retry_count += 1
             if not _board_has_major_fields(payload):
                 raise PipelineFailClosed(f"fail-closed: board snapshot still missing major fields after register retry code={code} request_symbol={request_symbol}")
+            if not _fill_prev_close_from_base(payload, base_df, code):
+                excluded_missing_prev_close += 1
+                row_map.pop(code, None)
+                logger.warning("board excluded due to missing prev_close after retry/base fallback code=%s request_symbol=%s", code, request_symbol)
+                continue
+            row_map[code] = _board_to_row(code, payload, request_symbol, resolved_exchange)
         rows = list(row_map.values())
     board_df = pd.DataFrame(rows)
+    selected_count = int(len(quotes_df))
+    minimum_success_count = int(math.ceil(selected_count * 0.5)) if selected_count > 0 else 0
+    success_count = int(len(board_df))
     if board_df.empty:
         raise PipelineFailClosed("fail-closed: board enrichment produced no rows.")
-    logger.info("enrich_with_board_snapshot end rows=%s retry_count=%s", len(board_df), retry_count)
-    return board_df, {"retry_count": retry_count, "row_count": int(len(board_df))}
+    if success_count < minimum_success_count:
+        raise PipelineFailClosed(
+            f"fail-closed: board enrichment success rate too low success_count={success_count} selected_count={selected_count} minimum_success_count={minimum_success_count}"
+        )
+    warning_messages: list[str] = []
+    if skipped_not_found_count or excluded_missing_prev_close:
+        warning_messages.append(
+            f"board partial success: success_count={success_count} selected_count={selected_count} skipped_not_found_count={skipped_not_found_count} excluded_missing_prev_close={excluded_missing_prev_close}"
+        )
+    logger.info(
+        "enrich_with_board_snapshot end success_count=%s selected_count=%s retry_count=%s skipped_not_found_count=%s fallback_exchange_success_count=%s",
+        success_count,
+        selected_count,
+        retry_count,
+        skipped_not_found_count,
+        fallback_exchange_success_count,
+    )
+    return board_df, {
+        "attempted_count": attempted_count,
+        "success_count": success_count,
+        "skipped_not_found_count": skipped_not_found_count,
+        "skipped_codes": skipped_codes,
+        "retried_count": retry_count,
+        "fallback_exchange_success_count": fallback_exchange_success_count,
+        "failed_hard_count": failed_hard_count,
+        "row_count": success_count,
+        "selected_count": selected_count,
+        "minimum_success_count": minimum_success_count,
+        "excluded_missing_prev_close": excluded_missing_prev_close,
+        "warning_messages": warning_messages,
+        "unregister_all_called": unregister_all_called,
+        "unregister_all_retry_called": unregister_all_retry_called,
+        "register_target_count": int(len(register_df)) if register_targets else 0,
+        "register_error_count": register_error_count,
+        "register_error_codes": register_error_codes,
+        "hard_fail_reason": hard_fail_reason,
+        "used_live_data": used_live_data,
+        "initial_unregister": initial_unregister_result,
+    }
 
 
 def _score_percentile(series: pd.Series) -> pd.Series:
@@ -546,7 +926,12 @@ def _score_percentile(series: pd.Series) -> pd.Series:
 
 
 def _make_nikkei_search_link(name: str, code: str) -> str:
-    return f"https://www.nikkei.com/search?keyword={quote_plus(f'{name} {code}')}"
+    del code
+    name = str(name or "").strip()
+    if not name:
+        return ""
+    # TODO: 必要になったら将来ここで事前ヒット確認を追加する。
+    return f"https://www.nikkei.com/search?keyword={quote_plus(name)}"
 
 
 def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.DataFrame, board_df: pd.DataFrame, base_df: pd.DataFrame, now_ts: datetime) -> dict[str, Any]:
@@ -556,8 +941,8 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
     merged["open_price"] = _coerce_numeric(merged["Open"])
     merged["high_price"] = _coerce_numeric(merged["High"])
     merged["low_price"] = _coerce_numeric(merged["Low"])
-    merged["live_volume"] = _coerce_numeric(merged["Volume"])
-    merged["live_turnover"] = _coerce_numeric(merged["Turnover"])
+    merged["live_volume"] = _coerce_numeric(merged["Volume"]).fillna(_coerce_numeric(merged["volume_latest"]))
+    merged["live_turnover"] = _coerce_numeric(merged["Turnover"]).fillna(_coerce_numeric(merged["turnover_latest"]))
     merged["live_price_time"] = merged["CurrentPriceTime"].astype(str)
     merged["live_ret_vs_prev_close"] = (merged["live_price"] / merged["prev_close"] - 1.0) * 100.0
     merged["live_ret_from_open"] = (merged["live_price"] / merged["open_price"] - 1.0) * 100.0
@@ -574,68 +959,64 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
     merged["nikkei_search"] = merged.apply(lambda row: _make_nikkei_search_link(str(row.get("name", "")), str(row.get("code", ""))), axis=1)
     sector_summary = merged.groupby("sector_name", as_index=False).agg(live_sector_ret=("live_ret_vs_prev_close", "mean"), live_sector_turnover_score=("live_turnover_ratio_20d", "mean"), sector_rank_1w=("sector_rank_1w", "min"), leaders=("name", lambda s: ", ".join(s.head(3)))).sort_values(["live_sector_ret", "live_sector_turnover_score"], ascending=[False, False]).reset_index(drop=True)
     if not industry_df.empty and "sector_name" in industry_df.columns:
-        sector_summary = sector_summary.merge(industry_df[["sector_name", "rank_position"]].rename(columns={"rank_position": "industry_rank_live"}), on="sector_name", how="left")
+        sector_summary = sector_summary.merge(
+            industry_df[["sector_name", "rank_position"]].drop_duplicates("sector_name").rename(columns={"rank_position": "industry_rank_live"}),
+            on="sector_name",
+            how="left",
+        )
     leaders_by_sector = merged.sort_values("total_score", ascending=False).groupby("sector_name", as_index=False).head(3)[["sector_name", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "total_score"]]
     focus_candidates = merged.sort_values("total_score", ascending=False).copy()
     focus_candidates["52w_flag"] = focus_candidates.apply(lambda row: "new_high" if bool(row.get("is_new_52w_high")) else ("near_high" if bool(row.get("is_near_52w_high")) else ""), axis=1)
+    meta = build_snapshot_meta(mode=mode, generated_at=now_ts, source_profile="local_kabu_jq_yanoshin", includes_kabu=True)
     return {
-        "meta": {"generated_at": now_ts.isoformat(), "mode": mode},
+        "meta": meta,
         "sector_summary": sector_summary,
         "leaders_by_sector": leaders_by_sector,
-        "focus_candidates": focus_candidates[["code", "name", "sector_name", "live_price", "live_ret_vs_prev_close", "live_ret_from_open", "live_volume", "live_turnover", "live_volume_ratio_20d", "live_turnover_ratio_20d", "ret_1w", "ret_1m", "52w_flag", "material_title", "focus_reason", "total_score", "nikkei_search", "material_link"]].head(30).reset_index(drop=True),
-        "diagnostics": {"mode": mode, "generated_at": now_ts.isoformat(), "focus_candidate_count": int(len(focus_candidates)), "ranking_candidate_count": int(len(ranking_df))},
+        "focus_candidates": focus_candidates[["code", "name", "sector_name", "live_price", "live_ret_vs_prev_close", "live_ret_from_open", "live_volume", "avg_volume_20d", "live_turnover", "avg_turnover_20d", "live_volume_ratio_20d", "live_turnover_ratio_20d", "ret_1w", "ret_1m", "52w_flag", "material_title", "focus_reason", "total_score", "nikkei_search", "material_link"]].head(30).reset_index(drop=True),
+        "diagnostics": {"mode": mode, "generated_at": meta["generated_at"], "focus_candidate_count": int(len(focus_candidates)), "ranking_candidate_count": int(len(ranking_df)), "includes_kabu": True},
     }
-
-
-def _snapshot_paths(mode: str, settings: dict[str, Any], now_ts: datetime) -> dict[str, Path]:
-    output_dir = ROOT_DIR / str(settings.get("SNAPSHOT_OUTPUT_DIR", "data/snapshots"))
-    output_dir.mkdir(parents=True, exist_ok=True)
-    stem = now_ts.strftime("%Y-%m-%d_%H%M%S_now") if mode == "now" else now_ts.strftime(f"%Y-%m-%d_{mode}")
-    latest_stem = "latest_now" if mode == "now" else f"latest_{mode}"
-    return {"archive_json": output_dir / f"{stem}.json", "archive_md": output_dir / f"{stem}.md", "latest_json": output_dir / f"{latest_stem}.json", "latest_md": output_dir / f"{latest_stem}.md"}
-
-
-def _bundle_to_json_ready(bundle: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "meta": bundle["meta"],
-        "sector_summary": bundle["sector_summary"].to_dict(orient="records"),
-        "leaders_by_sector": bundle["leaders_by_sector"].to_dict(orient="records"),
-        "focus_candidates": bundle["focus_candidates"].to_dict(orient="records"),
-        "diagnostics": bundle["diagnostics"],
-    }
-
-
-def _bundle_to_markdown(bundle: dict[str, Any]) -> str:
-    lines = [f"# Snapshot {bundle['meta']['mode']}", "", f"- generated_at: {bundle['meta']['generated_at']}", f"- mode: {bundle['meta']['mode']}", "", "## 強いセクター"]
-    for _, row in bundle["sector_summary"].head(10).iterrows():
-        lines.append(f"- {row.get('sector_name', '')}: live_ret={row.get('live_sector_ret', '')} turnover_score={row.get('live_sector_turnover_score', '')}")
-    lines.extend(["", "## セクター別中心銘柄"])
-    for _, row in bundle["leaders_by_sector"].head(15).iterrows():
-        lines.append(f"- {row.get('sector_name', '')}: {row.get('code', '')} {row.get('name', '')} score={row.get('total_score', '')}")
-    lines.extend(["", "## 需給ブレイク候補"])
-    for _, row in bundle["focus_candidates"].head(20).iterrows():
-        lines.append(f"- {row.get('code', '')} {row.get('name', '')}: {row.get('focus_reason', '')}")
-    lines.extend(["", "## 注意点", "- 過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。"])
-    return "\n".join(lines) + "\n"
 
 
 def write_snapshot_bundle(bundle: dict[str, Any], settings: dict[str, Any], *, write_drive: bool = False) -> dict[str, str]:
-    paths = _snapshot_paths(bundle["meta"]["mode"], settings, datetime.fromisoformat(bundle["meta"]["generated_at"]))
-    json_ready = _bundle_to_json_ready(bundle)
-    markdown_text = _bundle_to_markdown(bundle)
-    for key in ["archive_json", "latest_json"]:
-        paths[key].write_text(json.dumps(json_ready, ensure_ascii=False, indent=2), encoding="utf-8")
-        logger.info("snapshot write path %s", paths[key])
-    for key in ["archive_md", "latest_md"]:
-        paths[key].write_text(markdown_text, encoding="utf-8")
-        logger.info("snapshot write path %s", paths[key])
-    drive_dir = str(settings.get("DRIVE_SYNC_DIR", "")).strip()
-    if write_drive and drive_dir:
-        drive_path = Path(drive_dir)
-        drive_path.mkdir(parents=True, exist_ok=True)
-        for key in ["latest_json", "latest_md", "archive_json", "archive_md"]:
-            shutil.copy2(paths[key], drive_path / paths[key].name)
-    return {key: str(value) for key, value in paths.items()}
+    markdown_text = bundle_to_markdown(bundle)
+    result = write_snapshot_bundle_to_store(
+        mode=str(bundle["meta"]["mode"]),
+        generated_at=str(bundle["meta"]["generated_at"]),
+        json_text=bundle_to_json_text(bundle),
+        markdown_text=markdown_text,
+        settings=settings,
+        root_dir=ROOT_DIR,
+        write_drive=write_drive,
+    )
+    for path in result.paths.values():
+        logger.info("snapshot write path %s", path)
+    return {
+        **result.paths,
+        "source_label": result.source_label,
+        "backend_name": result.backend_name,
+        "warning_message": result.warning_message,
+    }
+
+
+def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    settings = settings or get_settings()
+    payload_text, store_result = read_snapshot_json(mode, settings, ROOT_DIR)
+    payload = json.loads(payload_text)
+    meta = normalize_snapshot_meta(payload.get("meta", {}))
+    focus_candidates = pd.DataFrame(payload.get("focus_candidates", []))
+    if not focus_candidates.empty and "name" in focus_candidates.columns:
+        focus_candidates["nikkei_search"] = focus_candidates.apply(lambda row: _make_nikkei_search_link(str(row.get("name", "")), str(row.get("code", ""))), axis=1)
+    return {
+        "meta": meta,
+        "sector_summary": pd.DataFrame(payload.get("sector_summary", [])),
+        "leaders_by_sector": pd.DataFrame(payload.get("leaders_by_sector", [])),
+        "focus_candidates": focus_candidates,
+        "diagnostics": payload.get("diagnostics", {}),
+        "paths": store_result.paths,
+        "snapshot_source_label": store_result.source_label,
+        "snapshot_backend_name": store_result.backend_name,
+        "snapshot_warning_message": store_result.warning_message,
+    }
 
 
 def run_cli(mode: str, write_drive: bool = False, fast_check: bool = False) -> dict[str, Any]:
@@ -651,9 +1032,14 @@ def run_cli(mode: str, write_drive: bool = False, fast_check: bool = False) -> d
             ranking_df, industry_df, ranking_diag = build_market_scan_universe(base_df, settings, token)
         deep_watch_df, deep_watch_diag = select_deep_watch_universe(ranking_df, base_df, settings, mode)
         board_df, board_diag = enrich_with_board_snapshot(deep_watch_df, base_df, settings, token)
-        bundle = build_live_snapshot(mode, ranking_df, industry_df, board_df, base_df, datetime.now())
-        bundle["diagnostics"].update({"base_meta": base_meta, "ranking": ranking_diag, "deep_watch": deep_watch_diag, "board": board_diag})
-        bundle["paths"] = write_snapshot_bundle(bundle, settings, write_drive=write_drive)
+        bundle = build_live_snapshot(mode, ranking_df, industry_df, board_df, base_df, datetime.now(timezone.utc))
+        bundle["diagnostics"].update({"base_meta": base_meta, "ranking": ranking_diag, "deep_watch": deep_watch_diag, "board": board_diag, "write_completed": False})
+        bundle["diagnostics"]["write_completed"] = True
+        write_result = write_snapshot_bundle(bundle, settings, write_drive=write_drive)
+        bundle["snapshot_source_label"] = str(write_result.pop("source_label", ""))
+        bundle["snapshot_backend_name"] = str(write_result.pop("backend_name", ""))
+        bundle["snapshot_warning_message"] = str(write_result.pop("warning_message", ""))
+        bundle["paths"] = write_result
         return bundle
     except JQuantsAuthError as exc:
         logger.error("fail-closed reason: %s", exc)
@@ -665,28 +1051,75 @@ def run_cli(mode: str, write_drive: bool = False, fast_check: bool = False) -> d
         raise
 
 
+def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapshot: bool = False) -> None:
+    st.success(source_label)
+    snapshot_source_label = str(bundle.get("snapshot_source_label", "")).strip()
+    if snapshot_source_label:
+        st.caption(snapshot_source_label)
+    snapshot_warning_message = str(bundle.get("snapshot_warning_message", "")).strip()
+    if snapshot_warning_message:
+        st.info(f"共通保存先を利用できなかったためローカルを使用しました。理由: {snapshot_warning_message}")
+    if bundle.get("paths"):
+        st.write(bundle["paths"])
+    meta = bundle.get("meta", {})
+    generated_at_jst = str(meta.get("generated_at_jst", "") or meta.get("generated_at", ""))
+    mode = str(meta.get("mode", ""))
+    is_true_timepoint = "はい" if bool(meta.get("is_true_timepoint")) else "いいえ"
+    expected_time_label = str(meta.get("expected_time_label", "")).strip()
+    if generated_at_jst or mode:
+        st.markdown(
+            "### 保存データ情報\n"
+            f"- モード: `{mode}`\n"
+            f"- 保存時刻(JST): `{generated_at_jst}`\n"
+            f"- true timepoint: `{is_true_timepoint}`\n"
+            f"- 想定時刻: `{expected_time_label}`"
+        )
+    warning_text = saved_snapshot_timing_warning(meta) if is_saved_snapshot else ""
+    if warning_text:
+        st.warning(warning_text)
+    st.subheader("セクター要約")
+    st.dataframe(bundle["sector_summary"].rename(columns=UI_COLUMN_LABELS), use_container_width=True, hide_index=True)
+    st.subheader("セクター別主力銘柄")
+    st.dataframe(bundle["leaders_by_sector"].rename(columns=UI_COLUMN_LABELS), use_container_width=True, hide_index=True)
+    st.subheader("注目候補")
+    focus_candidates_view = bundle["focus_candidates"].rename(columns=UI_COLUMN_LABELS)
+    st.dataframe(
+        focus_candidates_view,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "日経で検索": st.column_config.LinkColumn("日経で検索", display_text="日経で検索"),
+            "材料リンク": st.column_config.LinkColumn("材料リンク", display_text="リンクを開く"),
+        },
+    )
+
+
 def render_app() -> None:
     st.set_page_config(page_title="Sector Strength Live", layout="wide")
-    st.title("Sector Strength Live")
-    st.caption("J-Quants を土台にして、kabu ステーション API の live データを重ねて snapshot を作成します。")
-    st.info("過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。")
-    mode = st.selectbox("mode", ["0915", "1130", "1530", "now"], index=0)
-    write_drive = st.checkbox("Google Drive 同期フォルダへも保存", value=False)
-    fast_check = st.checkbox("fast-check", value=False)
-    if st.button("snapshot を作成"):
-        try:
-            with safe_spinner("Building snapshot", enabled=True):
-                bundle = run_cli(mode=mode, write_drive=write_drive, fast_check=fast_check)
-            st.success("snapshot generated")
-            st.write(bundle["paths"])
-            st.subheader("live sector")
-            st.dataframe(bundle["sector_summary"], use_container_width=True, hide_index=True)
-            st.subheader("leaders by sector")
-            st.dataframe(bundle["leaders_by_sector"], use_container_width=True, hide_index=True)
-            st.subheader("focus candidates")
-            st.dataframe(bundle["focus_candidates"], use_container_width=True, hide_index=True)
-        except Exception as exc:
-            st.error(str(exc))
+    st.title("セクター強度ライブ")
+    st.caption("J-Quants を土台に、kabu ステーション API のライブデータを重ねてスナップショットを作成・表示します。")
+    st.info("過去の任意時点をあとから再取得することはできません。保存済みスナップショットのみ再表示できます。")
+    view_mode = st.radio("表示方法", ["A: ライブでスナップショットを作成", "B: 保存済みスナップショットを表示"], index=0)
+    mode = st.selectbox("表示モード", ["0915", "1130", "1530", "now"], index=0)
+    if view_mode.startswith("A:"):
+        write_drive = st.checkbox("Google Drive 同期フォルダへも保存", value=False)
+        fast_check = st.checkbox("簡易チェックで実行", value=False)
+        if st.button("スナップショットを作成"):
+            try:
+                with safe_spinner("スナップショットを作成中...", enabled=True):
+                    bundle = run_cli(mode=mode, write_drive=write_drive, fast_check=fast_check)
+                _render_bundle(bundle, source_label="スナップショットを作成しました")
+            except Exception as exc:
+                st.error(str(exc))
+    else:
+        if st.button("保存済みスナップショットを表示"):
+            try:
+                bundle = load_saved_snapshot(mode)
+                _render_bundle(bundle, source_label="保存済みスナップショットを表示しました", is_saved_snapshot=True)
+            except FileNotFoundError as exc:
+                st.warning(str(exc))
+            except Exception as exc:
+                st.error(str(exc))
 
 
 if __name__ == "__main__":
