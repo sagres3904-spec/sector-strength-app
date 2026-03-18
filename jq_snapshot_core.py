@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 import requests
+from snapshot_time import build_snapshot_meta
 
 try:
     import tomllib
@@ -369,20 +370,21 @@ def build_jq_yanoshin_snapshot(mode: str, base_df: pd.DataFrame, *, now_ts: date
     leaders_by_sector = merged.sort_values("total_score", ascending=False).groupby("sector_name", as_index=False).head(3)[["sector_name", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "total_score"]]
     focus_candidates = merged.sort_values("total_score", ascending=False).copy()
     focus_candidates["52w_flag"] = focus_candidates.apply(lambda row: "new_high" if bool(row.get("is_new_52w_high")) else ("near_high" if bool(row.get("is_near_52w_high")) else ""), axis=1)
+    meta = build_snapshot_meta(
+        mode=mode,
+        generated_at=now_ts,
+        source_profile=source_profile,
+        includes_kabu=False,
+        snapshot_backend=snapshot_backend,
+    )
     return {
-        "meta": {
-            "generated_at": now_ts.isoformat(),
-            "mode": mode,
-            "source_profile": source_profile,
-            "includes_kabu": False,
-            "snapshot_backend": snapshot_backend,
-        },
+        "meta": meta,
         "sector_summary": sector_summary,
         "leaders_by_sector": leaders_by_sector,
         "focus_candidates": focus_candidates[FOCUS_CANDIDATE_COLUMNS].head(30).reset_index(drop=True),
         "diagnostics": {
             "mode": mode,
-            "generated_at": now_ts.isoformat(),
+            "generated_at": meta["generated_at"],
             "focus_candidate_count": int(len(focus_candidates)),
             "ranking_candidate_count": 0,
             "includes_kabu": False,

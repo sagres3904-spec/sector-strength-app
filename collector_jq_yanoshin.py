@@ -1,6 +1,6 @@
 import argparse
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +32,7 @@ def run_collector(*, mode: str, snapshot_date: str | None = None, backend: str |
     bundle = build_jq_yanoshin_snapshot(
         mode,
         base_df,
-        now_ts=datetime.now(),
+        now_ts=datetime.now(timezone.utc),
         source_profile="cloud_jq_yanoshin",
         snapshot_backend=resolved_backend,
     )

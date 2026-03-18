@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 .streamlit/secrets.toml
-.venv/
-__pycache__/
-*.pyc
+handoff/
+data/snapshots/*
+!data/snapshots/latest_*.json
+!data/snapshots/latest_*.md
