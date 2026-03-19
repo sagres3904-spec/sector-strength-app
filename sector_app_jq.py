@@ -5,6 +5,7 @@ import os
 import re
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -13,9 +14,166 @@ from urllib.parse import quote_plus
 import pandas as pd
 import requests
 import streamlit as st
-from snapshot_bundle import bundle_to_json_text, bundle_to_markdown
-from snapshot_store import read_snapshot_json, write_snapshot_bundle as write_snapshot_bundle_to_store
-from snapshot_time import build_snapshot_meta, normalize_snapshot_meta, saved_snapshot_timing_warning
+
+try:
+    from snapshot_bundle import bundle_to_json_text, bundle_to_markdown
+    from snapshot_store import read_snapshot_json, write_snapshot_bundle as write_snapshot_bundle_to_store
+    from snapshot_time import build_snapshot_meta, normalize_snapshot_meta, saved_snapshot_timing_warning
+except ModuleNotFoundError:
+    @dataclass
+    class _SnapshotStoreResult:
+        paths: dict[str, str]
+        source_label: str
+        backend_name: str
+        warning_message: str
+
+
+    def _snapshot_dir(settings: dict[str, Any], root_dir: Path) -> Path:
+        output_dir = str(settings.get("SNAPSHOT_OUTPUT_DIR", "data/snapshots")).strip() or "data/snapshots"
+        output_path = Path(output_dir)
+        if not output_path.is_absolute():
+            output_path = root_dir / output_path
+        return output_path
+
+
+    def _json_ready(value: Any) -> Any:
+        if isinstance(value, pd.DataFrame):
+            return value.to_dict(orient="records")
+        if isinstance(value, pd.Series):
+            return value.to_dict()
+        if isinstance(value, dict):
+            return {str(k): _json_ready(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_json_ready(item) for item in value]
+        if isinstance(value, tuple):
+            return [_json_ready(item) for item in value]
+        if isinstance(value, Path):
+            return str(value)
+        return value
+
+
+    def bundle_to_json_text(bundle: dict[str, Any]) -> str:
+        return json.dumps(_json_ready(bundle), ensure_ascii=False, indent=2, default=str)
+
+
+    def bundle_to_markdown(bundle: dict[str, Any]) -> str:
+        meta = normalize_snapshot_meta(bundle.get("meta", {}))
+        diagnostics = bundle.get("diagnostics", {})
+        generated_at_jst = str(meta.get("generated_at_jst", "") or meta.get("generated_at", ""))
+        return "\n".join(
+            [
+                "# Sector Strength Snapshot",
+                "",
+                f"- mode: {meta.get('mode', '')}",
+                f"- generated_at_jst: {generated_at_jst}",
+                f"- is_true_timepoint: {bool(meta.get('is_true_timepoint'))}",
+                f"- diagnostics_keys: {', '.join(sorted(str(key) for key in diagnostics.keys()))}",
+            ]
+        )
+
+
+    def _expected_time_label(mode: str) -> str:
+        return {"0915": "09:15", "1130": "11:30", "1530": "15:30", "now": "now"}.get(str(mode), str(mode))
+
+
+    def build_snapshot_meta(mode: str, generated_at: Any, source_profile: str = "", includes_kabu: bool = True) -> dict[str, Any]:
+        if isinstance(generated_at, str):
+            dt = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+        else:
+            dt = generated_at
+        if not isinstance(dt, datetime):
+            dt = datetime.now(timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt_utc = dt.astimezone(timezone.utc)
+        dt_jst = dt_utc.astimezone(timezone(timedelta(hours=9)))
+        return {
+            "generated_at": dt_utc.isoformat(),
+            "generated_at_utc": dt_utc.isoformat(),
+            "generated_at_jst": dt_jst.strftime("%Y-%m-%d %H:%M:%S JST"),
+            "mode": str(mode),
+            "is_true_timepoint": False,
+            "expected_time_label": _expected_time_label(str(mode)),
+            "source_profile": str(source_profile),
+            "includes_kabu": bool(includes_kabu),
+        }
+
+
+    def normalize_snapshot_meta(meta: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(meta or {})
+        generated_at = str(normalized.get("generated_at", "") or normalized.get("generated_at_utc", ""))
+        mode = str(normalized.get("mode", ""))
+        if generated_at:
+            normalized.update(build_snapshot_meta(mode=mode, generated_at=generated_at, source_profile=str(normalized.get("source_profile", "")), includes_kabu=bool(normalized.get("includes_kabu", True))))
+            normalized.update(meta or {})
+            normalized["expected_time_label"] = str(normalized.get("expected_time_label", "") or _expected_time_label(mode))
+            if "generated_at_jst" not in normalized:
+                normalized["generated_at_jst"] = build_snapshot_meta(mode=mode, generated_at=generated_at).get("generated_at_jst", "")
+        else:
+            normalized.setdefault("generated_at_jst", "")
+            normalized.setdefault("expected_time_label", _expected_time_label(mode))
+            normalized.setdefault("is_true_timepoint", False)
+        return normalized
+
+
+    def saved_snapshot_timing_warning(meta: dict[str, Any]) -> str:
+        normalized = normalize_snapshot_meta(meta)
+        if bool(normalized.get("is_true_timepoint")):
+            return ""
+        generated_at_jst = str(normalized.get("generated_at_jst", "")).strip()
+        expected_time_label = str(normalized.get("expected_time_label", "")).strip()
+        if generated_at_jst and expected_time_label:
+            return f"保存時刻は {generated_at_jst} です。想定時刻 {expected_time_label} の厳密な true timepoint ではありません。"
+        return ""
+
+
+    def read_snapshot_json(mode: str, settings: dict[str, Any], root_dir: Path) -> tuple[str, _SnapshotStoreResult]:
+        snapshot_path = _snapshot_dir(settings, root_dir) / f"latest_{mode}.json"
+        if not snapshot_path.exists():
+            raise FileNotFoundError(f"まだ snapshot がありません: latest_{mode}.json")
+        payload_text = snapshot_path.read_text(encoding="utf-8")
+        return payload_text, _SnapshotStoreResult(
+            paths={"json_path": str(snapshot_path)},
+            source_label=f"latest_{mode}.json を読み込みました",
+            backend_name="local",
+            warning_message="",
+        )
+
+
+    def write_snapshot_bundle_to_store(
+        *,
+        mode: str,
+        generated_at: str,
+        json_text: str,
+        markdown_text: str,
+        settings: dict[str, Any],
+        root_dir: Path,
+        write_drive: bool = False,
+    ) -> _SnapshotStoreResult:
+        snapshot_dir = _snapshot_dir(settings, root_dir)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        generated_dt = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+        generated_jst = generated_dt.astimezone(timezone(timedelta(hours=9)))
+        timestamp_prefix = generated_jst.strftime("%Y-%m-%d_%H%M%S")
+        latest_json = snapshot_dir / f"latest_{mode}.json"
+        latest_md = snapshot_dir / f"latest_{mode}.md"
+        dated_json = snapshot_dir / f"{timestamp_prefix}_{mode}.json"
+        dated_md = snapshot_dir / f"{timestamp_prefix}_{mode}.md"
+        latest_json.write_text(json_text, encoding="utf-8")
+        latest_md.write_text(markdown_text, encoding="utf-8")
+        dated_json.write_text(json_text, encoding="utf-8")
+        dated_md.write_text(markdown_text, encoding="utf-8")
+        return _SnapshotStoreResult(
+            paths={
+                "json_path": str(latest_json),
+                "markdown_path": str(latest_md),
+                "dated_json_path": str(dated_json),
+                "dated_markdown_path": str(dated_md),
+            },
+            source_label=f"latest_{mode}.json を更新しました",
+            backend_name="local",
+            warning_message="" if not write_drive else "fallback writer ignores write_drive option",
+        )
 
 try:
     import tomllib
@@ -36,6 +194,7 @@ MODE_SCORE_WEIGHTS = {
     "1530": {"live_ret_from_open": 1.3, "live_ret_vs_prev_close": 1.2, "closing_strength": 1.2, "high_close_score": 1.0, "live_volume_ratio_20d": 1.0, "live_turnover_ratio_20d": 1.2, "ret_1w": 0.7, "ret_1m": 0.6, "material_score": 0.3},
     "now": {"live_ret_from_open": 1.4, "live_ret_vs_prev_close": 1.1, "gap_pct": 1.0, "live_volume_ratio_20d": 1.1, "live_turnover_ratio_20d": 1.3, "ret_1w": 0.6, "ret_1m": 0.5, "material_score": 0.3},
 }
+VIEWER_ONLY_SNAPSHOT_MODES = ("1130", "1530")
 
 logger = logging.getLogger("sector_app_jq")
 if not logger.handlers:
@@ -101,6 +260,20 @@ def _short_body(text: str, limit: int = 160) -> str:
 
 def _is_streamlit_runtime() -> bool:
     return bool(os.environ.get("STREAMLIT_SERVER_PORT") or os.environ.get("STREAMLIT_RUNTIME"))
+
+
+def _snapshot_json_path(mode: str, settings: dict[str, Any] | None = None) -> Path:
+    settings = settings or get_settings()
+    output_dir = str(settings.get("SNAPSHOT_OUTPUT_DIR", "data/snapshots")).strip() or "data/snapshots"
+    output_path = Path(output_dir)
+    if not output_path.is_absolute():
+        output_path = ROOT_DIR / output_path
+    return output_path / f"latest_{mode}.json"
+
+
+def _available_viewer_snapshot_modes(settings: dict[str, Any] | None = None) -> list[str]:
+    settings = settings or get_settings()
+    return [mode for mode in VIEWER_ONLY_SNAPSHOT_MODES if _snapshot_json_path(mode, settings).exists()]
 
 
 @contextmanager
@@ -1077,6 +1250,10 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     warning_text = saved_snapshot_timing_warning(meta) if is_saved_snapshot else ""
     if warning_text:
         st.warning(warning_text)
+    diagnostics = bundle.get("diagnostics", {})
+    if diagnostics:
+        st.markdown("### diagnostics")
+        st.json(diagnostics)
     st.subheader("セクター要約")
     st.dataframe(bundle["sector_summary"].rename(columns=UI_COLUMN_LABELS), use_container_width=True, hide_index=True)
     st.subheader("セクター別主力銘柄")
@@ -1094,9 +1271,34 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     )
 
 
+def _render_viewer_only_app(settings: dict[str, Any]) -> None:
+    st.caption("viewer-only モードです。保存済み snapshot のみ表示します。collector/live 取得は実行しません。")
+    available_modes = _available_viewer_snapshot_modes(settings)
+    if not available_modes:
+        st.warning("まだ snapshot がありません")
+        st.caption("表示対象: latest_1130.json / latest_1530.json")
+        return
+    if len(available_modes) == 1:
+        mode = available_modes[0]
+        bundle = load_saved_snapshot(mode, settings)
+        _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
+        return
+    tabs = st.tabs([f"{mode}" for mode in available_modes])
+    for tab, mode in zip(tabs, available_modes):
+        with tab:
+            bundle = load_saved_snapshot(mode, settings)
+            _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
+
+
 def render_app() -> None:
     st.set_page_config(page_title="Sector Strength Live", layout="wide")
     st.title("セクター強度ライブ")
+    settings = get_settings()
+    if _is_streamlit_runtime():
+        st.caption("Streamlit viewer-only 起動です。Cloud では保存済み snapshot を表示します。")
+        st.info("latest_1130.json / latest_1530.json を優先して読み込みます。API key や kabu password が無くても viewer-only で動作します。")
+        _render_viewer_only_app(settings)
+        return
     st.caption("J-Quants を土台に、kabu ステーション API のライブデータを重ねてスナップショットを作成・表示します。")
     st.info("過去の任意時点をあとから再取得することはできません。保存済みスナップショットのみ再表示できます。")
     view_mode = st.radio("表示方法", ["A: ライブでスナップショットを作成", "B: 保存済みスナップショットを表示"], index=0)
@@ -1114,7 +1316,7 @@ def render_app() -> None:
     else:
         if st.button("保存済みスナップショットを表示"):
             try:
-                bundle = load_saved_snapshot(mode)
+                bundle = load_saved_snapshot(mode, settings)
                 _render_bundle(bundle, source_label="保存済みスナップショットを表示しました", is_saved_snapshot=True)
             except FileNotFoundError as exc:
                 st.warning(str(exc))
