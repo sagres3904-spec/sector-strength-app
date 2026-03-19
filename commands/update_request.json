@@ -1,6 +1,6 @@
 {
-  "request_update": false,
-  "requested_at": "",
-  "requested_by": "",
-  "status": "idle"
+  "request_update": true,
+  "requested_at": "2026-03-19T09:02:26.970366+00:00",
+  "requested_by": "streamlit-cloud-viewer",
+  "status": "requested"
 }
