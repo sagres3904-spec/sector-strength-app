@@ -1,8 +1,8 @@
 {
   "meta": {
-    "generated_at": "2026-03-19T09:12:15.399027+00:00",
-    "generated_at_utc": "2026-03-19T09:12:15.399027+00:00",
-    "generated_at_jst": "2026-03-19 18:12:15 JST",
+    "generated_at": "2026-03-19T09:26:44.606704+00:00",
+    "generated_at_utc": "2026-03-19T09:26:44.606704+00:00",
+    "generated_at_jst": "2026-03-19 18:26:44 JST",
     "mode": "1130",
     "is_true_timepoint": false,
     "expected_time_label": "11:30",
@@ -155,7 +155,7 @@
       "live_price": 854.0,
       "live_ret_vs_prev_close": 53.3213644524237,
       "live_turnover": 14296414300.0,
-      "total_score": 7.129251700680271
+      "total_score": 7.146938775510202
     },
     {
       "sector_name": "情報･通信業",
@@ -173,7 +173,7 @@
       "live_price": 760.0,
       "live_ret_vs_prev_close": 15.15151515151516,
       "live_turnover": 76774200.0,
-      "total_score": 6.18811061658706
+      "total_score": 6.196954154002026
     },
     {
       "sector_name": "機械",
@@ -182,7 +182,7 @@
       "live_price": 1612.0,
       "live_ret_vs_prev_close": 8.333333333333325,
       "live_turnover": 158189800.0,
-      "total_score": 6.104149478940512
+      "total_score": 6.139523628600376
     },
     {
       "sector_name": "海運業",
@@ -191,7 +191,7 @@
       "live_price": 1267.0,
       "live_ret_vs_prev_close": 13.83647798742138,
       "live_turnover": 4862197300.0,
-      "total_score": 6.029276125343755
+      "total_score": 6.055806737588653
     },
     {
       "sector_name": "機械",
@@ -200,7 +200,7 @@
       "live_price": 1677.0,
       "live_ret_vs_prev_close": 5.8712121212121104,
       "live_turnover": 26737638900.0,
-      "total_score": 5.97166286727457
+      "total_score": 6.015880554349399
     },
     {
       "sector_name": "小売業",
@@ -209,7 +209,7 @@
       "live_price": 870.0,
       "live_ret_vs_prev_close": 2.1126760563380254,
       "live_turnover": 84100600.0,
-      "total_score": 5.834938124185844
+      "total_score": 5.905686423505572
     },
     {
       "sector_name": "その他",
@@ -218,97 +218,7 @@
       "live_price": 2998.0,
       "live_ret_vs_prev_close": 15.26336024605921,
       "live_turnover": 8751037032.0,
-      "total_score": 5.723460341583442
-    },
-    {
-      "sector_name": "情報･通信業",
-      "code": "3908",
-      "name": "コラボス",
-      "live_price": 415.0,
-      "live_ret_vs_prev_close": 1.4669926650366705,
-      "live_turnover": 200305800.0,
-      "total_score": 4.847252677666811
-    },
-    {
-      "sector_name": "非鉄金属",
-      "code": "5801",
-      "name": "古河電気工業",
-      "live_price": 29400.0,
-      "live_ret_vs_prev_close": 2.367688022284131,
-      "live_turnover": 208717776000.0,
-      "total_score": 4.728492726877985
-    },
-    {
-      "sector_name": "その他",
-      "code": "2236",
-      "name": "Ｇｌｏｂａｌ　Ｘ　Ｊａｐａｎ株式会社　グローバルＸ　Ｓ＆Ｐ５００配当貴族ＥＴＦ",
-      "live_price": 1383.0,
-      "live_ret_vs_prev_close": -1.0021474588403745,
-      "live_turnover": 680555977.0,
-      "total_score": 4.303828339846577
-    },
-    {
-      "sector_name": "不動産業",
-      "code": "8918",
-      "name": "ランド",
-      "live_price": 10.0,
-      "live_ret_vs_prev_close": 11.111111111111116,
-      "live_turnover": 2248487700.0,
-      "total_score": 4.296982197134173
-    },
-    {
-      "sector_name": "その他",
-      "code": "2257",
-      "name": "ブラックロック・ジャパン株式会社　ｉシェアーズ　米ドル建て投資適格社債　ＥＴＦ",
-      "live_price": 226.8,
-      "live_ret_vs_prev_close": -0.08810572687224516,
-      "live_turnover": 57496104.0,
-      "total_score": 4.183270914748878
-    },
-    {
-      "sector_name": "非鉄金属",
-      "code": "5802",
-      "name": "住友電気工業",
-      "live_price": 9948.0,
-      "live_ret_vs_prev_close": -0.5697151424287838,
-      "live_turnover": 106241883700.0,
-      "total_score": 4.159627840497901
-    },
-    {
-      "sector_name": "卸売業",
-      "code": "2795",
-      "name": "日本プリメックス",
-      "live_price": 896.0,
-      "live_ret_vs_prev_close": -1.969365426695846,
-      "live_turnover": 3750200.0,
-      "total_score": 4.128973983210305
-    },
-    {
-      "sector_name": "電気機器",
-      "code": "6501",
-      "name": "日立製作所",
-      "live_price": 4849.0,
-      "live_ret_vs_prev_close": -0.4107619634421855,
-      "live_turnover": 80725361600.0,
-      "total_score": 3.9834473150962504
-    },
-    {
-      "sector_name": "機械",
-      "code": "6335",
-      "name": "東京機械製作所",
-      "live_price": 532.0,
-      "live_ret_vs_prev_close": 6.18762475049901,
-      "live_turnover": 672113900.0,
-      "total_score": 3.957946157186279
-    },
-    {
-      "sector_name": "海運業",
-      "code": "9104",
-      "name": "商船三井",
-      "live_price": 6976.0,
-      "live_ret_vs_prev_close": -0.5417735956658065,
-      "live_turnover": 109930488800.0,
-      "total_score": 3.9053119119988415
+      "total_score": 5.785365103488203
     },
     {
       "sector_name": "情報･通信業",
@@ -317,52 +227,106 @@
       "live_price": 257.0,
       "live_ret_vs_prev_close": 0.7843137254901933,
       "live_turnover": 1971106900.0,
-      "total_score": 3.5770733825445067
+      "total_score": 5.08931828050369
     },
     {
-      "sector_name": "電気機器",
-      "code": "6758",
-      "name": "ソニーグループ",
-      "live_price": 3271.0,
-      "live_ret_vs_prev_close": -0.45648204503956347,
-      "live_turnover": 78713623500.0,
-      "total_score": 3.4750416123896364
-    },
-    {
-      "sector_name": "サービス業",
-      "code": "2195",
-      "name": "アミタホールディングス",
-      "live_price": 328.0,
-      "live_ret_vs_prev_close": -2.3809523809523836,
-      "live_turnover": 179058500.0,
-      "total_score": 3.3596567882472135
-    },
-    {
-      "sector_name": "金属製品",
-      "code": "5905",
-      "name": "日本製罐",
-      "live_price": 1317.0,
-      "live_ret_vs_prev_close": -0.2272727272727315,
-      "live_turnover": 919700.0,
-      "total_score": 3.3568027210884352
-    },
-    {
-      "sector_name": "その他製品",
-      "code": "7974",
-      "name": "任天堂",
-      "live_price": 9734.0,
-      "live_ret_vs_prev_close": -1.2678770666396222,
-      "live_turnover": 105089709700.0,
-      "total_score": 3.2764736213634387
+      "sector_name": "情報･通信業",
+      "code": "3908",
+      "name": "コラボス",
+      "live_price": 415.0,
+      "live_ret_vs_prev_close": 1.4669926650366705,
+      "live_turnover": 200305800.0,
+      "total_score": 4.966640432768852
     },
     {
       "sector_name": "非鉄金属",
-      "code": "5803",
-      "name": "フジクラ",
-      "live_price": 25330.0,
-      "live_ret_vs_prev_close": -1.4588601439408655,
-      "live_turnover": 254911490000.0,
-      "total_score": 3.038259878419453
+      "code": "5801",
+      "name": "古河電気工業",
+      "live_price": 29400.0,
+      "live_ret_vs_prev_close": 2.367688022284131,
+      "live_turnover": 208717776000.0,
+      "total_score": 4.781553951367781
+    },
+    {
+      "sector_name": "その他",
+      "code": "2236",
+      "name": "Ｇｌｏｂａｌ　Ｘ　Ｊａｐａｎ株式会社　グローバルＸ　Ｓ＆Ｐ５００配当貴族ＥＴＦ",
+      "live_price": 1383.0,
+      "live_ret_vs_prev_close": -1.0021474588403745,
+      "live_turnover": 680555977.0,
+      "total_score": 4.427637863656101
+    },
+    {
+      "sector_name": "不動産業",
+      "code": "8918",
+      "name": "ランド",
+      "live_price": 10.0,
+      "live_ret_vs_prev_close": 11.111111111111116,
+      "live_turnover": 2248487700.0,
+      "total_score": 4.416369952236214
+    },
+    {
+      "sector_name": "その他",
+      "code": "2257",
+      "name": "ブラックロック・ジャパン株式会社　ｉシェアーズ　米ドル建て投資適格社債　ＥＴＦ",
+      "live_price": 226.8,
+      "live_ret_vs_prev_close": -0.08810572687224516,
+      "live_turnover": 57496104.0,
+      "total_score": 4.28939336372847
+    },
+    {
+      "sector_name": "非鉄金属",
+      "code": "5802",
+      "name": "住友電気工業",
+      "live_price": 9948.0,
+      "live_ret_vs_prev_close": -0.5697151424287838,
+      "live_turnover": 106241883700.0,
+      "total_score": 4.239219677232595
+    },
+    {
+      "sector_name": "卸売業",
+      "code": "2795",
+      "name": "日本プリメックス",
+      "live_price": 896.0,
+      "live_ret_vs_prev_close": -1.969365426695846,
+      "live_turnover": 3750200.0,
+      "total_score": 4.235096432189897
+    },
+    {
+      "sector_name": "電気機器",
+      "code": "6501",
+      "name": "日立製作所",
+      "live_price": 4849.0,
+      "live_ret_vs_prev_close": -0.4107619634421855,
+      "live_turnover": 80725361600.0,
+      "total_score": 4.071882689245911
+    },
+    {
+      "sector_name": "機械",
+      "code": "6335",
+      "name": "東京機械製作所",
+      "live_price": 532.0,
+      "live_ret_vs_prev_close": 6.18762475049901,
+      "live_turnover": 672113900.0,
+      "total_score": 4.064068606165871
+    },
+    {
+      "sector_name": "海運業",
+      "code": "9104",
+      "name": "商船三井",
+      "live_price": 6976.0,
+      "live_ret_vs_prev_close": -0.5417735956658065,
+      "live_turnover": 109930488800.0,
+      "total_score": 4.046808510638298
+    },
+    {
+      "sector_name": "不動産業",
+      "code": "3238",
+      "name": "セントラル総合開発",
+      "live_price": 370.0,
+      "live_ret_vs_prev_close": -13.145539906103288,
+      "live_turnover": 92148600.0,
+      "total_score": 3.79611557388913
     },
     {
       "sector_name": "鉱業",
@@ -371,7 +335,79 @@
       "live_price": 4700.0,
       "live_ret_vs_prev_close": 0.5347593582887722,
       "live_turnover": 72524846300.0,
-      "total_score": 2.87855966854827
+      "total_score": 3.780600484874801
+    },
+    {
+      "sector_name": "電気機器",
+      "code": "6758",
+      "name": "ソニーグループ",
+      "live_price": 3271.0,
+      "live_ret_vs_prev_close": -0.45648204503956347,
+      "live_turnover": 78713623500.0,
+      "total_score": 3.5988511361991606
+    },
+    {
+      "sector_name": "金属製品",
+      "code": "5905",
+      "name": "日本製罐",
+      "live_price": 1317.0,
+      "live_ret_vs_prev_close": -0.2272727272727315,
+      "live_turnover": 919700.0,
+      "total_score": 3.454081632653061
+    },
+    {
+      "sector_name": "その他製品",
+      "code": "7974",
+      "name": "任天堂",
+      "live_price": 9734.0,
+      "live_ret_vs_prev_close": -1.2678770666396222,
+      "live_turnover": 105089709700.0,
+      "total_score": 3.4091266825879285
+    },
+    {
+      "sector_name": "サービス業",
+      "code": "2195",
+      "name": "アミタホールディングス",
+      "live_price": 328.0,
+      "live_ret_vs_prev_close": -2.3809523809523836,
+      "live_turnover": 179058500.0,
+      "total_score": 3.3773438630771455
+    },
+    {
+      "sector_name": "非鉄金属",
+      "code": "5803",
+      "name": "フジクラ",
+      "live_price": 25330.0,
+      "live_ret_vs_prev_close": -1.4588601439408655,
+      "live_turnover": 254911490000.0,
+      "total_score": 3.1886000144738746
+    },
+    {
+      "sector_name": "卸売業",
+      "code": "3143",
+      "name": "オーウイル",
+      "live_price": 734.0,
+      "live_ret_vs_prev_close": -2.393617021276595,
+      "live_turnover": 37318900.0,
+      "total_score": 2.997708604718483
+    },
+    {
+      "sector_name": "サービス業",
+      "code": "9557",
+      "name": "エアークローゼット",
+      "live_price": 236.0,
+      "live_ret_vs_prev_close": -0.8403361344537785,
+      "live_turnover": 51957800.0,
+      "total_score": 2.9048966927196407
+    },
+    {
+      "sector_name": "小売業",
+      "code": "9983",
+      "name": "ファーストリテイリング",
+      "live_price": 63430.0,
+      "live_ret_vs_prev_close": -3.6750189825360713,
+      "live_turnover": 79075215000.0,
+      "total_score": 2.8311884860327106
     },
     {
       "sector_name": "保険業",
@@ -389,16 +425,7 @@
       "live_price": 858.0,
       "live_ret_vs_prev_close": -16.536964980544745,
       "live_turnover": 276668500.0,
-      "total_score": 2.751353307280359
-    },
-    {
-      "sector_name": "小売業",
-      "code": "9983",
-      "name": "ファーストリテイリング",
-      "live_price": 63430.0,
-      "live_ret_vs_prev_close": -3.6750189825360713,
-      "live_turnover": 79075215000.0,
-      "total_score": 2.6985354248082207
+      "total_score": 2.7425097698653924
     },
     {
       "sector_name": "卸売業",
@@ -407,16 +434,7 @@
       "live_price": 5397.0,
       "live_ret_vs_prev_close": -5.514705882352944,
       "live_turnover": 123080496700.0,
-      "total_score": 2.6564119264727166
-    },
-    {
-      "sector_name": "卸売業",
-      "code": "8031",
-      "name": "三井物産",
-      "live_price": 6250.0,
-      "live_ret_vs_prev_close": -6.142063372878814,
-      "live_turnover": 104615922200.0,
-      "total_score": 2.6545954552033577
+      "total_score": 2.7006296135475467
     },
     {
       "sector_name": "銀行業",
@@ -425,25 +443,7 @@
       "live_price": 2686.0,
       "live_ret_vs_prev_close": -1.6477480776272424,
       "live_turnover": 106973749150.0,
-      "total_score": 2.597691416992329
-    },
-    {
-      "sector_name": "不動産業",
-      "code": "3238",
-      "name": "セントラル総合開発",
-      "live_price": 370.0,
-      "live_ret_vs_prev_close": -13.145539906103288,
-      "live_turnover": 92148600.0,
-      "total_score": 2.283870675929947
-    },
-    {
-      "sector_name": "サービス業",
-      "code": "2183",
-      "name": "リニカル",
-      "live_price": 280.0,
-      "live_ret_vs_prev_close": -11.671924290220826,
-      "live_turnover": 110293700.0,
-      "total_score": 2.263216456795484
+      "total_score": 2.6861267911419886
     },
     {
       "sector_name": "電気･ガス業",
@@ -452,7 +452,7 @@
       "live_price": 653.4,
       "live_ret_vs_prev_close": -8.410428931875524,
       "live_turnover": 87581781410.0,
-      "total_score": 2.1212548849326964
+      "total_score": 2.1477854971775945
     },
     {
       "sector_name": "輸送用機器",
@@ -461,7 +461,7 @@
       "live_price": 3325.0,
       "live_ret_vs_prev_close": -2.3207990599294903,
       "live_turnover": 77008470200.0,
-      "total_score": 1.9950372702272399
+      "total_score": 2.0392549573020693
     }
   ],
   "focus_candidates": [
@@ -483,7 +483,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:電気機器, turnover_breakout, volume_breakout",
-      "total_score": 7.129251700680271,
+      "total_score": 7.146938775510202,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%A2%E3%82%B9%E3%82%BF%E3%83%AA%E3%82%B9%E3%82%AF",
       "material_link": ""
     },
@@ -527,7 +527,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:その他製品, turnover_breakout, volume_breakout",
-      "total_score": 6.18811061658706,
+      "total_score": 6.196954154002026,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E5%85%89%E9%99%BD%E7%A4%BE",
       "material_link": ""
     },
@@ -549,7 +549,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:機械, turnover_breakout, volume_breakout",
-      "total_score": 6.104149478940512,
+      "total_score": 6.139523628600376,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%83%8A%E3%82%AC%E3%82%AA%E3%82%AB",
       "material_link": ""
     },
@@ -571,7 +571,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:海運業, turnover_breakout, volume_breakout",
-      "total_score": 6.029276125343755,
+      "total_score": 6.055806737588653,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E6%98%8E%E6%B5%B7%E3%82%B0%E3%83%AB%E3%83%BC%E3%83%97",
       "material_link": ""
     },
@@ -593,7 +593,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:機械, turnover_breakout, volume_breakout",
-      "total_score": 5.97166286727457,
+      "total_score": 6.015880554349399,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E6%9C%A8%E6%9D%91%E5%8C%96%E5%B7%A5%E6%A9%9F",
       "material_link": ""
     },
@@ -615,7 +615,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:小売業, turnover_breakout, volume_breakout",
-      "total_score": 5.834938124185844,
+      "total_score": 5.905686423505572,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%81%AF%E3%82%8B%E3%82%84%E3%81%BE%E3%83%9B%E3%83%BC%E3%83%AB%E3%83%87%E3%82%A3%E3%83%B3%E3%82%B0%E3%82%B9",
       "material_link": ""
     },
@@ -637,8 +637,30 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:その他, turnover_breakout, volume_breakout",
-      "total_score": 5.723460341583442,
+      "total_score": 5.785365103488203,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%83%8E%E3%83%A0%E3%83%A9%E3%83%BB%E3%83%A8%E3%83%BC%E3%83%AD%E3%83%83%E3%83%91%E3%83%BB%E3%83%95%E3%82%A1%E3%82%A4%E3%83%8A%E3%83%B3%E3%82%B9%E3%83%BB%E3%82%A8%E3%83%8C%E3%83%BB%E3%83%96%E3%82%A4%E3%80%80%EF%BC%AE%EF%BC%A5%EF%BC%B8%EF%BC%B4%E3%80%80%EF%BC%AE%EF%BC%AF%EF%BC%B4%EF%BC%A5%EF%BC%B3%E3%80%80%E3%83%89%E3%83%90%E3%82%A4%E5%8E%9F%E6%B2%B9%E5%85%88%E7%89%A9%E3%80%80%E3%83%80%E3%83%96%E3%83%AB%E3%83%BB%E3%83%96%E3%83%AB%E3%80%80%EF%BC%A5%EF%BC%B4%EF%BC%AE",
+      "material_link": ""
+    },
+    {
+      "code": "4169",
+      "name": "ＥＮＥＣＨＡＮＧＥ",
+      "sector_name": "情報･通信業",
+      "live_price": 257.0,
+      "live_ret_vs_prev_close": 0.7843137254901933,
+      "live_ret_from_open": 0.0,
+      "live_volume": 7163700.0,
+      "avg_volume_20d": 588010.0,
+      "live_turnover": 1971106900.0,
+      "avg_turnover_20d": 156690385.0,
+      "live_volume_ratio_20d": 12.182956072175644,
+      "live_turnover_ratio_20d": 12.579628928731013,
+      "ret_1w": 1.1811023622047223,
+      "ret_1m": -5.860805860805862,
+      "52w_flag": "",
+      "material_title": "",
+      "focus_reason": "sector:情報･通信業, turnover_breakout, volume_breakout",
+      "total_score": 5.08931828050369,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%EF%BC%A5%EF%BC%AE%EF%BC%A5%EF%BC%A3%EF%BC%A8%EF%BC%A1%EF%BC%AE%EF%BC%A7%EF%BC%A5",
       "material_link": ""
     },
     {
@@ -659,7 +681,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:情報･通信業, turnover_breakout, volume_breakout",
-      "total_score": 4.847252677666811,
+      "total_score": 4.966640432768852,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%B3%E3%83%A9%E3%83%9C%E3%82%B9",
       "material_link": ""
     },
@@ -681,7 +703,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:非鉄金属",
-      "total_score": 4.728492726877985,
+      "total_score": 4.781553951367781,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E5%8F%A4%E6%B2%B3%E9%9B%BB%E6%B0%97%E5%B7%A5%E6%A5%AD",
       "material_link": ""
     },
@@ -703,7 +725,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:その他, turnover_breakout, volume_breakout",
-      "total_score": 4.303828339846577,
+      "total_score": 4.427637863656101,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%EF%BC%A7%EF%BD%8C%EF%BD%8F%EF%BD%82%EF%BD%81%EF%BD%8C%E3%80%80%EF%BC%B8%E3%80%80%EF%BC%AA%EF%BD%81%EF%BD%90%EF%BD%81%EF%BD%8E%E6%A0%AA%E5%BC%8F%E4%BC%9A%E7%A4%BE%E3%80%80%E3%82%B0%E3%83%AD%E3%83%BC%E3%83%90%E3%83%AB%EF%BC%B8%E3%80%80%EF%BC%B3%EF%BC%86%EF%BC%B0%EF%BC%95%EF%BC%90%EF%BC%90%E9%85%8D%E5%BD%93%E8%B2%B4%E6%97%8F%EF%BC%A5%EF%BC%B4%EF%BC%A6",
       "material_link": ""
     },
@@ -725,7 +747,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:不動産業",
-      "total_score": 4.296982197134173,
+      "total_score": 4.416369952236214,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%83%A9%E3%83%B3%E3%83%89",
       "material_link": ""
     },
@@ -747,7 +769,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:その他, turnover_breakout, volume_breakout",
-      "total_score": 4.183270914748878,
+      "total_score": 4.28939336372847,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%83%96%E3%83%A9%E3%83%83%E3%82%AF%E3%83%AD%E3%83%83%E3%82%AF%E3%83%BB%E3%82%B8%E3%83%A3%E3%83%91%E3%83%B3%E6%A0%AA%E5%BC%8F%E4%BC%9A%E7%A4%BE%E3%80%80%EF%BD%89%E3%82%B7%E3%82%A7%E3%82%A2%E3%83%BC%E3%82%BA%E3%80%80%E7%B1%B3%E3%83%89%E3%83%AB%E5%BB%BA%E3%81%A6%E6%8A%95%E8%B3%87%E9%81%A9%E6%A0%BC%E7%A4%BE%E5%82%B5%E3%80%80%EF%BC%A5%EF%BC%B4%EF%BC%A6",
       "material_link": ""
     },
@@ -769,7 +791,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:非鉄金属",
-      "total_score": 4.159627840497901,
+      "total_score": 4.239219677232595,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E4%BD%8F%E5%8F%8B%E9%9B%BB%E6%B0%97%E5%B7%A5%E6%A5%AD",
       "material_link": ""
     },
@@ -791,7 +813,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:卸売業, turnover_breakout, volume_breakout",
-      "total_score": 4.128973983210305,
+      "total_score": 4.235096432189897,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E6%97%A5%E6%9C%AC%E3%83%97%E3%83%AA%E3%83%A1%E3%83%83%E3%82%AF%E3%82%B9",
       "material_link": ""
     },
@@ -813,7 +835,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:電気機器",
-      "total_score": 3.9834473150962504,
+      "total_score": 4.071882689245911,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E6%97%A5%E7%AB%8B%E8%A3%BD%E4%BD%9C%E6%89%80",
       "material_link": ""
     },
@@ -823,7 +845,7 @@
       "sector_name": "機械",
       "live_price": 532.0,
       "live_ret_vs_prev_close": 6.18762475049901,
-      "live_ret_from_open": NaN,
+      "live_ret_from_open": -11.480865224625624,
       "live_volume": 1165500.0,
       "avg_volume_20d": 91225.0,
       "live_turnover": 672113900.0,
@@ -835,7 +857,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:機械, turnover_breakout, volume_breakout",
-      "total_score": 3.957946157186279,
+      "total_score": 4.064068606165871,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E6%9D%B1%E4%BA%AC%E6%A9%9F%E6%A2%B0%E8%A3%BD%E4%BD%9C%E6%89%80",
       "material_link": ""
     },
@@ -857,30 +879,52 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:海運業, turnover_breakout, volume_breakout",
-      "total_score": 3.9053119119988415,
+      "total_score": 4.046808510638298,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E5%95%86%E8%88%B9%E4%B8%89%E4%BA%95",
       "material_link": ""
     },
     {
-      "code": "4169",
-      "name": "ＥＮＥＣＨＡＮＧＥ",
-      "sector_name": "情報･通信業",
-      "live_price": 257.0,
-      "live_ret_vs_prev_close": 0.7843137254901933,
-      "live_ret_from_open": NaN,
-      "live_volume": 7163700.0,
-      "avg_volume_20d": 588010.0,
-      "live_turnover": 1971106900.0,
-      "avg_turnover_20d": 156690385.0,
-      "live_volume_ratio_20d": 12.182956072175644,
-      "live_turnover_ratio_20d": 12.579628928731013,
-      "ret_1w": 1.1811023622047223,
-      "ret_1m": -5.860805860805862,
+      "code": "3238",
+      "name": "セントラル総合開発",
+      "sector_name": "不動産業",
+      "live_price": 370.0,
+      "live_ret_vs_prev_close": -13.145539906103288,
+      "live_ret_from_open": 0.0,
+      "live_volume": 250300.0,
+      "avg_volume_20d": 25480.0,
+      "live_turnover": 92148600.0,
+      "avg_turnover_20d": 10111940.0,
+      "live_volume_ratio_20d": 9.823390894819466,
+      "live_turnover_ratio_20d": 9.112850748718841,
+      "ret_1w": -13.145539906103288,
+      "ret_1m": -12.735849056603776,
       "52w_flag": "",
       "material_title": "",
-      "focus_reason": "sector:情報･通信業, turnover_breakout, volume_breakout",
-      "total_score": 3.5770733825445067,
-      "nikkei_search": "https://www.nikkei.com/search?keyword=%EF%BC%A5%EF%BC%AE%EF%BC%A5%EF%BC%A3%EF%BC%A8%EF%BC%A1%EF%BC%AE%EF%BC%A7%EF%BC%A5",
+      "focus_reason": "sector:不動産業, turnover_breakout, volume_breakout",
+      "total_score": 3.79611557388913,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%BB%E3%83%B3%E3%83%88%E3%83%A9%E3%83%AB%E7%B7%8F%E5%90%88%E9%96%8B%E7%99%BA",
+      "material_link": ""
+    },
+    {
+      "code": "1605",
+      "name": "ＩＮＰＥＸ",
+      "sector_name": "鉱業",
+      "live_price": 4700.0,
+      "live_ret_vs_prev_close": 0.5347593582887722,
+      "live_ret_from_open": -0.9483667017913588,
+      "live_volume": 15309600.0,
+      "avg_volume_20d": 12383810.0,
+      "live_turnover": 72524846300.0,
+      "avg_turnover_20d": 51255918140.0,
+      "live_volume_ratio_20d": 1.236259277233743,
+      "live_turnover_ratio_20d": 1.414955558925044,
+      "ret_1w": 9.327750639683652,
+      "ret_1m": 30.628126737076155,
+      "52w_flag": "",
+      "material_title": "",
+      "focus_reason": "sector:鉱業",
+      "total_score": 3.780600484874801,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%EF%BC%A9%EF%BC%AE%EF%BC%B0%EF%BC%A5%EF%BC%B8",
       "material_link": ""
     },
     {
@@ -901,8 +945,30 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:電気機器",
-      "total_score": 3.4750416123896364,
+      "total_score": 3.5988511361991606,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%BD%E3%83%8B%E3%83%BC%E3%82%B0%E3%83%AB%E3%83%BC%E3%83%97",
+      "material_link": ""
+    },
+    {
+      "code": "2095",
+      "name": "Ｇｌｏｂａｌ　Ｘ　Ｊａｐａｎ株式会社　グローバルＸ　Ｓ＆Ｐ５００配当貴族　ＥＴＦ（為替ヘッジあり）",
+      "sector_name": "その他",
+      "live_price": 1101.0,
+      "live_ret_vs_prev_close": -1.6964285714285765,
+      "live_ret_from_open": -1.255605381165914,
+      "live_volume": 327019.0,
+      "avg_volume_20d": 35606.55,
+      "live_turnover": 360286005.0,
+      "avg_turnover_20d": 40618072.85,
+      "live_volume_ratio_20d": 9.184237169846558,
+      "live_turnover_ratio_20d": 8.87009106341686,
+      "ret_1w": -1.3440860215053752,
+      "ret_1m": -6.297872340425537,
+      "52w_flag": "",
+      "material_title": "",
+      "focus_reason": "sector:その他, turnover_breakout, volume_breakout",
+      "total_score": 3.5736114126501666,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%EF%BC%A7%EF%BD%8C%EF%BD%8F%EF%BD%82%EF%BD%81%EF%BD%8C%E3%80%80%EF%BC%B8%E3%80%80%EF%BC%AA%EF%BD%81%EF%BD%90%EF%BD%81%EF%BD%8E%E6%A0%AA%E5%BC%8F%E4%BC%9A%E7%A4%BE%E3%80%80%E3%82%B0%E3%83%AD%E3%83%BC%E3%83%90%E3%83%AB%EF%BC%B8%E3%80%80%EF%BC%B3%EF%BC%86%EF%BC%B0%EF%BC%95%EF%BC%90%EF%BC%90%E9%85%8D%E5%BD%93%E8%B2%B4%E6%97%8F%E3%80%80%EF%BC%A5%EF%BC%B4%EF%BC%A6%EF%BC%88%E7%82%BA%E6%9B%BF%E3%83%98%E3%83%83%E3%82%B8%E3%81%82%E3%82%8A%EF%BC%89",
       "material_link": ""
     },
     {
@@ -923,30 +989,8 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:その他, turnover_breakout, volume_breakout",
-      "total_score": 3.4299491605152697,
+      "total_score": 3.4830103850050658,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E5%A4%A7%E5%92%8C%E3%82%A2%E3%82%BB%E3%83%83%E3%83%88%E3%83%9E%E3%83%8D%E3%82%B8%E3%83%A1%E3%83%B3%E3%83%88%E6%A0%AA%E5%BC%8F%E4%BC%9A%E7%A4%BE%E3%80%80%EF%BD%89%EF%BC%A6%EF%BD%92%EF%BD%85%EF%BD%85%EF%BC%A5%EF%BC%B4%EF%BC%A6%E3%80%80%E6%9D%B1%E8%A8%BC%EF%BC%B2%EF%BC%A5%EF%BC%A9%EF%BC%B4%E3%80%80%EF%BC%A3%EF%BD%8F%EF%BD%92%EF%BD%85%E6%8C%87%E6%95%B0",
-      "material_link": ""
-    },
-    {
-      "code": "2195",
-      "name": "アミタホールディングス",
-      "sector_name": "サービス業",
-      "live_price": 328.0,
-      "live_ret_vs_prev_close": -2.3809523809523836,
-      "live_ret_from_open": -4.373177842565601,
-      "live_volume": 516300.0,
-      "avg_volume_20d": 54615.0,
-      "live_turnover": 179058500.0,
-      "avg_turnover_20d": 18306385.0,
-      "live_volume_ratio_20d": 9.453446855259545,
-      "live_turnover_ratio_20d": 9.78120475451598,
-      "ret_1w": 5.466237942122176,
-      "ret_1m": -7.605633802816902,
-      "52w_flag": "",
-      "material_title": "",
-      "focus_reason": "sector:サービス業, turnover_breakout, volume_breakout",
-      "total_score": 3.3596567882472135,
-      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%A2%E3%83%9F%E3%82%BF%E3%83%9B%E3%83%BC%E3%83%AB%E3%83%87%E3%82%A3%E3%83%B3%E3%82%B0%E3%82%B9",
       "material_link": ""
     },
     {
@@ -967,30 +1011,8 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:金属製品",
-      "total_score": 3.3568027210884352,
+      "total_score": 3.454081632653061,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E6%97%A5%E6%9C%AC%E8%A3%BD%E7%BD%90",
-      "material_link": ""
-    },
-    {
-      "code": "7974",
-      "name": "任天堂",
-      "sector_name": "その他製品",
-      "live_price": 9734.0,
-      "live_ret_vs_prev_close": -1.2678770666396222,
-      "live_ret_from_open": 0.3505154639175334,
-      "live_volume": 10748500.0,
-      "avg_volume_20d": 12811015.0,
-      "live_turnover": 105089709700.0,
-      "avg_turnover_20d": 119101791150.0,
-      "live_volume_ratio_20d": 0.8390045597479981,
-      "live_turnover_ratio_20d": 0.8823520510085965,
-      "ret_1w": -4.098522167487683,
-      "ret_1m": 12.71421954608616,
-      "52w_flag": "",
-      "material_title": "",
-      "focus_reason": "sector:その他製品",
-      "total_score": 3.2764736213634387,
-      "nikkei_search": "https://www.nikkei.com/search?keyword=%E4%BB%BB%E5%A4%A9%E5%A0%82",
       "material_link": ""
     },
     {
@@ -1011,8 +1033,52 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:機械",
-      "total_score": 3.271922492401216,
+      "total_score": 3.413419091040671,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%83%87%E3%82%A3%E3%82%B9%E3%82%B3",
+      "material_link": ""
+    },
+    {
+      "code": "7974",
+      "name": "任天堂",
+      "sector_name": "その他製品",
+      "live_price": 9734.0,
+      "live_ret_vs_prev_close": -1.2678770666396222,
+      "live_ret_from_open": 0.3505154639175334,
+      "live_volume": 10748500.0,
+      "avg_volume_20d": 12811015.0,
+      "live_turnover": 105089709700.0,
+      "avg_turnover_20d": 119101791150.0,
+      "live_volume_ratio_20d": 0.8390045597479981,
+      "live_turnover_ratio_20d": 0.8823520510085965,
+      "ret_1w": -4.098522167487683,
+      "ret_1m": 12.71421954608616,
+      "52w_flag": "",
+      "material_title": "",
+      "focus_reason": "sector:その他製品",
+      "total_score": 3.4091266825879285,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E4%BB%BB%E5%A4%A9%E5%A0%82",
+      "material_link": ""
+    },
+    {
+      "code": "2195",
+      "name": "アミタホールディングス",
+      "sector_name": "サービス業",
+      "live_price": 328.0,
+      "live_ret_vs_prev_close": -2.3809523809523836,
+      "live_ret_from_open": -4.373177842565601,
+      "live_volume": 516300.0,
+      "avg_volume_20d": 54615.0,
+      "live_turnover": 179058500.0,
+      "avg_turnover_20d": 18306385.0,
+      "live_volume_ratio_20d": 9.453446855259545,
+      "live_turnover_ratio_20d": 9.78120475451598,
+      "ret_1w": 5.466237942122176,
+      "ret_1m": -7.605633802816902,
+      "52w_flag": "",
+      "material_title": "",
+      "focus_reason": "sector:サービス業, turnover_breakout, volume_breakout",
+      "total_score": 3.3773438630771455,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%A2%E3%83%9F%E3%82%BF%E3%83%9B%E3%83%BC%E3%83%AB%E3%83%87%E3%82%A3%E3%83%B3%E3%82%B0%E3%82%B9",
       "material_link": ""
     },
     {
@@ -1033,7 +1099,7 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:非鉄金属",
-      "total_score": 3.038259878419453,
+      "total_score": 3.1886000144738746,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%83%95%E3%82%B8%E3%82%AF%E3%83%A9",
       "material_link": ""
     },
@@ -1055,80 +1121,14 @@
       "52w_flag": "",
       "material_title": "",
       "focus_reason": "sector:電気機器",
-      "total_score": 2.940922166739036,
+      "total_score": 3.0382010783036613,
       "nikkei_search": "https://www.nikkei.com/search?keyword=%E6%9D%B1%E4%BA%AC%E3%82%A8%E3%83%AC%E3%82%AF%E3%83%88%E3%83%AD%E3%83%B3",
-      "material_link": ""
-    },
-    {
-      "code": "6920",
-      "name": "レーザーテック",
-      "sector_name": "電気機器",
-      "live_price": 35090.0,
-      "live_ret_vs_prev_close": -2.5818989450305363,
-      "live_ret_from_open": 0.5444126074498623,
-      "live_volume": 3239200.0,
-      "avg_volume_20d": 4500000.0,
-      "live_turnover": 114165249000.0,
-      "avg_turnover_20d": 153642408350.0,
-      "live_volume_ratio_20d": 0.7198222222222223,
-      "live_turnover_ratio_20d": 0.7430581844299761,
-      "ret_1w": -3.4662998624484187,
-      "ret_1m": 12.576195059351946,
-      "52w_flag": "",
-      "material_title": "",
-      "focus_reason": "sector:電気機器",
-      "total_score": 2.904899406571139,
-      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%83%AC%E3%83%BC%E3%82%B6%E3%83%BC%E3%83%86%E3%83%83%E3%82%AF",
-      "material_link": ""
-    },
-    {
-      "code": "2095",
-      "name": "Ｇｌｏｂａｌ　Ｘ　Ｊａｐａｎ株式会社　グローバルＸ　Ｓ＆Ｐ５００配当貴族　ＥＴＦ（為替ヘッジあり）",
-      "sector_name": "その他",
-      "live_price": 1101.0,
-      "live_ret_vs_prev_close": -1.6964285714285765,
-      "live_ret_from_open": NaN,
-      "live_volume": 327019.0,
-      "avg_volume_20d": 35606.55,
-      "live_turnover": 360286005.0,
-      "avg_turnover_20d": 40618072.85,
-      "live_volume_ratio_20d": 9.184237169846558,
-      "live_turnover_ratio_20d": 8.87009106341686,
-      "ret_1w": -1.3440860215053752,
-      "ret_1m": -6.297872340425537,
-      "52w_flag": "",
-      "material_title": "",
-      "focus_reason": "sector:その他, turnover_breakout, volume_breakout",
-      "total_score": 2.88381549428282,
-      "nikkei_search": "https://www.nikkei.com/search?keyword=%EF%BC%A7%EF%BD%8C%EF%BD%8F%EF%BD%82%EF%BD%81%EF%BD%8C%E3%80%80%EF%BC%B8%E3%80%80%EF%BC%AA%EF%BD%81%EF%BD%90%EF%BD%81%EF%BD%8E%E6%A0%AA%E5%BC%8F%E4%BC%9A%E7%A4%BE%E3%80%80%E3%82%B0%E3%83%AD%E3%83%BC%E3%83%90%E3%83%AB%EF%BC%B8%E3%80%80%EF%BC%B3%EF%BC%86%EF%BC%B0%EF%BC%95%EF%BC%90%EF%BC%90%E9%85%8D%E5%BD%93%E8%B2%B4%E6%97%8F%E3%80%80%EF%BC%A5%EF%BC%B4%EF%BC%A6%EF%BC%88%E7%82%BA%E6%9B%BF%E3%83%98%E3%83%83%E3%82%B8%E3%81%82%E3%82%8A%EF%BC%89",
-      "material_link": ""
-    },
-    {
-      "code": "1605",
-      "name": "ＩＮＰＥＸ",
-      "sector_name": "鉱業",
-      "live_price": 4700.0,
-      "live_ret_vs_prev_close": 0.5347593582887722,
-      "live_ret_from_open": NaN,
-      "live_volume": 15309600.0,
-      "avg_volume_20d": 12383810.0,
-      "live_turnover": 72524846300.0,
-      "avg_turnover_20d": 51255918140.0,
-      "live_volume_ratio_20d": 1.236259277233743,
-      "live_turnover_ratio_20d": 1.414955558925044,
-      "ret_1w": 9.327750639683652,
-      "ret_1m": 30.628126737076155,
-      "52w_flag": "",
-      "material_title": "",
-      "focus_reason": "sector:鉱業",
-      "total_score": 2.87855966854827,
-      "nikkei_search": "https://www.nikkei.com/search?keyword=%EF%BC%A9%EF%BC%AE%EF%BC%B0%EF%BC%A5%EF%BC%B8",
       "material_link": ""
     }
   ],
   "diagnostics": {
     "mode": "1130",
-    "generated_at": "2026-03-19T09:12:15.399027+00:00",
+    "generated_at": "2026-03-19T09:26:44.606704+00:00",
     "focus_candidate_count": 49,
     "ranking_candidate_count": 117,
     "includes_kabu": true,
@@ -1168,7 +1168,7 @@
       "excluded_missing_prev_close": 0,
       "warning_messages": [],
       "unregister_all_called": true,
-      "unregister_all_retry_called": true,
+      "unregister_all_retry_called": false,
       "register_target_count": 0,
       "register_error_count": 0,
       "register_error_codes": [],
@@ -1190,7 +1190,7 @@
   "paths": {
     "json_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\latest_1130.json",
     "markdown_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\latest_1130.md",
-    "dated_json_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-03-19_181215_1130.json",
-    "dated_markdown_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-03-19_181215_1130.md"
+    "dated_json_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-03-19_182644_1130.json",
+    "dated_markdown_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-03-19_182644_1130.md"
   }
 }
