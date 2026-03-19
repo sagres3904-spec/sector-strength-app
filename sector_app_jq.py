@@ -268,7 +268,25 @@ def _short_body(text: str, limit: int = 160) -> str:
 
 
 def _is_streamlit_runtime() -> bool:
-    return bool(os.environ.get("STREAMLIT_SERVER_PORT") or os.environ.get("STREAMLIT_RUNTIME"))
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        if get_script_run_ctx() is not None:
+            return True
+    except Exception:
+        pass
+    try:
+        runtime_module = getattr(st, "runtime", None)
+        runtime_exists = getattr(runtime_module, "exists", None)
+        if callable(runtime_exists) and bool(runtime_exists()):
+            return True
+    except Exception:
+        pass
+    return bool(
+        os.environ.get("STREAMLIT_SERVER_PORT")
+        or os.environ.get("STREAMLIT_RUNTIME")
+        or os.environ.get("STREAMLIT_SHARING_MODE")
+    )
 
 
 def _snapshot_json_path(mode: str, settings: dict[str, Any] | None = None) -> Path:
