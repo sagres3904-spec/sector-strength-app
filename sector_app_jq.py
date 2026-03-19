@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import math
@@ -5,6 +6,7 @@ import os
 import re
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -13,9 +15,167 @@ from urllib.parse import quote_plus
 import pandas as pd
 import requests
 import streamlit as st
-from snapshot_bundle import bundle_to_json_text, bundle_to_markdown
-from snapshot_store import read_snapshot_json, write_snapshot_bundle as write_snapshot_bundle_to_store
-from snapshot_time import build_snapshot_meta, normalize_snapshot_meta, saved_snapshot_timing_warning
+import streamlit.components.v1 as components
+
+try:
+    from snapshot_bundle import bundle_to_json_text, bundle_to_markdown
+    from snapshot_store import read_snapshot_json, write_snapshot_bundle as write_snapshot_bundle_to_store
+    from snapshot_time import build_snapshot_meta, normalize_snapshot_meta, saved_snapshot_timing_warning
+except ModuleNotFoundError:
+    @dataclass
+    class _SnapshotStoreResult:
+        paths: dict[str, str]
+        source_label: str
+        backend_name: str
+        warning_message: str
+
+
+    def _snapshot_dir(settings: dict[str, Any], root_dir: Path) -> Path:
+        output_dir = str(settings.get("SNAPSHOT_OUTPUT_DIR", "data/snapshots")).strip() or "data/snapshots"
+        output_path = Path(output_dir)
+        if not output_path.is_absolute():
+            output_path = root_dir / output_path
+        return output_path
+
+
+    def _json_ready(value: Any) -> Any:
+        if isinstance(value, pd.DataFrame):
+            return value.to_dict(orient="records")
+        if isinstance(value, pd.Series):
+            return value.to_dict()
+        if isinstance(value, dict):
+            return {str(k): _json_ready(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_json_ready(item) for item in value]
+        if isinstance(value, tuple):
+            return [_json_ready(item) for item in value]
+        if isinstance(value, Path):
+            return str(value)
+        return value
+
+
+    def bundle_to_json_text(bundle: dict[str, Any]) -> str:
+        return json.dumps(_json_ready(bundle), ensure_ascii=False, indent=2, default=str)
+
+
+    def bundle_to_markdown(bundle: dict[str, Any]) -> str:
+        meta = normalize_snapshot_meta(bundle.get("meta", {}))
+        diagnostics = bundle.get("diagnostics", {})
+        generated_at_jst = str(meta.get("generated_at_jst", "") or meta.get("generated_at", ""))
+        return "\n".join(
+            [
+                "# Sector Strength Snapshot",
+                "",
+                f"- mode: {meta.get('mode', '')}",
+                f"- generated_at_jst: {generated_at_jst}",
+                f"- is_true_timepoint: {bool(meta.get('is_true_timepoint'))}",
+                f"- diagnostics_keys: {', '.join(sorted(str(key) for key in diagnostics.keys()))}",
+            ]
+        )
+
+
+    def _expected_time_label(mode: str) -> str:
+        return {"0915": "09:15", "1130": "11:30", "1530": "15:30", "now": "now"}.get(str(mode), str(mode))
+
+
+    def build_snapshot_meta(mode: str, generated_at: Any, source_profile: str = "", includes_kabu: bool = True) -> dict[str, Any]:
+        if isinstance(generated_at, str):
+            dt = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+        else:
+            dt = generated_at
+        if not isinstance(dt, datetime):
+            dt = datetime.now(timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt_utc = dt.astimezone(timezone.utc)
+        dt_jst = dt_utc.astimezone(timezone(timedelta(hours=9)))
+        return {
+            "generated_at": dt_utc.isoformat(),
+            "generated_at_utc": dt_utc.isoformat(),
+            "generated_at_jst": dt_jst.strftime("%Y-%m-%d %H:%M:%S JST"),
+            "mode": str(mode),
+            "is_true_timepoint": False,
+            "expected_time_label": _expected_time_label(str(mode)),
+            "source_profile": str(source_profile),
+            "includes_kabu": bool(includes_kabu),
+        }
+
+
+    def normalize_snapshot_meta(meta: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(meta or {})
+        generated_at = str(normalized.get("generated_at", "") or normalized.get("generated_at_utc", ""))
+        mode = str(normalized.get("mode", ""))
+        if generated_at:
+            normalized.update(build_snapshot_meta(mode=mode, generated_at=generated_at, source_profile=str(normalized.get("source_profile", "")), includes_kabu=bool(normalized.get("includes_kabu", True))))
+            normalized.update(meta or {})
+            normalized["expected_time_label"] = str(normalized.get("expected_time_label", "") or _expected_time_label(mode))
+            if "generated_at_jst" not in normalized:
+                normalized["generated_at_jst"] = build_snapshot_meta(mode=mode, generated_at=generated_at).get("generated_at_jst", "")
+        else:
+            normalized.setdefault("generated_at_jst", "")
+            normalized.setdefault("expected_time_label", _expected_time_label(mode))
+            normalized.setdefault("is_true_timepoint", False)
+        return normalized
+
+
+    def saved_snapshot_timing_warning(meta: dict[str, Any]) -> str:
+        normalized = normalize_snapshot_meta(meta)
+        if bool(normalized.get("is_true_timepoint")):
+            return ""
+        generated_at_jst = str(normalized.get("generated_at_jst", "")).strip()
+        expected_time_label = str(normalized.get("expected_time_label", "")).strip()
+        if generated_at_jst and expected_time_label:
+            return f"保存時刻は {generated_at_jst} です。想定時刻 {expected_time_label} の厳密な true timepoint ではありません。"
+        return ""
+
+
+    def read_snapshot_json(mode: str, settings: dict[str, Any], root_dir: Path) -> tuple[str, _SnapshotStoreResult]:
+        snapshot_path = _snapshot_dir(settings, root_dir) / f"latest_{mode}.json"
+        if not snapshot_path.exists():
+            raise FileNotFoundError(f"まだ snapshot がありません: latest_{mode}.json")
+        payload_text = snapshot_path.read_text(encoding="utf-8")
+        return payload_text, _SnapshotStoreResult(
+            paths={"json_path": str(snapshot_path)},
+            source_label=f"latest_{mode}.json を読み込みました",
+            backend_name="local",
+            warning_message="",
+        )
+
+
+    def write_snapshot_bundle_to_store(
+        *,
+        mode: str,
+        generated_at: str,
+        json_text: str,
+        markdown_text: str,
+        settings: dict[str, Any],
+        root_dir: Path,
+        write_drive: bool = False,
+    ) -> _SnapshotStoreResult:
+        snapshot_dir = _snapshot_dir(settings, root_dir)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        generated_dt = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+        generated_jst = generated_dt.astimezone(timezone(timedelta(hours=9)))
+        timestamp_prefix = generated_jst.strftime("%Y-%m-%d_%H%M%S")
+        latest_json = snapshot_dir / f"latest_{mode}.json"
+        latest_md = snapshot_dir / f"latest_{mode}.md"
+        dated_json = snapshot_dir / f"{timestamp_prefix}_{mode}.json"
+        dated_md = snapshot_dir / f"{timestamp_prefix}_{mode}.md"
+        latest_json.write_text(json_text, encoding="utf-8")
+        latest_md.write_text(markdown_text, encoding="utf-8")
+        dated_json.write_text(json_text, encoding="utf-8")
+        dated_md.write_text(markdown_text, encoding="utf-8")
+        return _SnapshotStoreResult(
+            paths={
+                "json_path": str(latest_json),
+                "markdown_path": str(latest_md),
+                "dated_json_path": str(dated_json),
+                "dated_markdown_path": str(dated_md),
+            },
+            source_label=f"latest_{mode}.json を更新しました",
+            backend_name="local",
+            warning_message="" if not write_drive else "fallback writer ignores write_drive option",
+        )
 
 try:
     import tomllib
@@ -36,6 +196,16 @@ MODE_SCORE_WEIGHTS = {
     "1530": {"live_ret_from_open": 1.3, "live_ret_vs_prev_close": 1.2, "closing_strength": 1.2, "high_close_score": 1.0, "live_volume_ratio_20d": 1.0, "live_turnover_ratio_20d": 1.2, "ret_1w": 0.7, "ret_1m": 0.6, "material_score": 0.3},
     "now": {"live_ret_from_open": 1.4, "live_ret_vs_prev_close": 1.1, "gap_pct": 1.0, "live_volume_ratio_20d": 1.1, "live_turnover_ratio_20d": 1.3, "ret_1w": 0.6, "ret_1m": 0.5, "material_score": 0.3},
 }
+VIEWER_ONLY_SNAPSHOT_MODES = ("1130", "1530")
+DEFAULT_GITHUB_REPOSITORY = "sagres3904-spec/sector-strength-app"
+DEFAULT_GITHUB_CONTROL_BRANCH = "control-plane"
+DEFAULT_GITHUB_DEPLOY_BRANCH = "deploy/streamlit-live"
+DEFAULT_GITHUB_REQUEST_PATH = "commands/update_request.json"
+DEFAULT_GITHUB_STATUS_PATH = "commands/update_status.json"
+DEFAULT_GITHUB_DEPLOY_SNAPSHOT_JSON_PATH = "data/snapshots/latest_1130.json"
+DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH = "data/snapshots/latest_1130.md"
+GITHUB_CONTROL_TOKEN_SECRET_NAME = "GITHUB_CONTROL_TOKEN"
+DEFAULT_VIEWER_AUTO_REFRESH_SECONDS = 60
 
 logger = logging.getLogger("sector_app_jq")
 if not logger.handlers:
@@ -100,7 +270,39 @@ def _short_body(text: str, limit: int = 160) -> str:
 
 
 def _is_streamlit_runtime() -> bool:
-    return bool(os.environ.get("STREAMLIT_SERVER_PORT") or os.environ.get("STREAMLIT_RUNTIME"))
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        if get_script_run_ctx() is not None:
+            return True
+    except Exception:
+        pass
+    try:
+        runtime_module = getattr(st, "runtime", None)
+        runtime_exists = getattr(runtime_module, "exists", None)
+        if callable(runtime_exists) and bool(runtime_exists()):
+            return True
+    except Exception:
+        pass
+    return bool(
+        os.environ.get("STREAMLIT_SERVER_PORT")
+        or os.environ.get("STREAMLIT_RUNTIME")
+        or os.environ.get("STREAMLIT_SHARING_MODE")
+    )
+
+
+def _snapshot_json_path(mode: str, settings: dict[str, Any] | None = None) -> Path:
+    settings = settings or get_settings()
+    output_dir = str(settings.get("SNAPSHOT_OUTPUT_DIR", "data/snapshots")).strip() or "data/snapshots"
+    output_path = Path(output_dir)
+    if not output_path.is_absolute():
+        output_path = ROOT_DIR / output_path
+    return output_path / f"latest_{mode}.json"
+
+
+def _available_viewer_snapshot_modes(settings: dict[str, Any] | None = None) -> list[str]:
+    settings = settings or get_settings()
+    return [mode for mode in VIEWER_ONLY_SNAPSHOT_MODES if _snapshot_json_path(mode, settings).exists()]
 
 
 @contextmanager
@@ -133,6 +335,14 @@ def get_settings() -> dict[str, Any]:
         "DRIVE_SYNC_DIR": "",
         "KABU_REGISTER_LIMIT": 50,
         "KABU_PUSH_TIMEOUT_SECONDS": 4.0,
+        "GITHUB_REPOSITORY": DEFAULT_GITHUB_REPOSITORY,
+        "GITHUB_CONTROL_BRANCH": DEFAULT_GITHUB_CONTROL_BRANCH,
+        "GITHUB_DEPLOY_BRANCH": DEFAULT_GITHUB_DEPLOY_BRANCH,
+        "GITHUB_CONTROL_REQUEST_PATH": DEFAULT_GITHUB_REQUEST_PATH,
+        "GITHUB_CONTROL_STATUS_PATH": DEFAULT_GITHUB_STATUS_PATH,
+        "GITHUB_DEPLOY_SNAPSHOT_JSON_PATH": DEFAULT_GITHUB_DEPLOY_SNAPSHOT_JSON_PATH,
+        "GITHUB_DEPLOY_SNAPSHOT_MD_PATH": DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH,
+        "VIEWER_AUTO_REFRESH_SECONDS": DEFAULT_VIEWER_AUTO_REFRESH_SECONDS,
     }
     settings.update(_read_settings_toml())
     for key in list(settings.keys()):
@@ -147,6 +357,226 @@ def _read_streamlit_secret(name: str) -> str:
         return str(st.secrets.get(name, "")).strip()
     except Exception:
         return ""
+
+
+def _github_control_token(*, use_streamlit_secrets: bool) -> str:
+    if use_streamlit_secrets:
+        return _read_streamlit_secret(GITHUB_CONTROL_TOKEN_SECRET_NAME)
+    return str(os.environ.get(GITHUB_CONTROL_TOKEN_SECRET_NAME, "")).strip()
+
+
+def get_github_control_config(settings: dict[str, Any] | None = None) -> dict[str, str]:
+    settings = settings or get_settings()
+    return {
+        "repository": str(settings.get("GITHUB_REPOSITORY", DEFAULT_GITHUB_REPOSITORY)).strip() or DEFAULT_GITHUB_REPOSITORY,
+        "control_branch": str(settings.get("GITHUB_CONTROL_BRANCH", DEFAULT_GITHUB_CONTROL_BRANCH)).strip() or DEFAULT_GITHUB_CONTROL_BRANCH,
+        "deploy_branch": str(settings.get("GITHUB_DEPLOY_BRANCH", DEFAULT_GITHUB_DEPLOY_BRANCH)).strip() or DEFAULT_GITHUB_DEPLOY_BRANCH,
+        "request_path": str(settings.get("GITHUB_CONTROL_REQUEST_PATH", DEFAULT_GITHUB_REQUEST_PATH)).strip() or DEFAULT_GITHUB_REQUEST_PATH,
+        "status_path": str(settings.get("GITHUB_CONTROL_STATUS_PATH", DEFAULT_GITHUB_STATUS_PATH)).strip() or DEFAULT_GITHUB_STATUS_PATH,
+        "deploy_snapshot_json_path": str(settings.get("GITHUB_DEPLOY_SNAPSHOT_JSON_PATH", DEFAULT_GITHUB_DEPLOY_SNAPSHOT_JSON_PATH)).strip() or DEFAULT_GITHUB_DEPLOY_SNAPSHOT_JSON_PATH,
+        "deploy_snapshot_md_path": str(settings.get("GITHUB_DEPLOY_SNAPSHOT_MD_PATH", DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH)).strip() or DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH,
+    }
+
+
+def _viewer_auto_refresh_seconds(settings: dict[str, Any] | None = None) -> int:
+    settings = settings or get_settings()
+    raw_value = settings.get("VIEWER_AUTO_REFRESH_SECONDS", DEFAULT_VIEWER_AUTO_REFRESH_SECONDS)
+    try:
+        return max(0, int(raw_value))
+    except Exception:
+        return DEFAULT_VIEWER_AUTO_REFRESH_SECONDS
+
+
+def _enable_viewer_auto_refresh(settings: dict[str, Any] | None = None) -> None:
+    refresh_seconds = _viewer_auto_refresh_seconds(settings)
+    if refresh_seconds <= 0:
+        return
+    components.html(
+        f"""
+        <script>
+        const refreshMs = {refresh_seconds * 1000};
+        window.setTimeout(function () {{
+            const parentWindow = window.parent;
+            if (parentWindow && parentWindow.location) {{
+                parentWindow.location.reload();
+            }} else {{
+                window.location.reload();
+            }}
+        }}, refreshMs);
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+    st.caption(f"viewer は約 {refresh_seconds} 秒ごとに自動更新します。")
+
+
+def _github_api_headers(token: str) -> dict[str, str]:
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        "Pragma": "no-cache",
+    }
+
+
+def _github_contents_url(repository: str, path: str) -> str:
+    return f"https://api.github.com/repos/{repository}/contents/{path}"
+
+
+def github_read_json_file(
+    repository: str,
+    branch: str,
+    path: str,
+    token: str,
+    *,
+    session: requests.sessions.Session | None = None,
+) -> tuple[dict[str, Any], str]:
+    text, sha = github_read_text_file(repository, branch, path, token, session=session)
+    return json.loads(text), sha
+
+
+def github_read_text_file(
+    repository: str,
+    branch: str,
+    path: str,
+    token: str,
+    *,
+    session: requests.sessions.Session | None = None,
+) -> tuple[str, str]:
+    session = session or requests
+    response = session.get(
+        _github_contents_url(repository, path),
+        headers=_github_api_headers(token),
+        params={"ref": branch, "_ts": str(time.time_ns())},
+        timeout=20,
+    )
+    if response.status_code == 404:
+        raise FileNotFoundError(f"GitHub file not found: {repository}@{branch}:{path}")
+    if response.status_code >= 400:
+        raise RuntimeError(f"GitHub read failed status={response.status_code} path={path} body={_short_body(response.text)}")
+    payload = response.json()
+    encoded = str(payload.get("content", "")).replace("\n", "")
+    if not encoded:
+        raise RuntimeError(f"GitHub read returned empty content for {path}")
+    text = base64.b64decode(encoded).decode("utf-8")
+    return text, str(payload.get("sha", ""))
+
+
+def github_write_json_file(
+    repository: str,
+    branch: str,
+    path: str,
+    token: str,
+    payload: dict[str, Any],
+    message: str,
+    *,
+    sha: str = "",
+    session: requests.sessions.Session | None = None,
+) -> dict[str, Any]:
+    session = session or requests
+    response = session.put(
+        _github_contents_url(repository, path),
+        headers=_github_api_headers(token),
+        json={
+            "message": message,
+            "content": base64.b64encode(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")).decode("ascii"),
+            "branch": branch,
+            **({"sha": sha} if sha else {}),
+        },
+        timeout=20,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"GitHub write failed status={response.status_code} path={path} body={_short_body(response.text)}")
+    return response.json()
+
+
+def github_write_text_file(
+    repository: str,
+    branch: str,
+    path: str,
+    token: str,
+    text: str,
+    message: str,
+    *,
+    sha: str = "",
+    session: requests.sessions.Session | None = None,
+) -> dict[str, Any]:
+    session = session or requests
+    response = session.put(
+        _github_contents_url(repository, path),
+        headers=_github_api_headers(token),
+        json={
+            "message": message,
+            "content": base64.b64encode(text.encode("utf-8")).decode("ascii"),
+            "branch": branch,
+            **({"sha": sha} if sha else {}),
+        },
+        timeout=20,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"GitHub write failed status={response.status_code} path={path} body={_short_body(response.text)}")
+    return response.json()
+
+
+def read_control_plane_request(token: str, settings: dict[str, Any] | None = None, *, session: requests.sessions.Session | None = None) -> tuple[dict[str, Any], str]:
+    config = get_github_control_config(settings)
+    return github_read_json_file(config["repository"], config["control_branch"], config["request_path"], token, session=session)
+
+
+def write_control_plane_request(
+    token: str,
+    payload: dict[str, Any],
+    settings: dict[str, Any] | None = None,
+    *,
+    sha: str = "",
+    session: requests.sessions.Session | None = None,
+    message: str = "Update control-plane request",
+) -> dict[str, Any]:
+    config = get_github_control_config(settings)
+    return github_write_json_file(config["repository"], config["control_branch"], config["request_path"], token, payload, message, sha=sha, session=session)
+
+
+def read_control_plane_status(token: str, settings: dict[str, Any] | None = None, *, session: requests.sessions.Session | None = None) -> tuple[dict[str, Any], str]:
+    config = get_github_control_config(settings)
+    return github_read_json_file(config["repository"], config["control_branch"], config["status_path"], token, session=session)
+
+
+def write_control_plane_status(
+    token: str,
+    payload: dict[str, Any],
+    settings: dict[str, Any] | None = None,
+    *,
+    sha: str = "",
+    session: requests.sessions.Session | None = None,
+    message: str = "Update control-plane status",
+) -> dict[str, Any]:
+    config = get_github_control_config(settings)
+    return github_write_json_file(config["repository"], config["control_branch"], config["status_path"], token, payload, message, sha=sha, session=session)
+
+
+def submit_control_plane_update_request(
+    token: str,
+    settings: dict[str, Any] | None = None,
+    *,
+    requested_by: str = "streamlit-viewer",
+    session: requests.sessions.Session | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    payload, sha = read_control_plane_request(token, settings, session=session)
+    if bool(payload.get("request_update")):
+        return False, payload
+    updated_payload = dict(payload)
+    updated_payload.update(
+        {
+            "request_update": True,
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "requested_by": str(requested_by),
+            "status": "requested",
+        }
+    )
+    write_control_plane_request(token, updated_payload, settings, sha=sha, session=session, message="Request snapshot refresh from viewer")
+    return True, updated_payload
 
 
 def get_api_key(settings: dict[str, Any] | None = None) -> str:
@@ -1077,6 +1507,10 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     warning_text = saved_snapshot_timing_warning(meta) if is_saved_snapshot else ""
     if warning_text:
         st.warning(warning_text)
+    diagnostics = bundle.get("diagnostics", {})
+    if diagnostics:
+        st.markdown("### diagnostics")
+        st.json(diagnostics)
     st.subheader("セクター要約")
     st.dataframe(bundle["sector_summary"].rename(columns=UI_COLUMN_LABELS), use_container_width=True, hide_index=True)
     st.subheader("セクター別主力銘柄")
@@ -1094,9 +1528,79 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     )
 
 
+def _render_control_plane_status(settings: dict[str, Any]) -> None:
+    st.subheader("更新依頼")
+    if st.button("状態を再読込", key="refresh-control-plane-status"):
+        st.rerun()
+    token = _github_control_token(use_streamlit_secrets=True)
+    if not token:
+        st.info("更新依頼ボタンは無効、閲覧のみです。Streamlit secret `GITHUB_CONTROL_TOKEN` が未設定です。")
+        return
+    try:
+        status_payload, _ = read_control_plane_status(token, settings)
+    except Exception as exc:
+        st.warning(f"update_status.json の取得に失敗しました: {exc}")
+        status_payload = {"last_run_at": "", "status": "unknown", "message": ""}
+    try:
+        request_payload, _ = read_control_plane_request(token, settings)
+    except Exception as exc:
+        st.warning(f"update_request.json の取得に失敗しました: {exc}")
+        request_payload = {"request_update": False, "requested_at": "", "requested_by": "", "status": "unknown"}
+    status_cols = st.columns(3)
+    status_cols[0].metric("status", str(status_payload.get("status", "")))
+    status_cols[1].metric("last_run_at", str(status_payload.get("last_run_at", "")) or "-")
+    status_cols[2].metric("request", "pending" if bool(request_payload.get("request_update")) else "idle")
+    message = str(status_payload.get("message", "")).strip()
+    if message:
+        st.caption(f"message: {message}")
+    requested_at = str(request_payload.get("requested_at", "")).strip()
+    requested_by = str(request_payload.get("requested_by", "")).strip()
+    if request_payload.get("request_update"):
+        st.warning(f"更新依頼は受付中です。requested_at={requested_at or '-'} requested_by={requested_by or '-'}")
+        st.button("今すぐ更新", disabled=True, help="すでに依頼済みです")
+        return
+    if st.button("今すぐ更新", type="primary", help="control-plane branch に更新依頼を書き込みます"):
+        try:
+            submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer")
+            if submitted:
+                st.success(f"更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
+            else:
+                st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"更新依頼の送信に失敗しました: {exc}")
+
+
+def _render_viewer_only_app(settings: dict[str, Any]) -> None:
+    st.caption("viewer-only モードです。保存済み snapshot のみ表示します。collector/live 取得は実行しません。")
+    _enable_viewer_auto_refresh(settings)
+    _render_control_plane_status(settings)
+    available_modes = _available_viewer_snapshot_modes(settings)
+    if not available_modes:
+        st.warning("まだ snapshot がありません")
+        st.caption("表示対象: latest_1130.json / latest_1530.json")
+        return
+    if len(available_modes) == 1:
+        mode = available_modes[0]
+        bundle = load_saved_snapshot(mode, settings)
+        _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
+        return
+    tabs = st.tabs([f"{mode}" for mode in available_modes])
+    for tab, mode in zip(tabs, available_modes):
+        with tab:
+            bundle = load_saved_snapshot(mode, settings)
+            _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
+
+
 def render_app() -> None:
     st.set_page_config(page_title="Sector Strength Live", layout="wide")
     st.title("セクター強度ライブ")
+    settings = get_settings()
+    if _is_streamlit_runtime():
+        st.caption("Streamlit viewer-only 起動です。Cloud では保存済み snapshot を表示します。")
+        st.info("latest_1130.json / latest_1530.json を優先して読み込みます。API key や kabu password が無くても viewer-only で動作します。")
+        _render_viewer_only_app(settings)
+        return
     st.caption("J-Quants を土台に、kabu ステーション API のライブデータを重ねてスナップショットを作成・表示します。")
     st.info("過去の任意時点をあとから再取得することはできません。保存済みスナップショットのみ再表示できます。")
     view_mode = st.radio("表示方法", ["A: ライブでスナップショットを作成", "B: 保存済みスナップショットを表示"], index=0)
@@ -1114,7 +1618,7 @@ def render_app() -> None:
     else:
         if st.button("保存済みスナップショットを表示"):
             try:
-                bundle = load_saved_snapshot(mode)
+                bundle = load_saved_snapshot(mode, settings)
                 _render_bundle(bundle, source_label="保存済みスナップショットを表示しました", is_saved_snapshot=True)
             except FileNotFoundError as exc:
                 st.warning(str(exc))
