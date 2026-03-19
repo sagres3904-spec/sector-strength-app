@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import math
@@ -195,6 +196,14 @@ MODE_SCORE_WEIGHTS = {
     "now": {"live_ret_from_open": 1.4, "live_ret_vs_prev_close": 1.1, "gap_pct": 1.0, "live_volume_ratio_20d": 1.1, "live_turnover_ratio_20d": 1.3, "ret_1w": 0.6, "ret_1m": 0.5, "material_score": 0.3},
 }
 VIEWER_ONLY_SNAPSHOT_MODES = ("1130", "1530")
+DEFAULT_GITHUB_REPOSITORY = "sagres3904-spec/sector-strength-app"
+DEFAULT_GITHUB_CONTROL_BRANCH = "control-plane"
+DEFAULT_GITHUB_DEPLOY_BRANCH = "deploy/streamlit-live"
+DEFAULT_GITHUB_REQUEST_PATH = "commands/update_request.json"
+DEFAULT_GITHUB_STATUS_PATH = "commands/update_status.json"
+DEFAULT_GITHUB_DEPLOY_SNAPSHOT_JSON_PATH = "data/snapshots/latest_1130.json"
+DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH = "data/snapshots/latest_1130.md"
+GITHUB_CONTROL_TOKEN_SECRET_NAME = "GITHUB_CONTROL_TOKEN"
 
 logger = logging.getLogger("sector_app_jq")
 if not logger.handlers:
@@ -306,6 +315,13 @@ def get_settings() -> dict[str, Any]:
         "DRIVE_SYNC_DIR": "",
         "KABU_REGISTER_LIMIT": 50,
         "KABU_PUSH_TIMEOUT_SECONDS": 4.0,
+        "GITHUB_REPOSITORY": DEFAULT_GITHUB_REPOSITORY,
+        "GITHUB_CONTROL_BRANCH": DEFAULT_GITHUB_CONTROL_BRANCH,
+        "GITHUB_DEPLOY_BRANCH": DEFAULT_GITHUB_DEPLOY_BRANCH,
+        "GITHUB_CONTROL_REQUEST_PATH": DEFAULT_GITHUB_REQUEST_PATH,
+        "GITHUB_CONTROL_STATUS_PATH": DEFAULT_GITHUB_STATUS_PATH,
+        "GITHUB_DEPLOY_SNAPSHOT_JSON_PATH": DEFAULT_GITHUB_DEPLOY_SNAPSHOT_JSON_PATH,
+        "GITHUB_DEPLOY_SNAPSHOT_MD_PATH": DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH,
     }
     settings.update(_read_settings_toml())
     for key in list(settings.keys()):
@@ -320,6 +336,191 @@ def _read_streamlit_secret(name: str) -> str:
         return str(st.secrets.get(name, "")).strip()
     except Exception:
         return ""
+
+
+def _github_control_token(*, use_streamlit_secrets: bool) -> str:
+    if use_streamlit_secrets:
+        return _read_streamlit_secret(GITHUB_CONTROL_TOKEN_SECRET_NAME)
+    return str(os.environ.get(GITHUB_CONTROL_TOKEN_SECRET_NAME, "")).strip()
+
+
+def get_github_control_config(settings: dict[str, Any] | None = None) -> dict[str, str]:
+    settings = settings or get_settings()
+    return {
+        "repository": str(settings.get("GITHUB_REPOSITORY", DEFAULT_GITHUB_REPOSITORY)).strip() or DEFAULT_GITHUB_REPOSITORY,
+        "control_branch": str(settings.get("GITHUB_CONTROL_BRANCH", DEFAULT_GITHUB_CONTROL_BRANCH)).strip() or DEFAULT_GITHUB_CONTROL_BRANCH,
+        "deploy_branch": str(settings.get("GITHUB_DEPLOY_BRANCH", DEFAULT_GITHUB_DEPLOY_BRANCH)).strip() or DEFAULT_GITHUB_DEPLOY_BRANCH,
+        "request_path": str(settings.get("GITHUB_CONTROL_REQUEST_PATH", DEFAULT_GITHUB_REQUEST_PATH)).strip() or DEFAULT_GITHUB_REQUEST_PATH,
+        "status_path": str(settings.get("GITHUB_CONTROL_STATUS_PATH", DEFAULT_GITHUB_STATUS_PATH)).strip() or DEFAULT_GITHUB_STATUS_PATH,
+        "deploy_snapshot_json_path": str(settings.get("GITHUB_DEPLOY_SNAPSHOT_JSON_PATH", DEFAULT_GITHUB_DEPLOY_SNAPSHOT_JSON_PATH)).strip() or DEFAULT_GITHUB_DEPLOY_SNAPSHOT_JSON_PATH,
+        "deploy_snapshot_md_path": str(settings.get("GITHUB_DEPLOY_SNAPSHOT_MD_PATH", DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH)).strip() or DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH,
+    }
+
+
+def _github_api_headers(token: str) -> dict[str, str]:
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _github_contents_url(repository: str, path: str) -> str:
+    return f"https://api.github.com/repos/{repository}/contents/{path}"
+
+
+def github_read_json_file(
+    repository: str,
+    branch: str,
+    path: str,
+    token: str,
+    *,
+    session: requests.sessions.Session | None = None,
+) -> tuple[dict[str, Any], str]:
+    text, sha = github_read_text_file(repository, branch, path, token, session=session)
+    return json.loads(text), sha
+
+
+def github_read_text_file(
+    repository: str,
+    branch: str,
+    path: str,
+    token: str,
+    *,
+    session: requests.sessions.Session | None = None,
+) -> tuple[str, str]:
+    session = session or requests
+    response = session.get(
+        _github_contents_url(repository, path),
+        headers=_github_api_headers(token),
+        params={"ref": branch},
+        timeout=20,
+    )
+    if response.status_code == 404:
+        raise FileNotFoundError(f"GitHub file not found: {repository}@{branch}:{path}")
+    if response.status_code >= 400:
+        raise RuntimeError(f"GitHub read failed status={response.status_code} path={path} body={_short_body(response.text)}")
+    payload = response.json()
+    encoded = str(payload.get("content", "")).replace("\n", "")
+    if not encoded:
+        raise RuntimeError(f"GitHub read returned empty content for {path}")
+    text = base64.b64decode(encoded).decode("utf-8")
+    return text, str(payload.get("sha", ""))
+
+
+def github_write_json_file(
+    repository: str,
+    branch: str,
+    path: str,
+    token: str,
+    payload: dict[str, Any],
+    message: str,
+    *,
+    sha: str = "",
+    session: requests.sessions.Session | None = None,
+) -> dict[str, Any]:
+    session = session or requests
+    response = session.put(
+        _github_contents_url(repository, path),
+        headers=_github_api_headers(token),
+        json={
+            "message": message,
+            "content": base64.b64encode(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")).decode("ascii"),
+            "branch": branch,
+            **({"sha": sha} if sha else {}),
+        },
+        timeout=20,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"GitHub write failed status={response.status_code} path={path} body={_short_body(response.text)}")
+    return response.json()
+
+
+def github_write_text_file(
+    repository: str,
+    branch: str,
+    path: str,
+    token: str,
+    text: str,
+    message: str,
+    *,
+    sha: str = "",
+    session: requests.sessions.Session | None = None,
+) -> dict[str, Any]:
+    session = session or requests
+    response = session.put(
+        _github_contents_url(repository, path),
+        headers=_github_api_headers(token),
+        json={
+            "message": message,
+            "content": base64.b64encode(text.encode("utf-8")).decode("ascii"),
+            "branch": branch,
+            **({"sha": sha} if sha else {}),
+        },
+        timeout=20,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"GitHub write failed status={response.status_code} path={path} body={_short_body(response.text)}")
+    return response.json()
+
+
+def read_control_plane_request(token: str, settings: dict[str, Any] | None = None, *, session: requests.sessions.Session | None = None) -> tuple[dict[str, Any], str]:
+    config = get_github_control_config(settings)
+    return github_read_json_file(config["repository"], config["control_branch"], config["request_path"], token, session=session)
+
+
+def write_control_plane_request(
+    token: str,
+    payload: dict[str, Any],
+    settings: dict[str, Any] | None = None,
+    *,
+    sha: str = "",
+    session: requests.sessions.Session | None = None,
+    message: str = "Update control-plane request",
+) -> dict[str, Any]:
+    config = get_github_control_config(settings)
+    return github_write_json_file(config["repository"], config["control_branch"], config["request_path"], token, payload, message, sha=sha, session=session)
+
+
+def read_control_plane_status(token: str, settings: dict[str, Any] | None = None, *, session: requests.sessions.Session | None = None) -> tuple[dict[str, Any], str]:
+    config = get_github_control_config(settings)
+    return github_read_json_file(config["repository"], config["control_branch"], config["status_path"], token, session=session)
+
+
+def write_control_plane_status(
+    token: str,
+    payload: dict[str, Any],
+    settings: dict[str, Any] | None = None,
+    *,
+    sha: str = "",
+    session: requests.sessions.Session | None = None,
+    message: str = "Update control-plane status",
+) -> dict[str, Any]:
+    config = get_github_control_config(settings)
+    return github_write_json_file(config["repository"], config["control_branch"], config["status_path"], token, payload, message, sha=sha, session=session)
+
+
+def submit_control_plane_update_request(
+    token: str,
+    settings: dict[str, Any] | None = None,
+    *,
+    requested_by: str = "streamlit-viewer",
+    session: requests.sessions.Session | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    payload, sha = read_control_plane_request(token, settings, session=session)
+    if bool(payload.get("request_update")):
+        return False, payload
+    updated_payload = dict(payload)
+    updated_payload.update(
+        {
+            "request_update": True,
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "requested_by": str(requested_by),
+            "status": "requested",
+        }
+    )
+    write_control_plane_request(token, updated_payload, settings, sha=sha, session=session, message="Request snapshot refresh from viewer")
+    return True, updated_payload
 
 
 def get_api_key(settings: dict[str, Any] | None = None) -> str:
@@ -1271,8 +1472,50 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     )
 
 
+def _render_control_plane_status(settings: dict[str, Any]) -> None:
+    st.subheader("更新依頼")
+    token = _github_control_token(use_streamlit_secrets=True)
+    if not token:
+        st.info("更新依頼ボタンは無効、閲覧のみです。Streamlit secret `GITHUB_CONTROL_TOKEN` が未設定です。")
+        return
+    try:
+        status_payload, _ = read_control_plane_status(token, settings)
+    except Exception as exc:
+        st.warning(f"update_status.json の取得に失敗しました: {exc}")
+        status_payload = {"last_run_at": "", "status": "unknown", "message": ""}
+    try:
+        request_payload, _ = read_control_plane_request(token, settings)
+    except Exception as exc:
+        st.warning(f"update_request.json の取得に失敗しました: {exc}")
+        request_payload = {"request_update": False, "requested_at": "", "requested_by": "", "status": "unknown"}
+    status_cols = st.columns(3)
+    status_cols[0].metric("status", str(status_payload.get("status", "")))
+    status_cols[1].metric("last_run_at", str(status_payload.get("last_run_at", "")) or "-")
+    status_cols[2].metric("request", "pending" if bool(request_payload.get("request_update")) else "idle")
+    message = str(status_payload.get("message", "")).strip()
+    if message:
+        st.caption(f"message: {message}")
+    requested_at = str(request_payload.get("requested_at", "")).strip()
+    requested_by = str(request_payload.get("requested_by", "")).strip()
+    if request_payload.get("request_update"):
+        st.warning(f"更新依頼は受付中です。requested_at={requested_at or '-'} requested_by={requested_by or '-'}")
+        st.button("今すぐ更新", disabled=True, help="すでに依頼済みです")
+        return
+    if st.button("今すぐ更新", type="primary", help="control-plane branch に更新依頼を書き込みます"):
+        try:
+            submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer")
+            if submitted:
+                st.success(f"更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
+            else:
+                st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"更新依頼の送信に失敗しました: {exc}")
+
+
 def _render_viewer_only_app(settings: dict[str, Any]) -> None:
     st.caption("viewer-only モードです。保存済み snapshot のみ表示します。collector/live 取得は実行しません。")
+    _render_control_plane_status(settings)
     available_modes = _available_viewer_snapshot_modes(settings)
     if not available_modes:
         st.warning("まだ snapshot がありません")
