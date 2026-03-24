@@ -1,8 +1,8 @@
 {
   "meta": {
-    "generated_at": "2026-03-24T16:32:25.796457+00:00",
-    "generated_at_utc": "2026-03-24T16:32:25.796457+00:00",
-    "generated_at_jst": "2026-03-25 01:32:25 JST",
+    "generated_at": "2026-03-24T17:04:56.020561+00:00",
+    "generated_at_utc": "2026-03-24T17:04:56.020561+00:00",
+    "generated_at_jst": "2026-03-25 02:04:56 JST",
     "mode": "1530",
     "is_true_timepoint": false,
     "expected_time_label": "15:30",
@@ -549,8 +549,8 @@
       "breadth_up": 3,
       "breadth_down": 4,
       "median_live_ret": -0.20211093644734168,
-      "turnover_ratio_median": 1.4764620158817598,
-      "live_turnover_total": 153459526050.0,
+      "turnover_ratio_median": 1.5830702279006217,
+      "live_turnover_total": 153931734194.0,
       "industry_rank_live": NaN,
       "scan_participation_rate": 0.03896103896103896,
       "price_up_rate": 0.0,
@@ -1419,8 +1419,8 @@
       "breadth_up": 3,
       "breadth_down": 4,
       "median_live_ret": -0.20211093644734168,
-      "turnover_ratio_median": 1.4764620158817598,
-      "live_turnover_total": 153459526050.0,
+      "turnover_ratio_median": 1.5830702279006217,
+      "live_turnover_total": 153931734194.0,
       "industry_rank_live": NaN,
       "scan_participation_rate": 0.03896103896103896,
       "price_up_rate": 0.0,
@@ -2289,8 +2289,8 @@
       "breadth_up": 3,
       "breadth_down": 4,
       "median_live_ret": -0.20211093644734168,
-      "turnover_ratio_median": 1.4764620158817598,
-      "live_turnover_total": 153459526050.0,
+      "turnover_ratio_median": 1.5830702279006217,
+      "live_turnover_total": 153931734194.0,
       "industry_rank_live": NaN,
       "scan_participation_rate": 0.03896103896103896,
       "price_up_rate": 0.0,
@@ -5359,7 +5359,7 @@
   },
   "diagnostics": {
     "mode": "1530",
-    "generated_at": "2026-03-24T16:32:25.796457+00:00",
+    "generated_at": "2026-03-24T17:04:56.020561+00:00",
     "watch_candidate_count": 5,
     "buy_candidate_count": 11,
     "center_stock_count": 10,
@@ -5394,18 +5394,18 @@
     },
     "board": {
       "attempted_count": 50,
-      "success_count": 48,
+      "success_count": 49,
       "skipped_not_found_count": 0,
       "skipped_codes": [],
       "retried_count": 0,
       "fallback_exchange_success_count": 3,
       "failed_hard_count": 0,
-      "row_count": 48,
+      "row_count": 49,
       "selected_count": 50,
       "minimum_success_count": 25,
-      "excluded_missing_prev_close": 2,
+      "excluded_missing_prev_close": 1,
       "warning_messages": [
-        "board partial success: success_count=48 selected_count=50 skipped_not_found_count=0 excluded_missing_prev_close=2"
+        "board partial success: success_count=49 selected_count=50 skipped_not_found_count=0 excluded_missing_prev_close=1"
       ],
       "unregister_all_called": true,
       "unregister_all_retry_called": true,
@@ -5430,7 +5430,7 @@
   "paths": {
     "json_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\latest_1530.json",
     "markdown_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\latest_1530.md",
-    "dated_json_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-03-25_013225_1530.json",
-    "dated_markdown_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-03-25_013225_1530.md"
+    "dated_json_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-03-25_020456_1530.json",
+    "dated_markdown_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-03-25_020456_1530.md"
   }
 }
