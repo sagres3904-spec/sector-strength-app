@@ -1,6 +1,7 @@
 param(
     [string]$TaskPrefix = "sector-strength-snapshot",
-    [switch]$WriteDrive
+    [switch]$WriteDrive,
+    [switch]$PublishAfterSuccess
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +33,9 @@ foreach ($spec in $taskSpecs) {
     )
     if ($WriteDrive) {
         $argumentList += "-WriteDrive"
+    }
+    if ($PublishAfterSuccess) {
+        $argumentList += "-PublishAfterSuccess"
     }
     $action = New-ScheduledTaskAction -Execute $powershellExe -Argument ($argumentList -join " ")
     $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $spec.Time

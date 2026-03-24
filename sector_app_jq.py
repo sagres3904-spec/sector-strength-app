@@ -118,64 +118,111 @@ except ModuleNotFoundError:
         return normalized
 
 
-    def saved_snapshot_timing_warning(meta: dict[str, Any]) -> str:
-        normalized = normalize_snapshot_meta(meta)
-        if bool(normalized.get("is_true_timepoint")):
-            return ""
-        generated_at_jst = str(normalized.get("generated_at_jst", "")).strip()
-        expected_time_label = str(normalized.get("expected_time_label", "")).strip()
-        if generated_at_jst and expected_time_label:
-            return f"この表示は {expected_time_label} 向けのスナップショットです。実際の保存時刻は {generated_at_jst} で、対象時点ぴったりの固定値ではありません。"
+def saved_snapshot_timing_warning(meta: dict[str, Any]) -> str:
+    normalized = normalize_snapshot_meta(meta)
+    if bool(normalized.get("is_true_timepoint")):
         return ""
+    generated_at_jst = str(normalized.get("generated_at_jst", "")).strip()
+    expected_time_label = str(normalized.get("expected_time_label", "")).strip()
+    if generated_at_jst and expected_time_label:
+        return f"この表示は {expected_time_label} 向けのスナップショットです。実際の保存時刻は {generated_at_jst} で、対象時点ぴったりの固定値ではありません。"
+    return ""
 
 
-    def read_snapshot_json(mode: str, settings: dict[str, Any], root_dir: Path) -> tuple[str, _SnapshotStoreResult]:
-        snapshot_path = _snapshot_dir(settings, root_dir) / f"latest_{mode}.json"
-        if not snapshot_path.exists():
-            raise FileNotFoundError(f"まだ snapshot がありません: latest_{mode}.json")
-        payload_text = snapshot_path.read_text(encoding="utf-8")
-        return payload_text, _SnapshotStoreResult(
-            paths={"json_path": str(snapshot_path)},
-            source_label=f"latest_{mode}.json を読み込みました",
-            backend_name="local",
-            warning_message="",
-        )
+def _parse_snapshot_generated_at(meta: dict[str, Any]) -> datetime | None:
+    raw_value = str(meta.get("generated_at", "") or meta.get("generated_at_utc", "")).strip()
+    if not raw_value:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone(timedelta(hours=9)))
 
 
-    def write_snapshot_bundle_to_store(
-        *,
-        mode: str,
-        generated_at: str,
-        json_text: str,
-        markdown_text: str,
-        settings: dict[str, Any],
-        root_dir: Path,
-        write_drive: bool = False,
-    ) -> _SnapshotStoreResult:
-        snapshot_dir = _snapshot_dir(settings, root_dir)
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
-        generated_dt = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
-        generated_jst = generated_dt.astimezone(timezone(timedelta(hours=9)))
-        timestamp_prefix = generated_jst.strftime("%Y-%m-%d_%H%M%S")
-        latest_json = snapshot_dir / f"latest_{mode}.json"
-        latest_md = snapshot_dir / f"latest_{mode}.md"
-        dated_json = snapshot_dir / f"{timestamp_prefix}_{mode}.json"
-        dated_md = snapshot_dir / f"{timestamp_prefix}_{mode}.md"
-        latest_json.write_text(json_text, encoding="utf-8")
-        latest_md.write_text(markdown_text, encoding="utf-8")
-        dated_json.write_text(json_text, encoding="utf-8")
-        dated_md.write_text(markdown_text, encoding="utf-8")
-        return _SnapshotStoreResult(
-            paths={
-                "json_path": str(latest_json),
-                "markdown_path": str(latest_md),
-                "dated_json_path": str(dated_json),
-                "dated_markdown_path": str(dated_md),
-            },
-            source_label=f"latest_{mode}.json を更新しました",
-            backend_name="local",
-            warning_message="" if not write_drive else "fallback writer ignores write_drive option",
-        )
+def _snapshot_expected_jst(mode: str, date_jst: datetime) -> datetime | None:
+    mapping = {"0915": (9, 15), "1130": (11, 30), "1530": (15, 30)}
+    if mode not in mapping:
+        return None
+    hour, minute = mapping[mode]
+    return date_jst.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def evaluate_snapshot_guard(mode: str, meta: dict[str, Any], *, now_ts: datetime | None = None) -> dict[str, Any]:
+    now_ts = now_ts or datetime.now(timezone.utc)
+    now_jst = now_ts.astimezone(timezone(timedelta(hours=9)))
+    generated_at_jst = _parse_snapshot_generated_at(meta)
+    result = {
+        "mode": str(mode),
+        "is_missing": False,
+        "is_stale": False,
+        "generated_at_jst": generated_at_jst.isoformat() if generated_at_jst else "",
+        "reason": "",
+    }
+    if generated_at_jst is None:
+        result["is_stale"] = True
+        result["reason"] = f"{mode} は本日データなし / stale です。保存時刻を判定できません。"
+        return result
+    if generated_at_jst.date() != now_jst.date():
+        result["is_stale"] = True
+        result["reason"] = f"{mode} は本日データなし / stale です。保存日が {generated_at_jst.strftime('%Y-%m-%d')} です。"
+        return result
+    expected_jst = _snapshot_expected_jst(str(mode), generated_at_jst)
+    if expected_jst and generated_at_jst < (expected_jst - timedelta(minutes=30)):
+        result["is_stale"] = True
+        result["reason"] = f"{mode} は本日データなし / stale です。保存時刻 {generated_at_jst.strftime('%H:%M')} が想定時点より早すぎます。"
+        return result
+    return result
+
+def read_snapshot_json(mode: str, settings: dict[str, Any], root_dir: Path) -> tuple[str, _SnapshotStoreResult]:
+    snapshot_path = _snapshot_dir(settings, root_dir) / f"latest_{mode}.json"
+    if not snapshot_path.exists():
+        raise FileNotFoundError(f"まだ snapshot がありません: latest_{mode}.json")
+    payload_text = snapshot_path.read_text(encoding="utf-8")
+    return payload_text, _SnapshotStoreResult(
+        paths={"json_path": str(snapshot_path)},
+        source_label=f"latest_{mode}.json を読み込みました",
+        backend_name="local",
+        warning_message="",
+    )
+
+
+def write_snapshot_bundle_to_store(
+    *,
+    mode: str,
+    generated_at: str,
+    json_text: str,
+    markdown_text: str,
+    settings: dict[str, Any],
+    root_dir: Path,
+    write_drive: bool = False,
+) -> _SnapshotStoreResult:
+    snapshot_dir = _snapshot_dir(settings, root_dir)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    generated_dt = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+    generated_jst = generated_dt.astimezone(timezone(timedelta(hours=9)))
+    timestamp_prefix = generated_jst.strftime("%Y-%m-%d_%H%M%S")
+    latest_json = snapshot_dir / f"latest_{mode}.json"
+    latest_md = snapshot_dir / f"latest_{mode}.md"
+    dated_json = snapshot_dir / f"{timestamp_prefix}_{mode}.json"
+    dated_md = snapshot_dir / f"{timestamp_prefix}_{mode}.md"
+    latest_json.write_text(json_text, encoding="utf-8")
+    latest_md.write_text(markdown_text, encoding="utf-8")
+    dated_json.write_text(json_text, encoding="utf-8")
+    dated_md.write_text(markdown_text, encoding="utf-8")
+    return _SnapshotStoreResult(
+        paths={
+            "json_path": str(latest_json),
+            "markdown_path": str(latest_md),
+            "dated_json_path": str(dated_json),
+            "dated_markdown_path": str(dated_md),
+        },
+        source_label=f"latest_{mode}.json を更新しました",
+        backend_name="local",
+        warning_message="" if not write_drive else "fallback writer ignores write_drive option",
+    )
 
 try:
     import tomllib
@@ -215,10 +262,13 @@ if not logger.handlers:
 UI_COLUMN_LABELS = {
     "sector_name": "セクター名",
     "n": "採用銘柄数",
+    "sector_constituent_count": "構成銘柄数",
+    "today_rank": "今日順位",
+    "persistence_rank": "継続順位",
     "breadth": "上昇 : 下落",
     "median_ret": "中央値騰落率",
     "turnover_ratio_median": "売買代金倍率",
-    "industry_rank_live": "業種上昇順位",
+    "industry_rank_live": "業種上昇率順位",
     "sector_rank_1w": "1週順位",
     "sector_rank_1m": "1か月順位",
     "sector_rank_3m": "3か月順位",
@@ -245,8 +295,41 @@ UI_COLUMN_LABELS = {
     "rel_1w": "1週相対強度",
     "rel_1m": "1か月相対強度",
     "rel_3m": "3か月相対強度",
+    "topix_ret_1w": "TOPIX1週(%)",
+    "topix_ret_1m": "TOPIX1か月(%)",
+    "topix_ret_3m": "TOPIX3か月(%)",
+    "rs_vs_topix_1w": "TOPIX比1週RS",
+    "rs_vs_topix_1m": "TOPIX比1か月RS",
+    "rs_vs_topix_3m": "TOPIX比3か月RS",
+    "sector_rs_vs_topix_1w": "セクターTOPIX比1週RS",
+    "sector_rs_vs_topix_1m": "セクターTOPIX比1か月RS",
+    "sector_rs_vs_topix_3m": "セクターTOPIX比3か月RS",
     "price_vs_ma20_pct": "20日線乖離(%)",
-    "52w_flag": "52週高値フラグ",
+    "52w_flag": "20日高値近辺",
+    "high_20d_flag": "20日高値近辺",
+    "earnings_buffer_days": "決算まで日数",
+    "finance_health_score": "財務健全度",
+    "finance_health_flag": "財務健全フラグ",
+    "price_block_score": "価格ブロック",
+    "flow_block_score": "資金流入ブロック",
+    "participation_block_score": "参加・広がりブロック",
+    "intraday_total_score": "intraday総合",
+    "scan_member_count": "scan対象数",
+    "scan_participation_rate": "scan参加率",
+    "price_up_rate": "price_up比率",
+    "turnover_count_rate": "売買代金流入比率",
+    "volume_surge_rate": "出来高急増比率",
+    "turnover_surge_rate": "売買代金急増比率",
+    "breadth_up_rate": "上昇比率",
+    "breadth_down_rate": "下落比率",
+    "breadth_net_rate": "広がり純比率",
+    "sector_positive_ratio": "セクター上昇比率",
+    "candidate_rank_1w": "順位",
+    "candidate_rank_1m": "順位",
+    "representative_stock": "代表銘柄",
+    "representative_score": "代表銘柄スコア",
+    "swing_score_1w": "1週間候補スコア",
+    "swing_score_1m": "1か月候補スコア",
     "material_title": "材料タイトル",
     "focus_reason": "注目理由",
     "total_score": "総合スコア",
@@ -655,12 +738,21 @@ def _request_json(
     json_body: dict[str, Any] | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
-    response = requests.request(method, url, headers=headers, params=params, json=json_body, timeout=timeout)
-    if response.status_code in {401, 403}:
-        raise JQuantsAuthError(f"J-Quants authentication failed (401/403). The API key is invalid or expired. body={_short_body(response.text)}")
-    if response.status_code >= 400:
-        raise RuntimeError(f"HTTP error status={response.status_code} url={response.url} body={_short_body(response.text)}")
-    return response.json() if response.text else {}
+    backoff_seconds = [1.5, 3.0, 6.0]
+    for attempt in range(len(backoff_seconds) + 1):
+        response = requests.request(method, url, headers=headers, params=params, json=json_body, timeout=timeout)
+        if response.status_code in {401, 403}:
+            raise JQuantsAuthError(f"J-Quants authentication failed (401/403). The API key is invalid or expired. body={_short_body(response.text)}")
+        if response.status_code == 429 and attempt < len(backoff_seconds):
+            retry_after = _coerce_numeric(pd.Series([response.headers.get("Retry-After")])).iloc[0]
+            sleep_seconds = float(retry_after) if pd.notna(retry_after) and float(retry_after) > 0 else backoff_seconds[attempt]
+            logger.warning("rate limited status=429 url=%s sleep=%.1fs attempt=%s", response.url, sleep_seconds, attempt + 1)
+            time.sleep(sleep_seconds)
+            continue
+        if response.status_code >= 400:
+            raise RuntimeError(f"HTTP error status={response.status_code} url={response.url} body={_short_body(response.text)}")
+        return response.json() if response.text else {}
+    raise RuntimeError(f"HTTP error status=429 url={url} body=rate limit retry exhausted")
 
 
 def jquants_get_all(path: str, params: dict[str, Any], api_key: str | None = None) -> list[dict[str, Any]]:
@@ -753,6 +845,7 @@ def get_price_history(trading_dates: list[str], *, api_key: str | None = None, l
     total = len(date_list)
     for idx, date_str in enumerate(date_list, start=1):
         frames.append(get_price_df(date_str, api_key=api_key))
+        time.sleep(0.2)
         if idx == total or idx % 10 == 0:
             logger.info("get_price_df progress %s/%s", idx, total)
     out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["code", "date", "close", "volume", "turnover"])
@@ -760,13 +853,177 @@ def get_price_history(trading_dates: list[str], *, api_key: str | None = None, l
     return out.dropna(subset=["date"]).sort_values(["code", "date"]).reset_index(drop=True)
 
 
+def _extract_offset_close(aligned_close: pd.DataFrame, trading_dates: list[str], offset: int, column_name: str) -> pd.DataFrame:
+    if aligned_close.empty:
+        return pd.DataFrame(columns=["code", column_name])
+    if len(trading_dates) < offset + 1:
+        return pd.DataFrame(columns=["code", column_name])
+    target_date = pd.Timestamp(trading_dates[-(offset + 1)])
+    series = aligned_close.loc[target_date] if target_date in aligned_close.index else pd.Series(dtype=float)
+    return series.rename(column_name).reset_index().rename(columns={"index": "code"})
+
+
+def _classify_optional_dataset_error(exc: Exception) -> tuple[str, str]:
+    message = str(exc or "").strip()
+    lowered = message.lower()
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "network_or_timeout", message
+    if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.ProxyError)):
+        return "network_or_timeout", message
+    if isinstance(exc, requests.exceptions.RequestException):
+        return "network_or_timeout", message
+    if "status=404" in lowered or "does not exist" in lowered or "endpoint does not exist" in lowered:
+        return "endpoint_not_found", message
+    if "status=401" in lowered or "status=403" in lowered or "authentication failed" in lowered or "permission" in lowered:
+        return "auth_or_permission_error", message
+    if "status=400" in lowered:
+        return "bad_request", message
+    return "unknown_error", message
+
+
+def _get_optional_dataset(path: str, params: dict[str, Any], *, dataset_name: str, api_key: str | None = None) -> pd.DataFrame:
+    try:
+        return pd.DataFrame(jquants_get_all(path, params, api_key=api_key))
+    except Exception as exc:
+        reason_code, detail = _classify_optional_dataset_error(exc)
+        logger.warning("optional dataset skipped dataset=%s reason=%s path=%s", dataset_name, reason_code, path)
+        logger.warning("optional J-Quants dataset unavailable dataset=%s path=%s params=%s reason=%s detail=%s", dataset_name, path, params, reason_code, detail)
+        return pd.DataFrame()
+
+
+def get_topix_history(trading_dates: list[str], *, api_key: str | None = None) -> pd.DataFrame:
+    if not trading_dates:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close"])
+    start_date = trading_dates[0]
+    end_date = trading_dates[-1]
+    path = "/indices/bars/daily/topix"
+    params = {"from": start_date, "to": end_date}
+    df = _get_optional_dataset(path, params, dataset_name="topix_daily", api_key=api_key)
+    if not df.empty:
+        date_col = pick_optional_existing(df, ["Date", "date"])
+        close_col = pick_optional_existing(df, ["Close", "close", "AdjClose", "AdjustmentClose", "C"])
+        open_col = pick_optional_existing(df, ["Open", "open", "O"])
+        high_col = pick_optional_existing(df, ["High", "high", "H"])
+        low_col = pick_optional_existing(df, ["Low", "low", "L"])
+        if date_col and close_col:
+            out = pd.DataFrame(
+                {
+                    "date": pd.to_datetime(df[date_col], errors="coerce"),
+                    "open": _coerce_numeric(df[open_col]) if open_col else pd.NA,
+                    "high": _coerce_numeric(df[high_col]) if high_col else pd.NA,
+                    "low": _coerce_numeric(df[low_col]) if low_col else pd.NA,
+                    "close": _coerce_numeric(df[close_col]),
+                }
+            ).dropna(subset=["date", "close"])
+            if not out.empty:
+                calendar_index = pd.to_datetime(pd.Index(trading_dates), errors="coerce")
+                logger.info("topix direct endpoint used path=%s rows=%s", path, len(out))
+                return out.drop_duplicates(subset=["date"]).set_index("date").reindex(calendar_index).ffill().reset_index().rename(columns={"index": "date"})
+    # Fallback: use a TOPIX ETF proxy if the dedicated endpoint is not available.
+    etf_history = get_price_history(trading_dates, api_key=api_key, lookback_days=len(trading_dates))
+    etf_history = etf_history[etf_history["code"] == "1306"].copy()
+    if etf_history.empty:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close"])
+    logger.warning("topix direct endpoint unavailable; fallback=etf_proxy code=1306")
+    out = etf_history[["date", "close"]].copy()
+    out["open"] = pd.NA
+    out["high"] = pd.NA
+    out["low"] = pd.NA
+    calendar_index = pd.to_datetime(pd.Index(trading_dates), errors="coerce")
+    return out.drop_duplicates(subset=["date"]).set_index("date").reindex(calendar_index).ffill().reset_index().rename(columns={"index": "date"})
+
+
+def _build_topix_return_map(topix_history: pd.DataFrame, trading_dates: list[str]) -> dict[str, float | None]:
+    if topix_history.empty:
+        return {"topix_ret_1w": None, "topix_ret_1m": None, "topix_ret_3m": None}
+    aligned = topix_history.set_index("date")["close"].sort_index()
+    latest_close = aligned.iloc[-1] if len(aligned) else pd.NA
+    result: dict[str, float | None] = {"topix_ret_1w": None, "topix_ret_1m": None, "topix_ret_3m": None}
+    for label, offset in [("topix_ret_1w", 5), ("topix_ret_1m", 20), ("topix_ret_3m", 63)]:
+        if len(trading_dates) < offset + 1:
+            continue
+        base_date = pd.Timestamp(trading_dates[-(offset + 1)])
+        base_close = aligned.loc[base_date] if base_date in aligned.index else pd.NA
+        if pd.notna(latest_close) and pd.notna(base_close) and float(base_close) != 0.0:
+            result[label] = (float(latest_close) / float(base_close) - 1.0) * 100.0
+    return result
+
+
+def get_earnings_buffer_frame(trading_dates: list[str], *, api_key: str | None = None) -> pd.DataFrame:
+    if not trading_dates:
+        return pd.DataFrame(columns=["code", "earnings_buffer_days"])
+    latest_date = pd.Timestamp(trading_dates[-1])
+    path = "/equities/earnings-calendar"
+    params = {"from": latest_date.strftime("%Y-%m-%d"), "to": (latest_date + timedelta(days=90)).strftime("%Y-%m-%d")}
+    df = _get_optional_dataset(path, params, dataset_name="earnings_calendar", api_key=api_key)
+    if not df.empty:
+        code_col = pick_optional_existing(df, ["Code", "LocalCode", "code"])
+        event_col = pick_optional_existing(df, ["AnnouncementDate", "DisclosedDate", "ExpectedDate", "ScheduledDate", "Date", "date"])
+        if code_col and event_col:
+            out = pd.DataFrame({"code": df[code_col].map(_normalize_code4), "event_date": pd.to_datetime(df[event_col], errors="coerce")})
+            out = out[out["code"].map(_is_code4)].dropna(subset=["event_date"])
+            out = out[(out["event_date"] >= latest_date) & (out["event_date"] <= latest_date + timedelta(days=90))].copy()
+            logger.info("earnings calendar endpoint used path=%s rows_raw=%s rows_filtered=%s", path, len(df), len(out))
+            if not out.empty:
+                out["earnings_buffer_days"] = (out["event_date"] - latest_date).dt.days
+                return out.sort_values(["code", "event_date"]).drop_duplicates("code")[["code", "earnings_buffer_days"]].reset_index(drop=True)
+    return pd.DataFrame(columns=["code", "earnings_buffer_days"])
+
+
+def get_finance_health_frame(trading_dates: list[str], *, api_key: str | None = None) -> pd.DataFrame:
+    if not trading_dates:
+        return pd.DataFrame(columns=["code", "finance_health_score", "finance_health_flag"])
+    path = "/fins/summary"
+    frames: list[pd.DataFrame] = []
+    query_dates = list(reversed(trading_dates[-30:]))
+    for date_str in query_dates:
+        df = _get_optional_dataset(path, {"date": date_str}, dataset_name="financial_summary", api_key=api_key)
+        if df.empty:
+            continue
+        frames.append(df)
+    if frames:
+        df = pd.concat(frames, ignore_index=True)
+        code_col = pick_optional_existing(df, ["Code", "LocalCode", "code"])
+        disclosed_col = pick_optional_existing(df, ["DiscDate", "DisclosedDate", "Date", "date"])
+        if code_col:
+            out = pd.DataFrame({"code": df[code_col].map(_normalize_code4)})
+            out = out[out["code"].map(_is_code4)].copy()
+            if not out.empty:
+                out["disclosed_date"] = pd.to_datetime(df[disclosed_col], errors="coerce") if disclosed_col else pd.NaT
+                revenue = _coerce_numeric(df[pick_optional_existing(df, ["Sales", "Revenue", "NetSales"])]) if pick_optional_existing(df, ["Sales", "Revenue", "NetSales"]) else pd.Series([pd.NA] * len(df))
+                operating = _coerce_numeric(df[pick_optional_existing(df, ["OP", "OperatingProfit", "OperatingIncome"])]) if pick_optional_existing(df, ["OP", "OperatingProfit", "OperatingIncome"]) else pd.Series([pd.NA] * len(df))
+                ordinary = _coerce_numeric(df[pick_optional_existing(df, ["OdP", "OrdinaryProfit", "OrdinaryIncome"])]) if pick_optional_existing(df, ["OdP", "OrdinaryProfit", "OrdinaryIncome"]) else pd.Series([pd.NA] * len(df))
+                profit = _coerce_numeric(df[pick_optional_existing(df, ["NP", "Profit", "NetIncome"])]) if pick_optional_existing(df, ["NP", "Profit", "NetIncome"]) else pd.Series([pd.NA] * len(df))
+                equity_ratio = _coerce_numeric(df[pick_optional_existing(df, ["EqAR", "EquityToAssetRatio", "EquityRatio"])]) if pick_optional_existing(df, ["EqAR", "EquityToAssetRatio", "EquityRatio"]) else pd.Series([pd.NA] * len(df))
+                cashflow = _coerce_numeric(df[pick_optional_existing(df, ["CFO"])]) if pick_optional_existing(df, ["CFO"]) else pd.Series([pd.NA] * len(df))
+                out["finance_health_score"] = 0.0
+                out.loc[equity_ratio >= 0.4, "finance_health_score"] += 1.0
+                out.loc[(equity_ratio >= 0.2) & (equity_ratio < 0.4), "finance_health_score"] += 0.5
+                out.loc[(equity_ratio > 0) & (equity_ratio < 0.1), "finance_health_score"] -= 1.0
+                out.loc[operating > 0, "finance_health_score"] += 0.8
+                out.loc[operating < 0, "finance_health_score"] -= 1.0
+                out.loc[ordinary > 0, "finance_health_score"] += 0.4
+                out.loc[ordinary < 0, "finance_health_score"] -= 0.6
+                out.loc[profit > 0, "finance_health_score"] += 0.8
+                out.loc[profit < 0, "finance_health_score"] -= 1.0
+                out.loc[cashflow > 0, "finance_health_score"] += 0.3
+                out.loc[cashflow < 0, "finance_health_score"] -= 0.3
+                out.loc[(revenue <= 0) & revenue.notna(), "finance_health_score"] -= 0.6
+                out["finance_health_flag"] = out["finance_health_score"] >= -0.5
+                out = out.sort_values(["code", "disclosed_date"]).drop_duplicates("code", keep="last")
+                logger.info("financial summary endpoint used path=%s dates=%s rows=%s", path, len(query_dates), len(out))
+                return out[["code", "finance_health_score", "finance_health_flag"]].reset_index(drop=True)
+    return pd.DataFrame(columns=["code", "finance_health_score", "finance_health_flag"])
+
+
 def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, dict[str, Any]]:
     logger.info("build_daily_base_data start fast_check=%s", fast_check)
     logger.info("building daily base via J-Quants")
     api_key = get_api_key()
-    trading_dates = get_recent_trading_dates(n=40 if fast_check else 260, api_key=api_key)
+    lookback_trading_days = 70 if fast_check else 70
+    trading_dates = get_recent_trading_dates(n=lookback_trading_days, api_key=api_key)
     master_df = get_master_df(trading_dates[-1], api_key=api_key)
-    price_history = get_price_history(trading_dates, api_key=api_key, lookback_days=25 if fast_check else 80)
+    price_history = get_price_history(trading_dates, api_key=api_key, lookback_days=lookback_trading_days)
     price_history["volume"] = _coerce_numeric(price_history["volume"])
     price_history["turnover"] = _coerce_numeric(price_history["turnover"])
     price_history["close"] = _coerce_numeric(price_history["close"])
@@ -775,6 +1032,12 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
     price_history["avg_turnover_20d"] = grouped["turnover"].transform(lambda s: s.rolling(20, min_periods=20).mean())
     price_history["close_ma_20d"] = grouped["close"].transform(lambda s: s.rolling(20, min_periods=20).mean())
     price_history["high_20d"] = grouped["close"].transform(lambda s: s.rolling(20, min_periods=20).max())
+    aligned_close = (
+        price_history.pivot_table(index="date", columns="code", values="close", aggfunc="last")
+        .reindex(pd.to_datetime(pd.Index(trading_dates), errors="coerce"))
+        .sort_index()
+        .ffill()
+    )
     latest = grouped.tail(1).rename(
         columns={
             "close": "close_latest",
@@ -784,9 +1047,9 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
             "close_ma_20d": "close_ma_20d",
         }
     )
-    week = grouped.nth(-6).reset_index()[["code", "close"]].rename(columns={"close": "close_1w"})
-    month = grouped.nth(-21).reset_index()[["code", "close"]].rename(columns={"close": "close_1m"})
-    quarter = grouped.nth(-64).reset_index()[["code", "close"]].rename(columns={"close": "close_3m"})
+    week = _extract_offset_close(aligned_close, trading_dates, 5, "close_1w")
+    month = _extract_offset_close(aligned_close, trading_dates, 20, "close_1m")
+    quarter = _extract_offset_close(aligned_close, trading_dates, 63, "close_3m")
     base = master_df.merge(
         latest[["code", "close_latest", "volume_latest", "turnover_latest", "latest_date", "avg_volume_20d", "avg_turnover_20d", "close_ma_20d", "high_20d"]],
         on="code",
@@ -796,25 +1059,49 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
     base["ret_1w"] = (base["close_latest"] / base["close_1w"] - 1.0) * 100.0
     base["ret_1m"] = (base["close_latest"] / base["close_1m"] - 1.0) * 100.0
     base["ret_3m"] = (base["close_latest"] / base["close_3m"] - 1.0) * 100.0
-    sector_rank_1w = _sector_rank_from_returns(base, "ret_1w", "sector_ret_1w", "sector_rank_1w")
-    sector_rank_1m = _sector_rank_from_returns(base, "ret_1m", "sector_ret_1m", "sector_rank_1m")
-    sector_rank_3m = _sector_rank_from_returns(base, "ret_3m", "sector_ret_3m", "sector_rank_3m")
+    topix_history = get_topix_history(trading_dates, api_key=api_key)
+    topix_returns = _build_topix_return_map(topix_history, trading_dates)
+    for label, value in topix_returns.items():
+        base[label] = value
+    base["rs_vs_topix_1w"] = base["ret_1w"] - float(topix_returns.get("topix_ret_1w") or 0.0)
+    base["rs_vs_topix_1m"] = base["ret_1m"] - float(topix_returns.get("topix_ret_1m") or 0.0)
+    base["rs_vs_topix_3m"] = base["ret_3m"] - float(topix_returns.get("topix_ret_3m") or 0.0)
+    sector_rank_1w = _sector_rank_from_returns(base, "rs_vs_topix_1w", "sector_rs_vs_topix_1w", "sector_rank_1w")
+    sector_rank_1m = _sector_rank_from_returns(base, "rs_vs_topix_1m", "sector_rs_vs_topix_1m", "sector_rank_1m")
+    sector_rank_3m = _sector_rank_from_returns(base, "rs_vs_topix_3m", "sector_rs_vs_topix_3m", "sector_rank_3m")
     base = base.merge(sector_rank_1w, on="sector_name", how="left")
     base = base.merge(sector_rank_1m, on="sector_name", how="left")
     base = base.merge(sector_rank_3m, on="sector_name", how="left")
-    base["rel_1w"] = base["ret_1w"] - base["sector_ret_1w"]
-    base["rel_1m"] = base["ret_1m"] - base["sector_ret_1m"]
-    base["rel_3m"] = base["ret_3m"] - base["sector_ret_3m"]
+    base["rel_1w"] = base["ret_1w"] - base["sector_rs_vs_topix_1w"]
+    base["rel_1m"] = base["ret_1m"] - base["sector_rs_vs_topix_1m"]
+    base["rel_3m"] = base["ret_3m"] - base["sector_rs_vs_topix_3m"]
+    sector_counts = base.groupby("sector_name", dropna=False)["code"].nunique().reset_index(name="sector_constituent_count")
+    base = base.merge(sector_counts, on="sector_name", how="left")
+    earnings_frame = get_earnings_buffer_frame(trading_dates, api_key=api_key)
+    finance_frame = get_finance_health_frame(trading_dates, api_key=api_key)
+    base = base.merge(earnings_frame, on="code", how="left")
+    base = base.merge(finance_frame, on="code", how="left")
     base["TradingValue_latest"] = _coerce_numeric(base["turnover_latest"]).fillna(0.0)
     base["is_near_52w_high"] = False if fast_check else (base["close_latest"] >= base["high_20d"] * 0.97)
     base["is_new_52w_high"] = False if fast_check else (base["close_latest"] >= base["high_20d"])
+    base["high_20d_flag"] = base.apply(lambda row: "new_20d_high" if bool(row.get("is_new_52w_high")) else ("near_20d_high" if bool(row.get("is_near_52w_high")) else ""), axis=1)
     base["reversal_candidates"] = (base["ret_1w"] > 0) & (base["ret_1m"] < 0)
+    base["finance_health_score"] = _coerce_numeric(base.get("finance_health_score", pd.Series([pd.NA] * len(base))))
+    base["finance_health_flag"] = base.get("finance_health_flag", pd.Series([pd.NA] * len(base))).fillna(pd.NA)
     base["material_title"] = ""
     base["material_link"] = ""
     base["material_score"] = 0.0
     base["latest_date"] = pd.to_datetime(base["latest_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     logger.info("build_daily_base_data end rows=%s", len(base))
-    return base, {"latest_date": max(trading_dates), "trading_date_count": len(trading_dates), "lookback_days": 25 if fast_check else 80, "fast_check": fast_check}
+    return base, {
+        "latest_date": max(trading_dates),
+        "trading_date_count": len(trading_dates),
+        "lookback_days": lookback_trading_days,
+        "fast_check": fast_check,
+        "topix_source_rows": int(len(topix_history)),
+        "earnings_coverage_count": int(base["earnings_buffer_days"].notna().sum()) if "earnings_buffer_days" in base.columns else 0,
+        "finance_coverage_count": int(base["finance_health_score"].notna().sum()) if "finance_health_score" in base.columns else 0,
+    }
 
 
 def _kabu_headers(token: str) -> dict[str, str]:
@@ -1052,26 +1339,51 @@ def _board_has_major_fields(payload: dict[str, Any]) -> bool:
     return all(payload.get(key) not in {None, ""} for key in BOARD_MAJOR_FIELDS)
 
 
-def _fill_prev_close_from_base(payload: dict[str, Any], base_df: pd.DataFrame, code: str) -> bool:
+def _fill_prev_close_from_base(payload: dict[str, Any], base_df: pd.DataFrame, code: str, *, request_symbol: str = "", resolved_exchange: Any = "", mode: str = "") -> bool:
     if payload.get("PrevClose") not in {None, ""}:
         return True
     base_row = base_df.loc[base_df["code"].astype(str) == str(code)]
+    base_hit = not base_row.empty
+    latest_date = base_row["latest_date"].iloc[0] if base_hit and "latest_date" in base_row.columns else ""
     if base_row.empty:
-        logger.warning("board prev_close missing and base fallback unavailable code=%s", code)
+        logger.warning(
+            "board prev_close missing and base fallback unavailable mode=%s code=%s exchange=%s request_symbol=%s base_df_hit=%s latest_date=%s",
+            mode,
+            code,
+            resolved_exchange,
+            request_symbol,
+            base_hit,
+            latest_date,
+        )
         return False
     close_value = base_row["close_latest"].iloc[0] if "close_latest" in base_row.columns else None
-    latest_date = base_row["latest_date"].iloc[0] if "latest_date" in base_row.columns else ""
     if pd.isna(close_value) or close_value in {None, ""}:
-        logger.warning("board prev_close missing and base fallback unavailable code=%s", code)
+        logger.warning(
+            "board prev_close missing and base fallback unavailable mode=%s code=%s exchange=%s request_symbol=%s base_df_hit=%s latest_date=%s",
+            mode,
+            code,
+            resolved_exchange,
+            request_symbol,
+            base_hit,
+            latest_date,
+        )
         return False
     payload["PrevClose"] = close_value
-    logger.warning("board prev_close missing; filled from base_df code=%s latest_date=%s", code, latest_date)
+    logger.warning(
+        "board prev_close missing; filled from base_df mode=%s code=%s exchange=%s request_symbol=%s base_df_hit=%s latest_date=%s",
+        mode,
+        code,
+        resolved_exchange,
+        request_symbol,
+        base_hit,
+        latest_date,
+    )
     return True
 
 
-def _board_to_row(code: str, payload: dict[str, Any], request_symbol: str, resolved_exchange: int) -> dict[str, Any]:
+def _board_to_row(code: str, payload: dict[str, Any], request_symbol: str, resolved_exchange: int, *, mode: str = "") -> dict[str, Any]:
     if payload.get("BidPrice") in {None, ""} or payload.get("AskPrice") in {None, ""}:
-        logger.warning("board bid/ask missing code=%s request_symbol=%s", code, request_symbol)
+        logger.warning("board bid/ask missing mode=%s code=%s request_symbol=%s exchange=%s", mode, code, request_symbol, resolved_exchange)
     exchange_value = payload.get("Exchange", resolved_exchange)
     try:
         exchange_value = int(exchange_value)
@@ -1102,7 +1414,7 @@ def _board_exchange_candidates(code: str, exchange: Any, exchange_name: Any) -> 
     return [first_exchange] + [candidate for candidate in sorted(BOARD_REQUEST_EXCHANGES) if candidate != first_exchange]
 
 
-def _fetch_board_with_exchange_fallback(settings: dict[str, Any], token: str, base_df: pd.DataFrame, row: pd.Series) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+def _fetch_board_with_exchange_fallback(settings: dict[str, Any], token: str, base_df: pd.DataFrame, row: pd.Series, *, mode: str = "") -> tuple[dict[str, Any] | None, dict[str, Any]]:
     code = str(row["code"])
     tried_exchanges = _board_exchange_candidates(code, row.get("exchange"), row.get("exchange_name"))
     first_exchange = tried_exchanges[0]
@@ -1121,7 +1433,7 @@ def _fetch_board_with_exchange_fallback(settings: dict[str, Any], token: str, ba
         time.sleep(0.13)
         payload, error_info = _try_fetch_board(settings, token, request_symbol)
         if payload is not None:
-            has_prev_close = _fill_prev_close_from_base(payload, base_df, code)
+            has_prev_close = _fill_prev_close_from_base(payload, base_df, code, request_symbol=request_symbol, resolved_exchange=exchange_code, mode=mode)
             has_major_fields = _board_has_major_fields(payload)
             result = "success" if has_major_fields and has_prev_close else ("retry_required" if not has_major_fields else "missing_prev_close")
             logger.debug(
@@ -1154,7 +1466,7 @@ def _fetch_board_with_exchange_fallback(settings: dict[str, Any], token: str, ba
             time.sleep(float(settings.get("KABU_PUSH_TIMEOUT_SECONDS", 4.0)))
             retry_payload, retry_error_info = _try_fetch_board(settings, token, request_symbol)
             if retry_payload is not None:
-                has_prev_close = _fill_prev_close_from_base(retry_payload, base_df, code)
+                has_prev_close = _fill_prev_close_from_base(retry_payload, base_df, code, request_symbol=request_symbol, resolved_exchange=exchange_code, mode=mode)
                 has_major_fields = _board_has_major_fields(retry_payload)
                 result = "success" if has_major_fields and has_prev_close else ("retry_required" if not has_major_fields else "missing_prev_close")
                 logger.debug(
@@ -1267,7 +1579,7 @@ def select_deep_watch_universe(market_scan_df: pd.DataFrame, base_df: pd.DataFra
     return selected, {"candidate_count": pre_count, "selected_count": int(len(selected)), "excluded_invalid_code": invalid_code_count, "excluded_duplicate": duplicate_count, "excluded_market_unknown": 0}
 
 
-def enrich_with_board_snapshot(quotes_df: pd.DataFrame, base_df: pd.DataFrame, settings: dict[str, Any], token: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+def enrich_with_board_snapshot(quotes_df: pd.DataFrame, base_df: pd.DataFrame, settings: dict[str, Any], token: str, *, mode: str = "") -> tuple[pd.DataFrame, dict[str, Any]]:
     """Enrich selected quotes with board snapshots and retry once after register."""
     logger.info("enrich_with_board_snapshot start")
     rows: list[dict[str, Any]] = []
@@ -1293,7 +1605,7 @@ def enrich_with_board_snapshot(quotes_df: pd.DataFrame, base_df: pd.DataFrame, s
             continue
         attempted_count += 1
         try:
-            payload, attempt_diag = _fetch_board_with_exchange_fallback(settings, token, base_df, row)
+            payload, attempt_diag = _fetch_board_with_exchange_fallback(settings, token, base_df, row, mode=mode)
         except PipelineFailClosed as exc:
             failed_hard_count += 1
             hard_fail_reason = str(exc)
@@ -1326,14 +1638,14 @@ def enrich_with_board_snapshot(quotes_df: pd.DataFrame, base_df: pd.DataFrame, s
         if bool(attempt_diag.get("registry_reset_used")):
             unregister_all_called = True
         if has_major_fields and has_prev_close:
-            rows.append(_board_to_row(code, payload, request_symbol, resolved_exchange))
+            rows.append(_board_to_row(code, payload, request_symbol, resolved_exchange, mode=mode))
             continue
         if not has_major_fields:
             register_targets.append({"code": code, "resolved_exchange": resolved_exchange, "request_symbol": request_symbol})
-            rows.append(_board_to_row(code, payload, request_symbol, resolved_exchange))
+            rows.append(_board_to_row(code, payload, request_symbol, resolved_exchange, mode=mode))
             continue
         excluded_missing_prev_close += 1
-        logger.warning("board excluded due to missing prev_close after base fallback code=%s request_symbol=%s", code, request_symbol)
+        logger.warning("board excluded due to missing prev_close after base fallback mode=%s code=%s exchange=%s request_symbol=%s", mode, code, resolved_exchange, request_symbol)
     retry_count = 0
     if register_targets:
         successful_codes = {str(row["code"]) for row in rows}
@@ -1361,12 +1673,12 @@ def enrich_with_board_snapshot(quotes_df: pd.DataFrame, base_df: pd.DataFrame, s
             retry_count += 1
             if not _board_has_major_fields(payload):
                 raise PipelineFailClosed(f"fail-closed: board snapshot still missing major fields after register retry code={code} request_symbol={request_symbol}")
-            if not _fill_prev_close_from_base(payload, base_df, code):
+            if not _fill_prev_close_from_base(payload, base_df, code, request_symbol=request_symbol, resolved_exchange=resolved_exchange, mode=mode):
                 excluded_missing_prev_close += 1
                 row_map.pop(code, None)
-                logger.warning("board excluded due to missing prev_close after retry/base fallback code=%s request_symbol=%s", code, request_symbol)
+                logger.warning("board excluded due to missing prev_close after retry/base fallback mode=%s code=%s exchange=%s request_symbol=%s", mode, code, resolved_exchange, request_symbol)
                 continue
-            row_map[code] = _board_to_row(code, payload, request_symbol, resolved_exchange)
+            row_map[code] = _board_to_row(code, payload, request_symbol, resolved_exchange, mode=mode)
         rows = list(row_map.values())
     board_df = pd.DataFrame(rows)
     selected_count = int(len(quotes_df))
@@ -1470,55 +1782,132 @@ def _summarize_sector_frame(frame: pd.DataFrame, *, sort_columns: list[str], asc
     return frame.sort_values(sort_columns, ascending=ascending).reset_index(drop=True)
 
 
-def _build_sector_summary_bundle(ranking_df: pd.DataFrame, industry_df: pd.DataFrame, base_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    sector_columns = [
-        "code",
-        "name",
-        "sector_name",
-        "sector_rank_1w",
-        "sector_rank_1m",
-        "sector_rank_3m",
-        "ret_1w",
-        "ret_1m",
-        "ret_3m",
-        "TradingValue_latest",
-    ]
-    scan_df = ranking_df.merge(base_df[sector_columns], on="code", how="left", suffixes=("", "_base"))
-    scan_df["name"] = scan_df["name"].fillna(scan_df.get("name_base", "")).fillna("")
-    scan_df["sector_name"] = scan_df["sector_name"].fillna(scan_df.get("sector_name_base", "")).fillna("")
-    scan_df = scan_df[scan_df["sector_name"].astype(str).str.strip() != ""].copy()
-    if scan_df.empty:
-        empty = _summarize_sector_frame(pd.DataFrame(), sort_columns=["today_sector_score"], ascending=[False])
-        return {"today": empty, "weekly": empty.copy(), "monthly": empty.copy()}
+def _ensure_scan_source_type(scan_df: pd.DataFrame) -> pd.DataFrame:
+    if scan_df is None or scan_df.empty:
+        return pd.DataFrame() if scan_df is None else scan_df.copy()
 
-    sector_turnover_baseline = (
-        base_df.groupby("sector_name", dropna=False)["TradingValue_latest"]
-        .median()
-        .reset_index(name="sector_turnover_baseline")
+    out = scan_df.copy()
+    if "source_type" in out.columns:
+        return out
+
+    rank_map = {
+        "price_up_rank": "price_up",
+        "turnover_rank": "turnover",
+        "volume_surge_rank": "volume_surge",
+        "turnover_surge_rank": "turnover_surge",
+        "industry_up_rank": "industry_up",
+    }
+
+    pieces: list[pd.DataFrame] = []
+    for col, label in rank_map.items():
+        if col in out.columns:
+            mask = pd.to_numeric(out[col], errors="coerce").notna()
+            if mask.any():
+                part = out.loc[mask].copy()
+                part["source_type"] = label
+                pieces.append(part)
+
+    if pieces:
+        rebuilt = pd.concat(pieces, ignore_index=True)
+        dedupe_cols = [c for c in ["code", "sector_name", "source_type"] if c in rebuilt.columns]
+        if dedupe_cols:
+            rebuilt = rebuilt.drop_duplicates(subset=dedupe_cols)
+        return rebuilt
+
+    out["source_type"] = "market_scan"
+    return out
+
+
+def _build_sector_summary_bundle(ranking_df: pd.DataFrame, industry_df: pd.DataFrame, base_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    del ranking_df, industry_df, base_df
+    empty = pd.DataFrame()
+    return {"today": empty, "weekly": empty.copy(), "monthly": empty.copy()}
+
+
+def _build_stock_candidate_bundles(mode: str, merged: pd.DataFrame, sector_bundle: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    del mode, merged, sector_bundle
+    empty = pd.DataFrame()
+    return {"center_stocks": empty, "watch_candidates": empty, "buy_candidates": empty}
+
+
+def _empty_sector_leaderboard() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "today_rank",
+            "sector_name",
+            "sector_constituent_count",
+            "scan_member_count",
+            "breadth",
+            "industry_rank_live",
+            "price_up_count",
+            "turnover_count",
+            "volume_surge_count",
+            "turnover_surge_count",
+            "price_block_score",
+            "flow_block_score",
+            "participation_block_score",
+            "intraday_total_score",
+            "representative_stock",
+        ]
     )
-    unique_sector_df = (
-        scan_df.sort_values(["sector_name", "TradingValue_latest"], ascending=[True, False])
-        .drop_duplicates(["sector_name", "code"])
-        .copy()
+
+
+def _empty_persistence_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "persistence_rank",
+            "sector_name",
+            "sector_constituent_count",
+            "sector_rs_vs_topix_1w",
+            "sector_rs_vs_topix_1m",
+            "sector_rs_vs_topix_3m",
+            "representative_stock",
+        ]
     )
-    unique_sector_df = unique_sector_df.merge(sector_turnover_baseline, on="sector_name", how="left")
-    unique_sector_df["stock_turnover_ratio_vs_sector"] = _safe_ratio(unique_sector_df["TradingValue_latest"], unique_sector_df["sector_turnover_baseline"])
-    sector_base = unique_sector_df.groupby("sector_name", as_index=False).agg(
-        n=("code", "nunique"),
-        median_ret=("ret_1w", "median"),
-        turnover_ratio_median=("stock_turnover_ratio_vs_sector", "median"),
-        sector_rank_1w=("sector_rank_1w", "median"),
-        sector_rank_1m=("sector_rank_1m", "median"),
-        sector_rank_3m=("sector_rank_3m", "median"),
-        sector_turnover_total=("TradingValue_latest", "sum"),
+
+
+def _build_intraday_sector_leaderboard(ranking_df: pd.DataFrame, industry_df: pd.DataFrame, merged: pd.DataFrame, base_df: pd.DataFrame) -> pd.DataFrame:
+    ranking_df = _ensure_scan_source_type(ranking_df)
+    if ranking_df.empty or merged.empty:
+        return _empty_sector_leaderboard()
+    scan = ranking_df.merge(
+        base_df[["code", "name", "sector_name", "sector_constituent_count"]],
+        on="code",
+        how="left",
+        suffixes=("", "_base"),
+    )
+    scan["sector_name"] = scan["sector_name"].fillna(scan.get("sector_name_base", "")).fillna("")
+    scan = scan[scan["sector_name"].astype(str).str.strip() != ""].copy()
+    if scan.empty:
+        return _empty_sector_leaderboard()
+    live_scan = scan[["code", "sector_name"]].drop_duplicates().merge(
+        merged[
+            [
+                "code",
+                "name",
+                "live_ret_vs_prev_close",
+                "live_turnover_ratio_20d",
+                "live_volume_ratio_20d",
+                "live_turnover",
+            ]
+        ],
+        on="code",
+        how="left",
     )
     source_counts = (
-        scan_df.groupby(["sector_name", "source_type"])["code"]
+        scan.groupby(["sector_name", "source_type"])["code"]
         .nunique()
         .unstack(fill_value=0)
         .reset_index()
     )
-    sector_base = sector_base.merge(source_counts, on="sector_name", how="left")
+    sector_base = (
+        scan.groupby("sector_name", as_index=False)
+        .agg(
+            scan_member_count=("code", "nunique"),
+            sector_constituent_count=("sector_constituent_count", "max"),
+        )
+        .merge(source_counts, on="sector_name", how="left")
+    )
     for column in ["price_up", "turnover", "volume_surge", "turnover_surge"]:
         if column not in sector_base.columns:
             sector_base[column] = 0
@@ -1530,25 +1919,17 @@ def _build_sector_summary_bundle(ranking_df: pd.DataFrame, industry_df: pd.DataF
             "turnover_surge": "turnover_surge_count",
         }
     )
-    sector_base["breadth_up"] = sector_base["price_up_count"].fillna(0).astype(int)
-    sector_base["breadth_down"] = (sector_base["n"].fillna(0) - sector_base["breadth_up"]).clip(lower=0).astype(int)
-    sector_base["breadth"] = sector_base.apply(lambda row: f"{int(row['breadth_up'])}:{int(row['breadth_down'])}", axis=1)
-    leaders = (
-        unique_sector_df.sort_values(["sector_name", "TradingValue_latest"], ascending=[True, False])
-        .groupby("sector_name")["name"]
-        .apply(lambda s: ", ".join(str(name) for name in s.head(3)))
-        .reset_index(name="leaders")
+    live_sector = (
+        live_scan.groupby("sector_name", as_index=False)
+        .agg(
+            breadth_up=("live_ret_vs_prev_close", lambda s: int((_coerce_numeric(s) > 0).sum())),
+            breadth_down=("live_ret_vs_prev_close", lambda s: int((_coerce_numeric(s) < 0).sum())),
+            median_live_ret=("live_ret_vs_prev_close", "median"),
+            turnover_ratio_median=("live_turnover_ratio_20d", "median"),
+            live_turnover_total=("live_turnover", "sum"),
+        )
     )
-    sector_base = sector_base.merge(leaders, on="sector_name", how="left")
-    top_turnover = (
-        unique_sector_df.groupby("sector_name")["TradingValue_latest"]
-        .max()
-        .reset_index(name="top_stock_turnover")
-    )
-    sector_base = sector_base.merge(top_turnover, on="sector_name", how="left")
-    sector_base["leader_contribution_pct"] = (
-        _safe_ratio(sector_base["top_stock_turnover"], sector_base["sector_turnover_total"]).fillna(0.0) * 100.0
-    )
+    sector_base = sector_base.merge(live_sector, on="sector_name", how="left")
     if not industry_df.empty and "sector_name" in industry_df.columns:
         sector_base = sector_base.merge(
             industry_df[["sector_name", "rank_position"]].drop_duplicates("sector_name").rename(columns={"rank_position": "industry_rank_live"}),
@@ -1557,220 +1938,214 @@ def _build_sector_summary_bundle(ranking_df: pd.DataFrame, industry_df: pd.DataF
         )
     else:
         sector_base["industry_rank_live"] = pd.NA
-    sector_base["turnover_ratio_median"] = _coerce_numeric(sector_base["turnover_ratio_median"])
-    sector_base["today_sector_score"] = 0.0
-    for column, weight in {
-        "price_up_count": 1.35,
-        "turnover_surge_count": 1.2,
-        "volume_surge_count": 1.05,
-        "turnover_count": 1.0,
-        "median_ret": 0.8,
-        "turnover_ratio_median": 0.9,
-    }.items():
-        sector_base["today_sector_score"] += _score_percentile(sector_base[column]) * weight
-    for column, weight in {"industry_rank_live": 1.3, "sector_rank_1w": 0.9, "sector_rank_1m": 1.0, "sector_rank_3m": 1.0}.items():
-        sector_base["today_sector_score"] += _score_rank_ascending(sector_base[column]) * weight
-    sector_base["today_sector_score"] += _score_percentile(sector_base["breadth_up"] - sector_base["breadth_down"]) * 0.8
-    sector_base = sector_base[sector_base["n"].fillna(0) >= 3].copy()
-    sector_base["industry_rank_live"] = _coerce_numeric(sector_base["industry_rank_live"])
-
-    today = _summarize_sector_frame(
-        sector_base.copy(),
-        sort_columns=["today_sector_score", "price_up_count", "turnover_surge_count", "volume_surge_count"],
+    sector_base["sector_constituent_count"] = _coerce_numeric(sector_base["sector_constituent_count"]).fillna(sector_base["scan_member_count"]).clip(lower=1.0)
+    sector_base["scan_member_count"] = _coerce_numeric(sector_base["scan_member_count"]).fillna(0.0)
+    sector_base["scan_participation_rate"] = _safe_ratio(sector_base["scan_member_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["price_up_rate"] = _safe_ratio(sector_base["price_up_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["turnover_count_rate"] = _safe_ratio(sector_base["turnover_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["volume_surge_rate"] = _safe_ratio(sector_base["volume_surge_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["turnover_surge_rate"] = _safe_ratio(sector_base["turnover_surge_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["breadth_up_rate"] = _safe_ratio(sector_base["breadth_up"], sector_base["scan_member_count"]).fillna(0.0)
+    sector_base["breadth_down_rate"] = _safe_ratio(sector_base["breadth_down"], sector_base["scan_member_count"]).fillna(0.0)
+    sector_base["breadth_net_rate"] = sector_base["breadth_up_rate"] - sector_base["breadth_down_rate"]
+    sector_base["breadth"] = sector_base.apply(lambda row: f"{int(row.get('breadth_up', 0) or 0)}:{int(row.get('breadth_down', 0) or 0)}", axis=1)
+    sector_base["price_block_score"] = 0.0
+    for column, weight in {"industry_rank_live": 1.2, "price_up_rate": 1.1, "median_live_ret": 1.0}.items():
+        score_func = _score_rank_ascending if column == "industry_rank_live" else _score_percentile
+        sector_base["price_block_score"] += score_func(sector_base[column]) * weight
+    sector_base["flow_block_score"] = 0.0
+    for column, weight in {"turnover_count_rate": 1.0, "volume_surge_rate": 0.9, "turnover_surge_rate": 1.1, "turnover_ratio_median": 0.8}.items():
+        sector_base["flow_block_score"] += _score_percentile(sector_base[column]) * weight
+    sector_base["participation_block_score"] = 0.0
+    for column, weight in {"scan_participation_rate": 1.0, "breadth_up_rate": 1.0, "breadth_net_rate": 1.2}.items():
+        sector_base["participation_block_score"] += _score_percentile(sector_base[column]) * weight
+    sector_base["intraday_total_score"] = (
+        sector_base["price_block_score"] * 0.34
+        + sector_base["flow_block_score"] * 0.33
+        + sector_base["participation_block_score"] * 0.33
+    )
+    sector_base = sector_base[sector_base["sector_constituent_count"] >= 3].copy()
+    sector_base = sector_base.sort_values(
+        ["intraday_total_score", "price_block_score", "flow_block_score", "participation_block_score"],
         ascending=[False, False, False, False],
-    )
-    weekly = _summarize_sector_frame(
-        sector_base.copy(),
-        sort_columns=["sector_rank_1w", "today_sector_score"],
-        ascending=[True, False],
-    )
-    monthly = _summarize_sector_frame(
-        sector_base.copy(),
-        sort_columns=["sector_rank_1m", "today_sector_score"],
-        ascending=[True, False],
-    )
-    display_columns = [
-        "sector_name",
-        "n",
-        "breadth",
-        "median_ret",
-        "turnover_ratio_median",
-        "industry_rank_live",
-        "sector_rank_1w",
-        "sector_rank_1m",
-        "sector_rank_3m",
-        "leaders",
-        "leader_contribution_pct",
-        "price_up_count",
-        "turnover_count",
-        "volume_surge_count",
-        "turnover_surge_count",
-        "today_sector_score",
-    ]
-    return {
-        "today": today[display_columns].reset_index(drop=True),
-        "weekly": weekly[display_columns].reset_index(drop=True),
-        "monthly": monthly[display_columns].reset_index(drop=True),
-    }
+    ).reset_index(drop=True)
+    sector_base["today_rank"] = range(1, len(sector_base) + 1)
+    return sector_base
 
 
-def _build_stock_candidate_bundles(mode: str, merged: pd.DataFrame, sector_bundle: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
-    if merged.empty:
-        empty = pd.DataFrame()
-        return {"center_stocks": empty, "watch_candidates": empty, "buy_candidates": empty}
-
-    working = merged.copy()
-    top_today_sector_names = sector_bundle.get("today", pd.DataFrame()).head(6).get("sector_name", pd.Series(dtype=str)).tolist()
-    working["today_sector_score"] = working["sector_name"].map(
-        sector_bundle.get("today", pd.DataFrame()).set_index("sector_name")["today_sector_score"] if not sector_bundle.get("today", pd.DataFrame()).empty else pd.Series(dtype=float)
+def _build_sector_persistence_tables(base_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if base_df.empty:
+        empty = _empty_persistence_table()
+        return {"1w": empty, "1m": empty, "3m": empty}
+    representative = (
+        base_df.sort_values(["sector_name", "TradingValue_latest"], ascending=[True, False])
+        .groupby("sector_name")
+        .first()
+        .reset_index()[["sector_name", "name"]]
+        .rename(columns={"name": "representative_stock"})
     )
-    working["center_stock_score"] = 0.0
+
+    def _build(rs_label: str, rank_col: str) -> pd.DataFrame:
+        rs_column = f"rs_vs_topix_{rs_label}"
+        frame = (
+            base_df.groupby("sector_name", as_index=False)
+            .agg(
+                sector_constituent_count=("sector_constituent_count", "max"),
+                sector_rs_vs_topix_1w=("sector_rs_vs_topix_1w", "median"),
+                sector_rs_vs_topix_1m=("sector_rs_vs_topix_1m", "median"),
+                sector_rs_vs_topix_3m=("sector_rs_vs_topix_3m", "median"),
+                sector_positive_ratio=(rs_column, lambda s: float((_coerce_numeric(s) > 0).mean()) if len(s) else 0.0),
+                persistence_rank=(rank_col, "median"),
+            )
+            .merge(representative, on="sector_name", how="left")
+            .sort_values(["persistence_rank", f"sector_rs_vs_topix_{rs_label}"], ascending=[True, False])
+            .reset_index(drop=True)
+        )
+        frame["sector_rs_vs_topix"] = _coerce_numeric(frame[f"sector_rs_vs_topix_{rs_label}"])
+        frame["persistence_rank"] = range(1, len(frame) + 1)
+        return frame
+
+    return {"1w": _build("1w", "sector_rank_1w"), "1m": _build("1m", "sector_rank_1m"), "3m": _build("3m", "sector_rank_3m")}
+
+
+def _build_sector_representatives(merged: pd.DataFrame, today_sector_leaderboard: pd.DataFrame) -> pd.DataFrame:
+    if merged.empty or today_sector_leaderboard.empty:
+        return pd.DataFrame(columns=["sector_name", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "representative_score", "nikkei_search", "material_link"])
+    top_sector_names = today_sector_leaderboard.head(10)["sector_name"].astype(str).tolist()
+    working = merged[merged["sector_name"].isin(top_sector_names)].copy()
+    if working.empty:
+        return pd.DataFrame(columns=["sector_name", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "representative_score", "nikkei_search", "material_link"])
+    working["representative_score"] = 0.0
     for column, weight in {
-        "total_score": 1.2,
-        "live_turnover": 1.0,
+        "live_turnover_ratio_20d": 1.1,
         "live_volume_ratio_20d": 0.9,
         "live_ret_vs_prev_close": 1.0,
-        "live_ret_from_open": 0.9,
-        "rel_1w": 0.7,
-        "rel_1m": 0.8,
-        "rel_3m": 0.8,
+        "rs_vs_topix_1w": 0.7,
+        "TradingValue_latest": 0.8,
     }.items():
-        working["center_stock_score"] += _score_percentile(working[column]) * weight
-    center_stocks = (
-        working[working["sector_name"].isin(top_today_sector_names)]
-        .sort_values(["sector_name", "center_stock_score", "live_turnover"], ascending=[True, False, False])
+        working["representative_score"] += _score_percentile(working[column]) * weight
+    return (
+        working.sort_values(["sector_name", "representative_score", "live_turnover"], ascending=[True, False, False])
         .groupby("sector_name", as_index=False)
-        .head(3)[
+        .head(1)[["sector_name", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "representative_score", "nikkei_search", "material_link"]]
+        .reset_index(drop=True)
+    )
+
+
+def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard: pd.DataFrame, persistence_tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    if merged.empty:
+        empty = pd.DataFrame()
+        return {"1w": empty, "1m": empty}
+    working = merged.copy()
+    earnings_days = _coerce_numeric(working.get("earnings_buffer_days", pd.Series([pd.NA] * len(working)))).fillna(999)
+    finance_score = _coerce_numeric(working.get("finance_health_score", pd.Series([pd.NA] * len(working)))).fillna(0.0)
+    working["earnings_proximity_flag"] = earnings_days < 7
+    turnover_floor = float(_coerce_numeric(working["avg_turnover_20d"]).median(skipna=True) or 0.0)
+    volume_floor = float(_coerce_numeric(working["avg_volume_20d"]).median(skipna=True) or 0.0)
+    top_today_sectors = set(today_sector_leaderboard.head(6)["sector_name"].astype(str).tolist()) if not today_sector_leaderboard.empty else set()
+    top_1m_sectors = set(persistence_tables.get("1m", pd.DataFrame()).head(8)["sector_name"].astype(str).tolist())
+    top_3m_sectors = set(persistence_tables.get("3m", pd.DataFrame()).head(8)["sector_name"].astype(str).tolist())
+    working["belongs_today_sector"] = working["sector_name"].astype(str).isin(top_today_sectors)
+    working["belongs_persistence_sector"] = working["sector_name"].astype(str).isin(top_1m_sectors | top_3m_sectors)
+    working["liquidity_pass"] = (_coerce_numeric(working["avg_turnover_20d"]).fillna(0.0) >= turnover_floor) & (_coerce_numeric(working["avg_volume_20d"]).fillna(0.0) >= volume_floor)
+    working["ma20_band_pass"] = _coerce_numeric(working["price_vs_ma20_pct"]).between(-8.0, 15.0, inclusive="both").fillna(False)
+    working["finance_health_guard"] = finance_score >= -1.0
+    working["candidate_sector_component_1w"] = working["belongs_today_sector"].astype(float) * 1.0
+    working["candidate_turnover_component_1w"] = _score_percentile(working["live_turnover"]) * 1.0
+    working["candidate_volume_component_1w"] = _score_percentile(working["live_volume_ratio_20d"]) * 0.95
+    working["candidate_price_component_1w"] = _score_percentile(working["live_ret_vs_prev_close"]) * 0.95
+    working["candidate_rs_component_1w"] = _score_percentile(working["rs_vs_topix_1w"]) * 1.0
+    working["candidate_liquidity_component_1w"] = _score_percentile(working["avg_turnover_20d"]) * 0.7
+    working["candidate_earnings_component_1w"] = 0.0
+    working.loc[earnings_days >= 7, "candidate_earnings_component_1w"] = 0.2
+    working.loc[earnings_days < 3, "candidate_earnings_component_1w"] = -0.8
+    working.loc[(earnings_days >= 3) & (earnings_days < 7), "candidate_earnings_component_1w"] = -0.4
+    working["swing_score_1w"] = (
+        working["candidate_sector_component_1w"]
+        + working["candidate_turnover_component_1w"]
+        + working["candidate_volume_component_1w"]
+        + working["candidate_price_component_1w"]
+        + working["candidate_rs_component_1w"]
+        + working["candidate_liquidity_component_1w"]
+        + working["candidate_earnings_component_1w"]
+    )
+    swing_1w = (
+        working[
+            working["belongs_today_sector"]
+            & working["liquidity_pass"]
+        ]
+        .sort_values(["swing_score_1w", "live_turnover"], ascending=[False, False])[
             [
-                "sector_name",
                 "code",
                 "name",
-                "live_price",
+                "sector_name",
+                "rs_vs_topix_1w",
                 "live_ret_vs_prev_close",
-                "live_ret_from_open",
                 "live_turnover",
-                "live_volume_ratio_20d",
-                "live_turnover_ratio_20d",
-                "ret_1w",
-                "ret_1m",
-                "ret_3m",
-                "rel_1w",
-                "rel_1m",
-                "rel_3m",
-                "center_stock_score",
+                "avg_turnover_20d",
+                "earnings_buffer_days",
                 "nikkei_search",
                 "material_link",
             ]
         ]
-        .reset_index(drop=True)
-    )
-    center_codes = set(center_stocks["code"].astype(str).tolist())
-
-    turnover_floor = float(_coerce_numeric(working["avg_turnover_20d"]).median(skipna=True) or 0.0)
-    volume_floor = float(_coerce_numeric(working["avg_volume_20d"]).median(skipna=True) or 0.0)
-    working["turnover_floor_pass"] = _coerce_numeric(working["avg_turnover_20d"]).fillna(0.0) >= turnover_floor
-    working["volume_floor_pass"] = _coerce_numeric(working["avg_volume_20d"]).fillna(0.0) >= volume_floor
-    working["ma20_band_pass"] = _coerce_numeric(working["price_vs_ma20_pct"]).between(-5.0, 18.0, inclusive="both").fillna(False)
-    working["trend_guard_pass"] = (_coerce_numeric(working["ret_1m"]).fillna(-999) >= -15.0) & (_coerce_numeric(working["ret_3m"]).fillna(-999) >= -20.0)
-    working["sector_guard_pass"] = (_coerce_numeric(working["sector_rank_1m"]).fillna(999) <= 12) | (_coerce_numeric(working["sector_rank_3m"]).fillna(999) <= 12)
-    working["flow_guard_pass"] = (_coerce_numeric(working["live_turnover_ratio_20d"]).fillna(0.0) >= 1.0) & (_coerce_numeric(working["live_volume_ratio_20d"]).fillna(0.0) >= 1.0)
-    working["earnings_proximity_flag"] = False
-    working["atr_pct"] = pd.NA
-    working["buyability_score"] = 0.0
-    for column, weight in {
-        "live_turnover_ratio_20d": 1.0,
-        "live_volume_ratio_20d": 0.9,
-        "ret_1m": 0.6,
-        "ret_3m": 0.7,
-        "today_sector_score": 0.8,
-        "center_stock_score": 0.6,
-    }.items():
-        working["buyability_score"] += _score_percentile(working[column]) * weight
-    working["buyability_score"] += _score_rank_ascending(working["sector_rank_1m"]) * 0.6
-    working["buyability_score"] += _score_rank_ascending(working["sector_rank_3m"]) * 0.7
-    working["buy_candidate_flag"] = (
-        working["turnover_floor_pass"]
-        & working["volume_floor_pass"]
-        & working["ma20_band_pass"]
-        & working["trend_guard_pass"]
-        & working["sector_guard_pass"]
-        & working["flow_guard_pass"]
-        & (~working["earnings_proximity_flag"])
-    )
-    working["buyability_label"] = working["buy_candidate_flag"].map({True: "buy_candidate", False: "watch_only"})
-    candidate_pool = working[~working["code"].astype(str).isin(center_codes)].copy()
-    candidate_pool["watch_score"] = 0.0
-    for column, weight in {
-        "today_sector_score": 1.0,
-        "total_score": 0.9,
-        "live_turnover_ratio_20d": 0.8,
-        "live_volume_ratio_20d": 0.8,
-        "rel_1w": 0.6,
-        "rel_1m": 0.5,
-    }.items():
-        candidate_pool["watch_score"] += _score_percentile(candidate_pool[column]) * weight
-    candidate_pool["watch_candidate_flag"] = (
-        (~candidate_pool["buy_candidate_flag"])
-        & (
-            candidate_pool["sector_name"].isin(top_today_sector_names)
-            | (_coerce_numeric(candidate_pool["today_sector_score"]).fillna(0.0) >= float(_coerce_numeric(candidate_pool["today_sector_score"]).median(skipna=True) or 0.0))
-        )
-        & (
-            (_coerce_numeric(candidate_pool["live_turnover_ratio_20d"]).fillna(0.0) >= 0.8)
-            | (_coerce_numeric(candidate_pool["live_volume_ratio_20d"]).fillna(0.0) >= 0.8)
-            | (_coerce_numeric(candidate_pool["total_score"]).fillna(0.0) >= float(_coerce_numeric(candidate_pool["total_score"]).median(skipna=True) or 0.0))
-        )
-    )
-    ordered_columns = [
-        "sector_name",
-        "code",
-        "name",
-        "live_price",
-        "live_ret_vs_prev_close",
-        "live_ret_from_open",
-        "live_volume",
-        "avg_volume_20d",
-        "live_turnover",
-        "avg_turnover_20d",
-        "live_volume_ratio_20d",
-        "live_turnover_ratio_20d",
-        "price_vs_ma20_pct",
-        "ret_1w",
-        "ret_1m",
-        "ret_3m",
-        "sector_rank_1w",
-        "sector_rank_1m",
-        "sector_rank_3m",
-        "total_score",
-        "center_stock_score",
-        "watch_score",
-        "buyability_score",
-        "buyability_label",
-        "earnings_proximity_flag",
-        "atr_pct",
-        "52w_flag",
-        "material_title",
-        "focus_reason",
-        "nikkei_search",
-        "material_link",
-    ]
-    buy_candidates = (
-        candidate_pool[candidate_pool["buy_candidate_flag"]]
-        .sort_values(["buyability_score", "center_stock_score", "live_turnover"], ascending=[False, False, False])[ordered_columns]
         .head(20)
         .reset_index(drop=True)
     )
-    watch_candidates = (
-        candidate_pool[candidate_pool["watch_candidate_flag"]]
-        .sort_values(["watch_score", "today_sector_score", "live_turnover"], ascending=[False, False, False])[ordered_columns]
-        .head(30)
+    working["candidate_sector_component_1m"] = working["belongs_persistence_sector"].astype(float) * 1.0
+    working["candidate_rs_component_1m"] = _score_percentile(working["rs_vs_topix_1m"]) * 1.0
+    working["candidate_rs_component_3m"] = _score_percentile(working["rs_vs_topix_3m"]) * 0.9
+    working["candidate_ma20_component_1m"] = (1.0 - _score_percentile(_coerce_numeric(working["price_vs_ma20_pct"]).abs())) * 0.35
+    working["candidate_liquidity_component_1m"] = _score_percentile(working["avg_turnover_20d"]) * 0.7
+    working["candidate_sector_rank_component_1m"] = _score_rank_ascending(working["sector_rank_1m"]) * 0.8
+    working["candidate_sector_rank_component_3m"] = _score_rank_ascending(working["sector_rank_3m"]) * 0.8
+    working["candidate_earnings_component_1m"] = 0.0
+    working.loc[earnings_days >= 10, "candidate_earnings_component_1m"] = 0.2
+    working.loc[earnings_days < 5, "candidate_earnings_component_1m"] = -0.8
+    working.loc[(earnings_days >= 5) & (earnings_days < 10), "candidate_earnings_component_1m"] = -0.4
+    working["candidate_finance_component_1m"] = 0.0
+    working.loc[finance_score >= 0.0, "candidate_finance_component_1m"] = 0.4
+    working.loc[finance_score < -1.0, "candidate_finance_component_1m"] = -0.6
+    working["swing_score_1m"] = (
+        working["candidate_sector_component_1m"]
+        + working["candidate_rs_component_1m"]
+        + working["candidate_rs_component_3m"]
+        + working["candidate_ma20_component_1m"]
+        + working["candidate_liquidity_component_1m"]
+        + working["candidate_sector_rank_component_1m"]
+        + working["candidate_sector_rank_component_3m"]
+        + working["candidate_earnings_component_1m"]
+        + working["candidate_finance_component_1m"]
+    )
+    swing_1m = (
+        working[
+            working["belongs_persistence_sector"]
+            & working["liquidity_pass"]
+            & working["ma20_band_pass"]
+            & working["finance_health_guard"]
+        ]
+        .sort_values(["swing_score_1m", "TradingValue_latest"], ascending=[False, False])[
+            [
+                "code",
+                "name",
+                "sector_name",
+                "rs_vs_topix_1m",
+                "rs_vs_topix_3m",
+                "price_vs_ma20_pct",
+                "avg_turnover_20d",
+                "earnings_buffer_days",
+                "finance_health_flag",
+                "nikkei_search",
+                "material_link",
+            ]
+        ]
+        .head(20)
         .reset_index(drop=True)
     )
-    return {
-        "center_stocks": center_stocks,
-        "watch_candidates": watch_candidates,
-        "buy_candidates": buy_candidates,
-    }
+    if not swing_1w.empty:
+        swing_1w.insert(0, "candidate_rank_1w", range(1, len(swing_1w) + 1))
+    if not swing_1m.empty:
+        swing_1m.insert(0, "candidate_rank_1m", range(1, len(swing_1m) + 1))
+    return {"1w": swing_1w, "1m": swing_1m}
 
 
 def _make_nikkei_search_link(name: str, code: str) -> str:
@@ -1805,96 +2180,43 @@ def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str,
     st.dataframe(frame.rename(columns=UI_COLUMN_LABELS), **kwargs)
 
 
-SECTOR_DISPLAY_COLUMNS = [
+TODAY_SECTOR_DISPLAY_COLUMNS = [
+    "today_rank",
     "sector_name",
-    "n",
-    "breadth",
-    "median_ret",
-    "turnover_ratio_median",
+    "representative_stock",
+    "price_block_score",
+    "flow_block_score",
+    "participation_block_score",
     "industry_rank_live",
-    "sector_rank_1w",
-    "sector_rank_1m",
-    "sector_rank_3m",
-    "leaders",
+    "price_up_rate",
+    "turnover_count_rate",
+    "breadth",
+]
+
+PERSISTENCE_DISPLAY_COLUMNS = [
+    "persistence_rank",
+    "sector_name",
+    "sector_rs_vs_topix",
+    "sector_positive_ratio",
+    "representative_stock",
 ]
 
 
-def _prepare_today_sector_view(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFrame, list[str]]:
     compatibility_notes: list[str] = []
     if df is None or df.empty:
-        return pd.DataFrame(columns=SECTOR_DISPLAY_COLUMNS), compatibility_notes
-
+        return pd.DataFrame(columns=columns), compatibility_notes
     prepared = df.copy()
-
-    def _to_count_text(value: Any) -> str:
-        numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-        return str(int(numeric)) if pd.notna(numeric) else "0"
-
-    if "sector_name" not in prepared.columns:
-        prepared["sector_name"] = ""
-        compatibility_notes.append("sector_name")
-
-    if "n" not in prepared.columns:
-        if "count" in prepared.columns:
-            prepared["n"] = _coerce_numeric(prepared["count"])
+    for column in columns:
+        if column not in prepared.columns:
+            prepared[column] = "" if column in {"sector_name", "breadth", "representative_stock"} else pd.NA
+            compatibility_notes.append(column)
+    for column in columns:
+        if column in {"sector_name", "breadth", "representative_stock"}:
+            prepared[column] = prepared[column].fillna("").astype(str)
         else:
-            prepared["n"] = pd.NA
-        compatibility_notes.append("n")
-
-    if "breadth" not in prepared.columns:
-        if "advancing_count" in prepared.columns and "declining_count" in prepared.columns:
-            prepared["breadth"] = prepared.apply(
-                lambda row: f"{_to_count_text(row.get('advancing_count'))} : {_to_count_text(row.get('declining_count'))}",
-                axis=1,
-            )
-        else:
-            prepared["breadth"] = ""
-        compatibility_notes.append("breadth")
-
-    if "median_ret" not in prepared.columns:
-        if "live_sector_ret" in prepared.columns:
-            prepared["median_ret"] = _coerce_numeric(prepared["live_sector_ret"])
-        else:
-            prepared["median_ret"] = pd.NA
-        compatibility_notes.append("median_ret")
-
-    if "turnover_ratio_median" not in prepared.columns:
-        if "live_sector_turnover_score" in prepared.columns:
-            prepared["turnover_ratio_median"] = _coerce_numeric(prepared["live_sector_turnover_score"])
-        else:
-            prepared["turnover_ratio_median"] = pd.NA
-        compatibility_notes.append("turnover_ratio_median")
-
-    if "industry_rank_live" not in prepared.columns:
-        if "industry_up_rank" in prepared.columns:
-            prepared["industry_rank_live"] = _coerce_numeric(prepared["industry_up_rank"])
-        else:
-            prepared["industry_rank_live"] = pd.NA
-        compatibility_notes.append("industry_rank_live")
-
-    if "sector_rank_1w" not in prepared.columns:
-        prepared["sector_rank_1w"] = pd.NA
-        compatibility_notes.append("sector_rank_1w")
-
-    if "sector_rank_1m" not in prepared.columns:
-        prepared["sector_rank_1m"] = pd.NA
-        compatibility_notes.append("sector_rank_1m")
-
-    if "sector_rank_3m" not in prepared.columns:
-        prepared["sector_rank_3m"] = pd.NA
-        compatibility_notes.append("sector_rank_3m")
-
-    if "leaders" not in prepared.columns:
-        prepared["leaders"] = ""
-        compatibility_notes.append("leaders")
-
-    prepared["sector_name"] = prepared["sector_name"].fillna("").astype(str)
-    prepared["breadth"] = prepared["breadth"].fillna("").astype(str)
-    prepared["leaders"] = prepared["leaders"].fillna("").astype(str)
-    for column in ["n", "median_ret", "turnover_ratio_median", "industry_rank_live", "sector_rank_1w", "sector_rank_1m", "sector_rank_3m"]:
-        prepared[column] = _coerce_numeric(prepared[column])
-
-    return prepared.reindex(columns=SECTOR_DISPLAY_COLUMNS), compatibility_notes
+            prepared[column] = _coerce_numeric(prepared[column])
+    return prepared.reindex(columns=columns), compatibility_notes
 
 
 def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.DataFrame, board_df: pd.DataFrame, base_df: pd.DataFrame, now_ts: datetime) -> dict[str, Any]:
@@ -1919,40 +2241,59 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
     merged["total_score"] = 0.0
     for column, weight in MODE_SCORE_WEIGHTS[mode].items():
         merged["total_score"] += _score_percentile(merged[column]) * weight
-    merged["focus_reason"] = merged.apply(lambda row: ", ".join(filter(None, [f"sector:{row.get('sector_name', '')}" if pd.notna(row.get("sector_name")) else "", "turnover_breakout" if float(row.get("live_turnover_ratio_20d", 0) or 0) >= 1.5 else "", "volume_breakout" if float(row.get("live_volume_ratio_20d", 0) or 0) >= 1.5 else "", "near_52w_high" if bool(row.get("is_near_52w_high")) else ""])) or "live_strength", axis=1)
+    merged["focus_reason"] = merged.apply(lambda row: ", ".join(filter(None, [f"sector:{row.get('sector_name', '')}" if pd.notna(row.get("sector_name")) else "", "turnover_breakout" if float(row.get("live_turnover_ratio_20d", 0) or 0) >= 1.5 else "", "volume_breakout" if float(row.get("live_volume_ratio_20d", 0) or 0) >= 1.5 else "", "near_20d_high" if bool(row.get("is_near_52w_high")) else ""])) or "live_strength", axis=1)
     merged["nikkei_search"] = merged.apply(lambda row: _make_nikkei_search_link(str(row.get("name", "")), str(row.get("code", ""))), axis=1)
-    merged["52w_flag"] = merged.apply(lambda row: "new_high" if bool(row.get("is_new_52w_high")) else ("near_high" if bool(row.get("is_near_52w_high")) else ""), axis=1)
-    sector_bundle = _build_sector_summary_bundle(ranking_df, industry_df, base_df)
-    stock_bundle = _build_stock_candidate_bundles(mode, merged, sector_bundle)
+    merged["52w_flag"] = merged.apply(lambda row: "new_20d_high" if bool(row.get("is_new_52w_high")) else ("near_20d_high" if bool(row.get("is_near_52w_high")) else ""), axis=1)
+    today_sector_leaderboard = _build_intraday_sector_leaderboard(ranking_df, industry_df, merged, base_df)
+    sector_representatives = _build_sector_representatives(merged, today_sector_leaderboard)
+    rep_map = sector_representatives.set_index("sector_name")["name"] if not sector_representatives.empty else pd.Series(dtype=str)
+    if not today_sector_leaderboard.empty:
+        today_sector_leaderboard = today_sector_leaderboard.copy()
+        today_sector_leaderboard["representative_stock"] = today_sector_leaderboard["sector_name"].map(rep_map).fillna("")
+    persistence_tables = _build_sector_persistence_tables(base_df)
+    for key in ["1w", "1m", "3m"]:
+        if not persistence_tables[key].empty:
+            persistence_tables[key] = persistence_tables[key].copy()
+            persistence_tables[key]["representative_stock"] = persistence_tables[key]["sector_name"].map(rep_map).fillna(persistence_tables[key].get("representative_stock", ""))
+    swing_candidates = _build_swing_candidate_tables(merged, today_sector_leaderboard, persistence_tables)
     empty_state = {
-        "weekly_sector_summary": "" if not sector_bundle["weekly"].empty else "市場横断ランキングと daily base を突合した結果、1週順位を出せる主力セクターがありません。",
-        "monthly_sector_summary": "" if not sector_bundle["monthly"].empty else "市場横断ランキングと daily base を突合した結果、1か月順位を出せる主力セクターがありません。",
-        "buy_candidates": "" if not stock_bundle["buy_candidates"].empty else "20日平均売買代金・20日平均出来高・20日線乖離・1か月/3か月悪化回避・当日フロー条件を同時に満たす銘柄がありません。",
-        "watch_candidates": "" if not stock_bundle["watch_candidates"].empty else "中心銘柄を除いた監視候補がありません。",
-        "center_stocks": "" if not stock_bundle["center_stocks"].empty else "今日の本命セクターに紐づく中心銘柄を抽出できませんでした。",
+        "today_sector_leaderboard": "" if not today_sector_leaderboard.empty else "intraday 条件を満たす本命セクターがありません。",
+        "sector_persistence_1w": "" if not persistence_tables["1w"].empty else "TOPIX 比 1週継続性を出せるセクターがありません。",
+        "sector_persistence_1m": "" if not persistence_tables["1m"].empty else "TOPIX 比 1か月継続性を出せるセクターがありません。",
+        "sector_persistence_3m": "" if not persistence_tables["3m"].empty else "TOPIX 比 3か月継続性を出せるセクターがありません。",
+        "swing_candidates_1w": "" if not swing_candidates["1w"].empty else "1週間スイング候補の条件を満たす銘柄がありません。",
+        "swing_candidates_1m": "" if not swing_candidates["1m"].empty else "1か月スイング候補の条件を満たす銘柄がありません。",
+        "sector_representatives": "" if not sector_representatives.empty else "今日の本命セクターに紐づく代表銘柄を抽出できませんでした。",
     }
     meta = build_snapshot_meta(mode=mode, generated_at=now_ts, source_profile="local_kabu_jq_yanoshin", includes_kabu=True)
     return {
         "meta": meta,
-        "sector_summary": sector_bundle["today"],
-        "today_sector_summary": sector_bundle["today"],
-        "weekly_sector_summary": sector_bundle["weekly"],
-        "monthly_sector_summary": sector_bundle["monthly"],
-        "leaders_by_sector": stock_bundle["center_stocks"],
-        "center_stocks": stock_bundle["center_stocks"],
-        "focus_candidates": stock_bundle["watch_candidates"],
-        "watch_candidates": stock_bundle["watch_candidates"],
-        "buy_candidates": stock_bundle["buy_candidates"],
+        "sector_summary": today_sector_leaderboard,
+        "today_sector_summary": today_sector_leaderboard,
+        "today_sector_leaderboard": today_sector_leaderboard,
+        "weekly_sector_summary": persistence_tables["1w"],
+        "monthly_sector_summary": persistence_tables["1m"],
+        "sector_persistence_1w": persistence_tables["1w"],
+        "sector_persistence_1m": persistence_tables["1m"],
+        "sector_persistence_3m": persistence_tables["3m"],
+        "leaders_by_sector": sector_representatives,
+        "center_stocks": sector_representatives,
+        "sector_representatives": sector_representatives,
+        "focus_candidates": swing_candidates["1w"],
+        "watch_candidates": swing_candidates["1w"],
+        "buy_candidates": swing_candidates["1m"],
+        "swing_candidates_1w": swing_candidates["1w"],
+        "swing_candidates_1m": swing_candidates["1m"],
         "empty_reasons": empty_state,
         "diagnostics": {
             "mode": mode,
             "generated_at": meta["generated_at"],
-            "watch_candidate_count": int(len(stock_bundle["watch_candidates"])),
-            "buy_candidate_count": int(len(stock_bundle["buy_candidates"])),
-            "center_stock_count": int(len(stock_bundle["center_stocks"])),
+            "watch_candidate_count": int(len(swing_candidates["1w"])),
+            "buy_candidate_count": int(len(swing_candidates["1m"])),
+            "center_stock_count": int(len(sector_representatives)),
             "ranking_candidate_count": int(len(ranking_df)),
-            "sector_summary_scope": "market_scan_rankings_plus_daily_base",
-            "breadth_scope": "price_up_count vs ranked_non_price_up_count_within_market_scan",
+            "sector_summary_scope": "intraday_market_scan_normalized_by_sector_constituents",
+            "breadth_scope": "market_scan_members_with_live_ret_positive_vs_negative",
             "includes_kabu": True,
         },
     }
@@ -1984,14 +2325,41 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
     payload_text, store_result = read_snapshot_json(mode, settings, ROOT_DIR)
     payload = json.loads(payload_text)
     meta = normalize_snapshot_meta(payload.get("meta", {}))
-    focus_candidates = pd.DataFrame(payload.get("focus_candidates", []))
-    watch_candidates = pd.DataFrame(payload.get("watch_candidates", payload.get("focus_candidates", [])))
-    buy_candidates = pd.DataFrame(payload.get("buy_candidates", []))
-    center_stocks = pd.DataFrame(payload.get("center_stocks", payload.get("leaders_by_sector", [])))
-    today_sector_summary = pd.DataFrame(payload.get("today_sector_summary", payload.get("sector_summary", [])))
-    weekly_sector_summary = pd.DataFrame(payload.get("weekly_sector_summary", []))
-    monthly_sector_summary = pd.DataFrame(payload.get("monthly_sector_summary", []))
-    for frame in [focus_candidates, watch_candidates, buy_candidates, center_stocks]:
+    snapshot_guard = evaluate_snapshot_guard(mode, meta)
+    today_sector_summary = pd.DataFrame(payload.get("today_sector_leaderboard", payload.get("today_sector_summary", payload.get("sector_summary", []))))
+    weekly_sector_summary = pd.DataFrame(payload.get("sector_persistence_1w", payload.get("weekly_sector_summary", [])))
+    monthly_sector_summary = pd.DataFrame(payload.get("sector_persistence_1m", payload.get("monthly_sector_summary", [])))
+    sector_persistence_3m = pd.DataFrame(payload.get("sector_persistence_3m", []))
+    sector_representatives = pd.DataFrame(payload.get("sector_representatives", payload.get("center_stocks", payload.get("leaders_by_sector", []))))
+    swing_candidates_1w = pd.DataFrame(payload.get("swing_candidates_1w", payload.get("watch_candidates", payload.get("focus_candidates", []))))
+    swing_candidates_1m = pd.DataFrame(payload.get("swing_candidates_1m", payload.get("buy_candidates", [])))
+    if bool(snapshot_guard.get("is_stale")):
+        stale_reason = str(snapshot_guard.get("reason", "")).strip()
+        today_sector_summary = pd.DataFrame()
+        weekly_sector_summary = pd.DataFrame()
+        monthly_sector_summary = pd.DataFrame()
+        sector_persistence_3m = pd.DataFrame()
+        sector_representatives = pd.DataFrame()
+        swing_candidates_1w = pd.DataFrame()
+        swing_candidates_1m = pd.DataFrame()
+        payload_empty_reasons = dict(payload.get("empty_reasons", {}))
+        for key in [
+            "today_sector_leaderboard",
+            "sector_persistence_1w",
+            "sector_persistence_1m",
+            "sector_persistence_3m",
+            "sector_representatives",
+            "swing_candidates_1w",
+            "swing_candidates_1m",
+            "weekly_sector_summary",
+            "monthly_sector_summary",
+            "center_stocks",
+            "watch_candidates",
+            "buy_candidates",
+        ]:
+            payload_empty_reasons[key] = stale_reason
+        payload["empty_reasons"] = payload_empty_reasons
+    for frame in [swing_candidates_1w, swing_candidates_1m, sector_representatives]:
         if not frame.empty and "name" in frame.columns:
             frame["nikkei_search"] = frame.apply(lambda row: _make_nikkei_search_link(str(row.get("name", "")), str(row.get("code", ""))), axis=1)
     return {
@@ -2000,17 +2368,25 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
         "today_sector_summary": today_sector_summary,
         "weekly_sector_summary": weekly_sector_summary,
         "monthly_sector_summary": monthly_sector_summary,
-        "leaders_by_sector": center_stocks,
-        "center_stocks": center_stocks,
-        "focus_candidates": focus_candidates,
-        "watch_candidates": watch_candidates,
-        "buy_candidates": buy_candidates,
+        "today_sector_leaderboard": today_sector_summary,
+        "sector_persistence_1w": weekly_sector_summary,
+        "sector_persistence_1m": monthly_sector_summary,
+        "sector_persistence_3m": sector_persistence_3m,
+        "leaders_by_sector": sector_representatives,
+        "center_stocks": sector_representatives,
+        "sector_representatives": sector_representatives,
+        "focus_candidates": swing_candidates_1w,
+        "watch_candidates": swing_candidates_1w,
+        "buy_candidates": swing_candidates_1m,
+        "swing_candidates_1w": swing_candidates_1w,
+        "swing_candidates_1m": swing_candidates_1m,
         "empty_reasons": payload.get("empty_reasons", {}),
         "diagnostics": payload.get("diagnostics", {}),
+        "snapshot_guard": snapshot_guard,
         "paths": store_result.paths,
         "snapshot_source_label": store_result.source_label,
         "snapshot_backend_name": store_result.backend_name,
-        "snapshot_warning_message": store_result.warning_message,
+        "snapshot_warning_message": "\n".join(filter(None, [str(store_result.warning_message or "").strip(), str(snapshot_guard.get("reason", "")).strip()])),
     }
 
 
@@ -2026,7 +2402,7 @@ def run_cli(mode: str, write_drive: bool = False, fast_check: bool = False) -> d
             token = kabu_get_token(settings)
             ranking_df, industry_df, ranking_diag = build_market_scan_universe(base_df, settings, token)
         deep_watch_df, deep_watch_diag = select_deep_watch_universe(ranking_df, base_df, settings, mode)
-        board_df, board_diag = enrich_with_board_snapshot(deep_watch_df, base_df, settings, token)
+        board_df, board_diag = enrich_with_board_snapshot(deep_watch_df, base_df, settings, token, mode=mode)
         bundle = build_live_snapshot(mode, ranking_df, industry_df, board_df, base_df, datetime.now(timezone.utc))
         bundle["diagnostics"].update({"base_meta": base_meta, "ranking": ranking_diag, "deep_watch": deep_watch_diag, "board": board_diag, "write_completed": False})
         bundle["diagnostics"]["write_completed"] = True
@@ -2056,11 +2432,13 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     expected_time_label = str(meta.get("expected_time_label", "")).strip()
     timepoint_meaning = _timepoint_meaning(mode)
     empty_reasons = bundle.get("empty_reasons", {})
+    snapshot_guard = bundle.get("snapshot_guard", {})
     warning_text = saved_snapshot_timing_warning(meta) if is_saved_snapshot else ""
-    today_sector_view, today_sector_notes = _prepare_today_sector_view(bundle.get("today_sector_summary", bundle["sector_summary"]))
-    weekly_sector_view, weekly_sector_notes = _prepare_today_sector_view(bundle.get("weekly_sector_summary", pd.DataFrame()))
-    monthly_sector_view, monthly_sector_notes = _prepare_today_sector_view(bundle.get("monthly_sector_summary", pd.DataFrame()))
-    sector_compat_notes = sorted(set(today_sector_notes + weekly_sector_notes + monthly_sector_notes))
+    today_sector_view, today_sector_notes = _prepare_table_view(bundle.get("today_sector_leaderboard", bundle.get("today_sector_summary", bundle["sector_summary"])), TODAY_SECTOR_DISPLAY_COLUMNS)
+    weekly_sector_view, weekly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1w", bundle.get("weekly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
+    monthly_sector_view, monthly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1m", bundle.get("monthly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
+    quarter_sector_view, quarter_sector_notes = _prepare_table_view(bundle.get("sector_persistence_3m", pd.DataFrame()), PERSISTENCE_DISPLAY_COLUMNS)
+    sector_compat_notes = sorted(set(today_sector_notes + weekly_sector_notes + monthly_sector_notes + quarter_sector_notes))
     if generated_at_jst or mode:
         with st.expander("運用状態", expanded=False):
             mode_label = f"{expected_time_label} = {timepoint_meaning}" if expected_time_label and timepoint_meaning else expected_time_label or mode
@@ -2081,37 +2459,44 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
                 st.caption(warning_text)
             if sector_compat_notes:
                 st.caption("不足列があるので旧スナップショット互換で補完表示しています。")
+    if bool(snapshot_guard.get("is_stale")):
+        st.warning(str(snapshot_guard.get("reason", "")).strip() or f"{mode} は本日データなし / stale です。")
     _render_dataframe_or_reason(
         "今日の本命セクター",
         today_sector_view,
-        reason="市場横断ランキングと daily base の突合条件を満たす本命セクターがありません。",
+        reason=str(empty_reasons.get("today_sector_leaderboard", "intraday 条件を満たす本命セクターがありません。")),
     )
     _render_dataframe_or_reason(
-        "各本命セクターの中心銘柄",
-        bundle.get("center_stocks", bundle["leaders_by_sector"]),
-        reason=str(empty_reasons.get("center_stocks", "")),
+        "今日の本命セクター代表銘柄",
+        bundle.get("sector_representatives", bundle.get("center_stocks", bundle["leaders_by_sector"])),
+        reason=str(empty_reasons.get("sector_representatives", empty_reasons.get("center_stocks", ""))),
         link_columns=True,
     )
     _render_dataframe_or_reason(
         "1週間主力セクター",
         weekly_sector_view,
-        reason=str(empty_reasons.get("weekly_sector_summary", "")),
+        reason=str(empty_reasons.get("sector_persistence_1w", empty_reasons.get("weekly_sector_summary", ""))),
     )
     _render_dataframe_or_reason(
         "1か月主力セクター",
         monthly_sector_view,
-        reason=str(empty_reasons.get("monthly_sector_summary", "")),
+        reason=str(empty_reasons.get("sector_persistence_1m", empty_reasons.get("monthly_sector_summary", ""))),
     )
     _render_dataframe_or_reason(
-        "買い候補",
-        bundle.get("buy_candidates", pd.DataFrame()),
-        reason=str(empty_reasons.get("buy_candidates", "")),
+        "3か月主力セクター",
+        quarter_sector_view,
+        reason=str(empty_reasons.get("sector_persistence_3m", "")),
+    )
+    _render_dataframe_or_reason(
+        "1週間スイング候補銘柄",
+        bundle.get("swing_candidates_1w", bundle.get("watch_candidates", bundle["focus_candidates"])),
+        reason=str(empty_reasons.get("swing_candidates_1w", empty_reasons.get("watch_candidates", ""))),
         link_columns=True,
     )
     _render_dataframe_or_reason(
-        "監視候補",
-        bundle.get("watch_candidates", bundle["focus_candidates"]),
-        reason=str(empty_reasons.get("watch_candidates", "")),
+        "1か月スイング候補銘柄",
+        bundle.get("swing_candidates_1m", bundle.get("buy_candidates", pd.DataFrame())),
+        reason=str(empty_reasons.get("swing_candidates_1m", empty_reasons.get("buy_candidates", ""))),
         link_columns=True,
     )
     diagnostics = bundle.get("diagnostics", {})
