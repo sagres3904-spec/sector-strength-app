@@ -243,6 +243,39 @@ MODE_SCORE_WEIGHTS = {
     "1530": {"live_ret_from_open": 1.3, "live_ret_vs_prev_close": 1.2, "closing_strength": 1.2, "high_close_score": 1.0, "live_volume_ratio_20d": 1.0, "live_turnover_ratio_20d": 1.2, "ret_1w": 0.7, "ret_1m": 0.6, "material_score": 0.3},
     "now": {"live_ret_from_open": 1.4, "live_ret_vs_prev_close": 1.1, "gap_pct": 1.0, "live_volume_ratio_20d": 1.1, "live_turnover_ratio_20d": 1.3, "ret_1w": 0.6, "ret_1m": 0.5, "material_score": 0.3},
 }
+INTRADAY_BLOCK_COMPONENT_WEIGHTS = {
+    "price": {
+        "industry_up_rank_norm": 1.0,
+        "median_live_ret_norm": 0.9,
+        "price_up_share_of_sector": 1.0,
+        "price_up_share_of_market_scan": 0.8,
+    },
+    "flow": {
+        "turnover_share_of_sector": 1.0,
+        "turnover_surge_share_of_sector": 1.0,
+        "volume_surge_share_of_sector": 0.85,
+        "turnover_ratio_median_norm": 0.9,
+        "live_turnover_total_norm": 0.75,
+    },
+    "participation": {
+        "breadth_up_rate": 0.9,
+        "breadth_balance": 1.1,
+        "scan_coverage": 1.0,
+    },
+}
+INTRADAY_BLOCK_MODE_WEIGHTS = {
+    "0915": {"price": 0.31, "flow": 0.31, "participation": 0.38},
+    "1130": {"price": 0.37, "flow": 0.36, "participation": 0.27},
+    "1530": {"price": 0.25, "flow": 0.40, "participation": 0.35},
+    "now": {"price": 0.34, "flow": 0.35, "participation": 0.31},
+}
+REPRESENTATIVE_STOCK_SCORE_WEIGHTS = {
+    "live_turnover": 1.2,
+    "live_turnover_ratio_20d": 1.15,
+    "live_volume_ratio_20d": 0.95,
+    "live_ret_vs_prev_close": 0.9,
+    "avg_turnover_20d": 0.75,
+}
 VIEWER_ONLY_SNAPSHOT_MODES = ("1130", "1530")
 DEFAULT_GITHUB_REPOSITORY = "sagres3904-spec/sector-strength-app"
 DEFAULT_GITHUB_CONTROL_BRANCH = "control-plane"
@@ -317,13 +350,21 @@ UI_COLUMN_LABELS = {
     "intraday_total_score": "intraday総合",
     "scan_member_count": "scan対象数",
     "scan_participation_rate": "scan参加率",
-    "price_up_rate": "price_up比率",
+    "price_up_rate": "上昇銘柄比率",
     "turnover_count_rate": "売買代金流入比率",
     "volume_surge_rate": "出来高急増比率",
     "turnover_surge_rate": "売買代金急増比率",
+    "price_up_share_of_sector": "上昇銘柄比率",
+    "price_up_share_of_market_scan": "市場scan内上昇シェア",
+    "turnover_share_of_sector": "売買代金流入比率",
+    "turnover_surge_share_of_sector": "売買代金急増比率",
+    "volume_surge_share_of_sector": "出来高急増比率",
     "breadth_up_rate": "上昇比率",
     "breadth_down_rate": "下落比率",
+    "breadth_balance": "広がりバランス",
     "breadth_net_rate": "広がり純比率",
+    "scan_coverage": "scanカバー率",
+    "industry_up_rank_norm": "業種上昇率順位norm",
     "sector_positive_ratio": "セクター上昇比率",
     "candidate_rank_1w": "順位",
     "candidate_rank_1m": "順位",
@@ -1877,19 +1918,21 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
         columns=[
             "today_rank",
             "sector_name",
+            "representative_stock",
+            "price_block_score",
+            "flow_block_score",
+            "participation_block_score",
+            "industry_rank_live",
+            "price_up_share_of_sector",
+            "turnover_share_of_sector",
+            "breadth",
             "sector_constituent_count",
             "scan_member_count",
-            "breadth",
-            "industry_rank_live",
             "price_up_count",
             "turnover_count",
             "volume_surge_count",
             "turnover_surge_count",
-            "price_block_score",
-            "flow_block_score",
-            "participation_block_score",
             "intraday_total_score",
-            "representative_stock",
         ]
     )
 
@@ -1908,7 +1951,7 @@ def _empty_persistence_table() -> pd.DataFrame:
     )
 
 
-def _build_intraday_sector_leaderboard(ranking_df: pd.DataFrame, industry_df: pd.DataFrame, merged: pd.DataFrame, base_df: pd.DataFrame) -> pd.DataFrame:
+def _build_intraday_sector_leaderboard(mode: str, ranking_df: pd.DataFrame, industry_df: pd.DataFrame, merged: pd.DataFrame, base_df: pd.DataFrame) -> pd.DataFrame:
     ranking_df = _ensure_scan_source_type(ranking_df)
     if ranking_df.empty or merged.empty:
         return _empty_sector_leaderboard()
@@ -1922,6 +1965,8 @@ def _build_intraday_sector_leaderboard(ranking_df: pd.DataFrame, industry_df: pd
     scan = scan[scan["sector_name"].astype(str).str.strip() != ""].copy()
     if scan.empty:
         return _empty_sector_leaderboard()
+    market_scan_member_count = float(scan["code"].nunique() or 0.0)
+    source_totals = {str(key): float(value or 0.0) for key, value in scan.groupby("source_type")["code"].nunique().to_dict().items()}
     live_scan = scan[["code", "sector_name"]].drop_duplicates().merge(
         merged[
             [
@@ -1982,30 +2027,43 @@ def _build_intraday_sector_leaderboard(ranking_df: pd.DataFrame, industry_df: pd
         sector_base["industry_rank_live"] = pd.NA
     sector_base["sector_constituent_count"] = _coerce_numeric(sector_base["sector_constituent_count"]).fillna(sector_base["scan_member_count"]).clip(lower=1.0)
     sector_base["scan_member_count"] = _coerce_numeric(sector_base["scan_member_count"]).fillna(0.0)
-    sector_base["scan_participation_rate"] = _safe_ratio(sector_base["scan_member_count"], sector_base["sector_constituent_count"]).fillna(0.0)
-    sector_base["price_up_rate"] = _safe_ratio(sector_base["price_up_count"], sector_base["sector_constituent_count"]).fillna(0.0)
-    sector_base["turnover_count_rate"] = _safe_ratio(sector_base["turnover_count"], sector_base["sector_constituent_count"]).fillna(0.0)
-    sector_base["volume_surge_rate"] = _safe_ratio(sector_base["volume_surge_count"], sector_base["sector_constituent_count"]).fillna(0.0)
-    sector_base["turnover_surge_rate"] = _safe_ratio(sector_base["turnover_surge_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["scan_coverage"] = _safe_ratio(sector_base["scan_member_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["price_up_share_of_sector"] = _safe_ratio(sector_base["price_up_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["price_up_share_of_market_scan"] = _safe_ratio(sector_base["price_up_count"], pd.Series([source_totals.get("price_up", 0.0)] * len(sector_base), index=sector_base.index)).fillna(0.0)
+    sector_base["turnover_share_of_sector"] = _safe_ratio(sector_base["turnover_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["volume_surge_share_of_sector"] = _safe_ratio(sector_base["volume_surge_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["turnover_surge_share_of_sector"] = _safe_ratio(sector_base["turnover_surge_count"], sector_base["sector_constituent_count"]).fillna(0.0)
     sector_base["breadth_up_rate"] = _safe_ratio(sector_base["breadth_up"], sector_base["scan_member_count"]).fillna(0.0)
     sector_base["breadth_down_rate"] = _safe_ratio(sector_base["breadth_down"], sector_base["scan_member_count"]).fillna(0.0)
-    sector_base["breadth_net_rate"] = sector_base["breadth_up_rate"] - sector_base["breadth_down_rate"]
+    sector_base["breadth_balance"] = sector_base["breadth_up_rate"] - sector_base["breadth_down_rate"]
+    sector_base["breadth_net_rate"] = sector_base["breadth_balance"]
     sector_base["breadth"] = sector_base.apply(lambda row: f"{int(row.get('breadth_up', 0) or 0)}:{int(row.get('breadth_down', 0) or 0)}", axis=1)
+    sector_base["scan_member_share_of_market_scan"] = _safe_ratio(sector_base["scan_member_count"], pd.Series([market_scan_member_count] * len(sector_base), index=sector_base.index)).fillna(0.0)
+    sector_base["industry_up_rank_norm"] = _score_rank_ascending(sector_base["industry_rank_live"])
+    sector_base["median_live_ret_norm"] = _score_percentile(sector_base["median_live_ret"])
+    sector_base["turnover_ratio_median_norm"] = _score_percentile(sector_base["turnover_ratio_median"])
+    sector_base["live_turnover_total_norm"] = _score_percentile(sector_base["live_turnover_total"])
+    sector_base["price_up_rate"] = sector_base["price_up_share_of_sector"]
+    sector_base["turnover_count_rate"] = sector_base["turnover_share_of_sector"]
+    sector_base["volume_surge_rate"] = sector_base["volume_surge_share_of_sector"]
+    sector_base["turnover_surge_rate"] = sector_base["turnover_surge_share_of_sector"]
+    sector_base["scan_participation_rate"] = sector_base["scan_coverage"]
     sector_base["price_block_score"] = 0.0
-    for column, weight in {"industry_rank_live": 1.2, "price_up_rate": 1.1, "median_live_ret": 1.0}.items():
-        score_func = _score_rank_ascending if column == "industry_rank_live" else _score_percentile
-        sector_base["price_block_score"] += score_func(sector_base[column]) * weight
+    for column, weight in INTRADAY_BLOCK_COMPONENT_WEIGHTS["price"].items():
+        sector_base["price_block_score"] += _coerce_numeric(sector_base[column]).fillna(0.0) * weight
     sector_base["flow_block_score"] = 0.0
-    for column, weight in {"turnover_count_rate": 1.0, "volume_surge_rate": 0.9, "turnover_surge_rate": 1.1, "turnover_ratio_median": 0.8}.items():
-        sector_base["flow_block_score"] += _score_percentile(sector_base[column]) * weight
+    for column, weight in INTRADAY_BLOCK_COMPONENT_WEIGHTS["flow"].items():
+        sector_base["flow_block_score"] += _coerce_numeric(sector_base[column]).fillna(0.0) * weight
     sector_base["participation_block_score"] = 0.0
-    for column, weight in {"scan_participation_rate": 1.0, "breadth_up_rate": 1.0, "breadth_net_rate": 1.2}.items():
-        sector_base["participation_block_score"] += _score_percentile(sector_base[column]) * weight
+    for column, weight in INTRADAY_BLOCK_COMPONENT_WEIGHTS["participation"].items():
+        sector_base["participation_block_score"] += _coerce_numeric(sector_base[column]).fillna(0.0) * weight
+    block_weights = INTRADAY_BLOCK_MODE_WEIGHTS.get(str(mode), INTRADAY_BLOCK_MODE_WEIGHTS["now"])
     sector_base["intraday_total_score"] = (
-        sector_base["price_block_score"] * 0.34
-        + sector_base["flow_block_score"] * 0.33
-        + sector_base["participation_block_score"] * 0.33
+        sector_base["price_block_score"] * block_weights["price"]
+        + sector_base["flow_block_score"] * block_weights["flow"]
+        + sector_base["participation_block_score"] * block_weights["participation"]
     )
+    sector_base["today_sector_score"] = sector_base["intraday_total_score"]
     sector_base = sector_base[sector_base["sector_constituent_count"] >= 3].copy()
     sector_base = sector_base.sort_values(
         ["intraday_total_score", "price_block_score", "flow_block_score", "participation_block_score"],
@@ -2058,13 +2116,7 @@ def _build_sector_representatives(merged: pd.DataFrame, today_sector_leaderboard
     if working.empty:
         return pd.DataFrame(columns=["sector_name", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "representative_score", "nikkei_search", "material_link"])
     working["representative_score"] = 0.0
-    for column, weight in {
-        "live_turnover_ratio_20d": 1.1,
-        "live_volume_ratio_20d": 0.9,
-        "live_ret_vs_prev_close": 1.0,
-        "rs_vs_topix_1w": 0.7,
-        "TradingValue_latest": 0.8,
-    }.items():
+    for column, weight in REPRESENTATIVE_STOCK_SCORE_WEIGHTS.items():
         working["representative_score"] += _score_percentile(working[column]) * weight
     return (
         working.sort_values(["sector_name", "representative_score", "live_turnover"], ascending=[True, False, False])
@@ -2230,8 +2282,8 @@ TODAY_SECTOR_DISPLAY_COLUMNS = [
     "flow_block_score",
     "participation_block_score",
     "industry_rank_live",
-    "price_up_rate",
-    "turnover_count_rate",
+    "price_up_share_of_sector",
+    "turnover_share_of_sector",
     "breadth",
 ]
 
@@ -2286,7 +2338,7 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
     merged["focus_reason"] = merged.apply(lambda row: ", ".join(filter(None, [f"sector:{row.get('sector_name', '')}" if pd.notna(row.get("sector_name")) else "", "turnover_breakout" if float(row.get("live_turnover_ratio_20d", 0) or 0) >= 1.5 else "", "volume_breakout" if float(row.get("live_volume_ratio_20d", 0) or 0) >= 1.5 else "", "near_20d_high" if bool(row.get("is_near_52w_high")) else ""])) or "live_strength", axis=1)
     merged["nikkei_search"] = merged.apply(lambda row: _make_nikkei_search_link(str(row.get("name", "")), str(row.get("code", ""))), axis=1)
     merged["52w_flag"] = merged.apply(lambda row: "new_20d_high" if bool(row.get("is_new_52w_high")) else ("near_20d_high" if bool(row.get("is_near_52w_high")) else ""), axis=1)
-    today_sector_leaderboard = _build_intraday_sector_leaderboard(ranking_df, industry_df, merged, base_df)
+    today_sector_leaderboard = _build_intraday_sector_leaderboard(mode, ranking_df, industry_df, merged, base_df)
     sector_representatives = _build_sector_representatives(merged, today_sector_leaderboard)
     rep_map = sector_representatives.set_index("sector_name")["name"] if not sector_representatives.empty else pd.Series(dtype=str)
     if not today_sector_leaderboard.empty:
