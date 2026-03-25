@@ -206,6 +206,7 @@ DEFAULT_GITHUB_DEPLOY_SNAPSHOT_JSON_PATH = "data/snapshots/latest_1130.json"
 DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH = "data/snapshots/latest_1130.md"
 GITHUB_CONTROL_TOKEN_SECRET_NAME = "GITHUB_CONTROL_TOKEN"
 DEFAULT_VIEWER_AUTO_REFRESH_SECONDS = 60
+SNAPSHOT_VIEWER_CACHE_TTL_SECONDS = 120
 
 logger = logging.getLogger("sector_app_jq")
 if not logger.handlers:
@@ -334,6 +335,28 @@ def _snapshot_json_path(mode: str, settings: dict[str, Any] | None = None) -> Pa
 def _available_viewer_snapshot_modes(settings: dict[str, Any] | None = None) -> list[str]:
     settings = settings or get_settings()
     return [mode for mode in VIEWER_ONLY_SNAPSHOT_MODES if _snapshot_json_path(mode, settings).exists()]
+
+
+def _snapshot_mtime_ns(snapshot_path: Path) -> int:
+    try:
+        return snapshot_path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return -1
+
+
+@st.cache_data(ttl=SNAPSHOT_VIEWER_CACHE_TTL_SECONDS, show_spinner=False)
+def _load_saved_snapshot_payload_cached(mode: str, snapshot_path_str: str, snapshot_mtime_ns: int) -> dict[str, Any]:
+    snapshot_path = Path(snapshot_path_str)
+    if snapshot_mtime_ns < 0 or not snapshot_path.exists():
+        raise FileNotFoundError(f"まだ snapshot がありません: latest_{mode}.json")
+    payload_text = snapshot_path.read_text(encoding="utf-8")
+    return {
+        "payload": json.loads(payload_text),
+        "paths": {"json_path": str(snapshot_path)},
+        "source_label": f"latest_{mode}.json を読み込みました",
+        "backend_name": "local",
+        "warning_message": "",
+    }
 
 
 @contextmanager
@@ -1981,8 +2004,11 @@ def write_snapshot_bundle(bundle: dict[str, Any], settings: dict[str, Any], *, w
 
 def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> dict[str, Any]:
     settings = settings or get_settings()
-    payload_text, store_result = read_snapshot_json(mode, settings, ROOT_DIR)
-    payload = json.loads(payload_text)
+    snapshot_path = _snapshot_json_path(mode, settings)
+    cached_payload = _load_saved_snapshot_payload_cached(mode, str(snapshot_path), _snapshot_mtime_ns(snapshot_path))
+    payload = cached_payload["payload"]
+    loaded_snapshot_meta = dict(payload.get("meta", {}))
+    loaded_snapshot_diagnostics = dict(payload.get("diagnostics", {}))
     meta = normalize_snapshot_meta(payload.get("meta", {}))
     focus_candidates = pd.DataFrame(payload.get("focus_candidates", []))
     watch_candidates = pd.DataFrame(payload.get("watch_candidates", payload.get("focus_candidates", [])))
@@ -2006,11 +2032,13 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
         "watch_candidates": watch_candidates,
         "buy_candidates": buy_candidates,
         "empty_reasons": payload.get("empty_reasons", {}),
-        "diagnostics": payload.get("diagnostics", {}),
-        "paths": store_result.paths,
-        "snapshot_source_label": store_result.source_label,
-        "snapshot_backend_name": store_result.backend_name,
-        "snapshot_warning_message": store_result.warning_message,
+        "diagnostics": loaded_snapshot_diagnostics,
+        "loaded_snapshot_meta": loaded_snapshot_meta,
+        "loaded_snapshot_diagnostics": loaded_snapshot_diagnostics,
+        "paths": cached_payload["paths"],
+        "snapshot_source_label": cached_payload["source_label"],
+        "snapshot_backend_name": cached_payload["backend_name"],
+        "snapshot_warning_message": cached_payload["warning_message"],
     }
 
 
@@ -2050,10 +2078,11 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     del source_label
     snapshot_source_label = str(bundle.get("snapshot_source_label", "")).strip()
     snapshot_warning_message = str(bundle.get("snapshot_warning_message", "")).strip()
-    meta = bundle.get("meta", {})
-    generated_at_jst = str(meta.get("generated_at_jst", "") or meta.get("generated_at", ""))
-    mode = str(meta.get("mode", ""))
-    expected_time_label = str(meta.get("expected_time_label", "")).strip()
+    raw_meta = bundle.get("loaded_snapshot_meta", bundle.get("meta", {})) if is_saved_snapshot else bundle.get("meta", {})
+    meta = normalize_snapshot_meta(raw_meta)
+    generated_at_jst = str(raw_meta.get("generated_at_jst", "")).strip() or str(meta.get("generated_at_jst", "") or meta.get("generated_at", ""))
+    mode = str(raw_meta.get("mode", "")).strip() or str(meta.get("mode", ""))
+    expected_time_label = str(raw_meta.get("expected_time_label", "")).strip() or str(meta.get("expected_time_label", "")).strip()
     timepoint_meaning = _timepoint_meaning(mode)
     empty_reasons = bundle.get("empty_reasons", {})
     warning_text = saved_snapshot_timing_warning(meta) if is_saved_snapshot else ""
@@ -2114,7 +2143,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         reason=str(empty_reasons.get("watch_candidates", "")),
         link_columns=True,
     )
-    diagnostics = bundle.get("diagnostics", {})
+    diagnostics = bundle.get("loaded_snapshot_diagnostics", bundle.get("diagnostics", {})) if is_saved_snapshot else bundle.get("diagnostics", {})
     if diagnostics:
         with st.expander("diagnostics", expanded=False):
             st.json(diagnostics)
