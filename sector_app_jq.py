@@ -253,6 +253,7 @@ DEFAULT_GITHUB_DEPLOY_SNAPSHOT_JSON_PATH = "data/snapshots/latest_1130.json"
 DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH = "data/snapshots/latest_1130.md"
 GITHUB_CONTROL_TOKEN_SECRET_NAME = "GITHUB_CONTROL_TOKEN"
 DEFAULT_VIEWER_AUTO_REFRESH_SECONDS = 60
+SNAPSHOT_VIEWER_CACHE_TTL_SECONDS = 120
 
 logger = logging.getLogger("sector_app_jq")
 if not logger.handlers:
@@ -417,6 +418,47 @@ def _snapshot_json_path(mode: str, settings: dict[str, Any] | None = None) -> Pa
 def _available_viewer_snapshot_modes(settings: dict[str, Any] | None = None) -> list[str]:
     settings = settings or get_settings()
     return [mode for mode in VIEWER_ONLY_SNAPSHOT_MODES if _snapshot_json_path(mode, settings).exists()]
+
+
+def _snapshot_mtime_ns(snapshot_path: Path) -> int:
+    try:
+        return snapshot_path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return -1
+
+
+@st.cache_data(ttl=SNAPSHOT_VIEWER_CACHE_TTL_SECONDS, show_spinner=False)
+def _load_saved_snapshot_payload_cached(mode: str, snapshot_path_str: str, snapshot_mtime_ns: int) -> dict[str, Any]:
+    snapshot_path = Path(snapshot_path_str)
+    if snapshot_mtime_ns < 0 or not snapshot_path.exists():
+        raise FileNotFoundError(f"まだ snapshot がありません: latest_{mode}.json")
+    payload_text = snapshot_path.read_text(encoding="utf-8")
+    return {
+        "payload": json.loads(payload_text),
+        "paths": {"json_path": str(snapshot_path)},
+        "source_label": f"latest_{mode}.json を読み込みました",
+        "backend_name": "local",
+        "warning_message": "",
+    }
+
+
+def _should_show_snapshot_cache_admin() -> bool:
+    try:
+        admin_value = st.query_params.get("snapshot_cache_admin", "")
+    except Exception:
+        return False
+    return str(admin_value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _render_snapshot_cache_admin_tools() -> None:
+    if not _should_show_snapshot_cache_admin():
+        return
+    with st.expander("Snapshot cache admin", expanded=False):
+        st.caption("非常用です。通常運用では不要です。")
+        if st.button("snapshot cache clear", key="snapshot-cache-clear"):
+            st.cache_data.clear()
+            st.success("snapshot cache をクリアしました。")
+            st.rerun()
 
 
 @contextmanager
@@ -2322,8 +2364,9 @@ def write_snapshot_bundle(bundle: dict[str, Any], settings: dict[str, Any], *, w
 
 def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> dict[str, Any]:
     settings = settings or get_settings()
-    payload_text, store_result = read_snapshot_json(mode, settings, ROOT_DIR)
-    payload = json.loads(payload_text)
+    snapshot_path = _snapshot_json_path(mode, settings)
+    cached_payload = _load_saved_snapshot_payload_cached(mode, str(snapshot_path), _snapshot_mtime_ns(snapshot_path))
+    payload = cached_payload["payload"]
     meta = normalize_snapshot_meta(payload.get("meta", {}))
     snapshot_guard = evaluate_snapshot_guard(mode, meta)
     today_sector_summary = pd.DataFrame(payload.get("today_sector_leaderboard", payload.get("today_sector_summary", payload.get("sector_summary", []))))
@@ -2383,10 +2426,10 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
         "empty_reasons": payload.get("empty_reasons", {}),
         "diagnostics": payload.get("diagnostics", {}),
         "snapshot_guard": snapshot_guard,
-        "paths": store_result.paths,
-        "snapshot_source_label": store_result.source_label,
-        "snapshot_backend_name": store_result.backend_name,
-        "snapshot_warning_message": "\n".join(filter(None, [str(store_result.warning_message or "").strip(), str(snapshot_guard.get("reason", "")).strip()])),
+        "paths": cached_payload["paths"],
+        "snapshot_source_label": cached_payload["source_label"],
+        "snapshot_backend_name": cached_payload["backend_name"],
+        "snapshot_warning_message": "\n".join(filter(None, [str(cached_payload["warning_message"] or "").strip(), str(snapshot_guard.get("reason", "")).strip()])),
     }
 
 
@@ -2552,6 +2595,7 @@ def _render_viewer_only_app(settings: dict[str, Any]) -> None:
     st.caption("Cloud viewer-only モードです。保存済み snapshot の表示と更新依頼のみ行います。")
     _enable_viewer_auto_refresh(settings)
     _render_control_plane_status(settings)
+    _render_snapshot_cache_admin_tools()
     available_modes = _available_viewer_snapshot_modes(settings)
     if not available_modes:
         st.warning("まだ snapshot がありません")
