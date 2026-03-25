@@ -368,9 +368,12 @@ UI_COLUMN_LABELS = {
     "sector_positive_ratio": "セクター上昇比率",
     "candidate_rank_1w": "順位",
     "candidate_rank_1m": "順位",
+    "candidate_quality": "候補品質",
     "selection_reason": "採用理由",
     "risk_note": "注意点",
     "candidate_commentary": "コメント",
+    "sector_confidence": "信頼度",
+    "sector_caution": "注意点",
     "representative_stock": "代表銘柄",
     "representative_score": "代表銘柄スコア",
     "swing_score_1w": "1週間候補スコア",
@@ -1925,6 +1928,8 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
             "price_block_score",
             "flow_block_score",
             "participation_block_score",
+            "sector_confidence",
+            "sector_caution",
             "industry_rank_live",
             "price_up_share_of_sector",
             "turnover_share_of_sector",
@@ -1950,6 +1955,8 @@ def _empty_persistence_table() -> pd.DataFrame:
             "sector_rs_vs_topix_1m",
             "sector_rs_vs_topix_3m",
             "representative_stock",
+            "sector_confidence",
+            "sector_caution",
         ]
     )
 
@@ -2020,6 +2027,8 @@ def _build_intraday_sector_leaderboard(mode: str, ranking_df: pd.DataFrame, indu
         )
     )
     sector_base = sector_base.merge(live_sector, on="sector_name", how="left")
+    leader_turnover = live_scan.groupby("sector_name", as_index=False).agg(leader_live_turnover=("live_turnover", "max"))
+    sector_base = sector_base.merge(leader_turnover, on="sector_name", how="left")
     if not industry_df.empty and "sector_name" in industry_df.columns:
         sector_base = sector_base.merge(
             industry_df[["sector_name", "rank_position"]].drop_duplicates("sector_name").rename(columns={"rank_position": "industry_rank_live"}),
@@ -2046,6 +2055,7 @@ def _build_intraday_sector_leaderboard(mode: str, ranking_df: pd.DataFrame, indu
     sector_base["median_live_ret_norm"] = _score_percentile(sector_base["median_live_ret"])
     sector_base["turnover_ratio_median_norm"] = _score_percentile(sector_base["turnover_ratio_median"])
     sector_base["live_turnover_total_norm"] = _score_percentile(sector_base["live_turnover_total"])
+    sector_base["leader_concentration_share"] = _safe_ratio(sector_base["leader_live_turnover"], sector_base["live_turnover_total"]).fillna(0.0)
     sector_base["price_up_rate"] = sector_base["price_up_share_of_sector"]
     sector_base["turnover_count_rate"] = sector_base["turnover_share_of_sector"]
     sector_base["volume_surge_rate"] = sector_base["volume_surge_share_of_sector"]
@@ -2067,6 +2077,25 @@ def _build_intraday_sector_leaderboard(mode: str, ranking_df: pd.DataFrame, indu
         + sector_base["participation_block_score"] * block_weights["participation"]
     )
     sector_base["today_sector_score"] = sector_base["intraday_total_score"]
+    sector_base["sector_confidence_score"] = 0.0
+    sector_base.loc[sector_base["scan_member_count"] >= 5, "sector_confidence_score"] += 1.0
+    sector_base.loc[sector_base["scan_coverage"] >= 0.45, "sector_confidence_score"] += 1.0
+    sector_base.loc[sector_base["breadth_up_rate"] >= 0.55, "sector_confidence_score"] += 0.75
+    sector_base.loc[sector_base["breadth_balance"] >= 0.15, "sector_confidence_score"] += 0.75
+    sector_base.loc[sector_base["leader_concentration_share"] <= 0.40, "sector_confidence_score"] += 0.75
+    sector_base.loc[(sector_base["industry_up_rank_norm"] >= 0.7) & (sector_base["participation_block_score"] >= 1.5), "sector_confidence_score"] += 0.5
+    sector_base["sector_confidence"] = sector_base["sector_confidence_score"].apply(_build_sector_confidence)
+    sector_base["sector_caution"] = sector_base.apply(
+        lambda row: _build_sector_caution_tags(
+            [
+                "サンプル少" if float(row.get("scan_member_count", 0.0) or 0.0) < 4 or float(row.get("scan_coverage", 0.0) or 0.0) < 0.25 else "",
+                "一部銘柄偏重" if float(row.get("leader_concentration_share", 0.0) or 0.0) > 0.55 else "",
+                "広がり弱い" if float(row.get("breadth_balance", 0.0) or 0.0) < 0.05 or float(row.get("breadth_up_rate", 0.0) or 0.0) < 0.45 else "",
+                "業種順位先行" if float(row.get("industry_up_rank_norm", 0.0) or 0.0) >= 0.8 and float(row.get("participation_block_score", 0.0) or 0.0) < float(row.get("price_block_score", 0.0) or 0.0) * 0.8 else "",
+            ]
+        ),
+        axis=1,
+    )
     sector_base = sector_base[sector_base["sector_constituent_count"] >= 3].copy()
     sector_base = sector_base.sort_values(
         ["intraday_total_score", "price_block_score", "flow_block_score", "participation_block_score"],
@@ -2080,6 +2109,13 @@ def _build_sector_persistence_tables(base_df: pd.DataFrame) -> dict[str, pd.Data
     if base_df.empty:
         empty = _empty_persistence_table()
         return {"1w": empty, "1m": empty, "3m": empty}
+    liquidity_by_sector = (
+        base_df.groupby("sector_name", as_index=False)
+        .agg(
+            sector_trading_value_total=("TradingValue_latest", "sum"),
+            sector_trading_value_top=("TradingValue_latest", "max"),
+        )
+    )
     representative = (
         base_df.sort_values(["sector_name", "TradingValue_latest"], ascending=[True, False])
         .groupby("sector_name")
@@ -2101,10 +2137,28 @@ def _build_sector_persistence_tables(base_df: pd.DataFrame) -> dict[str, pd.Data
                 persistence_rank=(rank_col, "median"),
             )
             .merge(representative, on="sector_name", how="left")
+            .merge(liquidity_by_sector, on="sector_name", how="left")
             .sort_values(["persistence_rank", f"sector_rs_vs_topix_{rs_label}"], ascending=[True, False])
             .reset_index(drop=True)
         )
         frame["sector_rs_vs_topix"] = _coerce_numeric(frame[f"sector_rs_vs_topix_{rs_label}"])
+        frame["leader_concentration_share"] = _safe_ratio(frame["sector_trading_value_top"], frame["sector_trading_value_total"]).fillna(0.0)
+        frame["sector_confidence_score"] = 0.0
+        frame.loc[frame["sector_constituent_count"] >= 6, "sector_confidence_score"] += 1.25
+        frame.loc[frame["sector_positive_ratio"] >= 0.55, "sector_confidence_score"] += 1.0
+        frame.loc[frame["leader_concentration_share"] <= 0.40, "sector_confidence_score"] += 0.75
+        frame.loc[frame["sector_rs_vs_topix"].gt(0), "sector_confidence_score"] += 0.5
+        frame["sector_confidence"] = frame["sector_confidence_score"].apply(_build_sector_confidence)
+        frame["sector_caution"] = frame.apply(
+            lambda row: _build_sector_caution_tags(
+                [
+                    "サンプル少" if float(row.get("sector_constituent_count", 0.0) or 0.0) < 4 else "",
+                    "一部銘柄偏重" if float(row.get("leader_concentration_share", 0.0) or 0.0) > 0.55 else "",
+                    "広がり弱い" if float(row.get("sector_positive_ratio", 0.0) or 0.0) < 0.45 else "",
+                ]
+            ),
+            axis=1,
+        )
         frame["persistence_rank"] = range(1, len(frame) + 1)
         return frame
 
@@ -2148,6 +2202,31 @@ def _build_candidate_commentary(reason_tags: str, risk_tags: str) -> str:
     return ""
 
 
+def _build_sector_confidence(score: float) -> str:
+    if score >= 3.0:
+        return "高"
+    if score >= 1.5:
+        return "中"
+    return "低"
+
+
+def _build_sector_caution_tags(tags: list[str]) -> str:
+    unique_tags = [str(tag).strip() for tag in tags if str(tag).strip()]
+    if not unique_tags:
+        return ""
+    return ", ".join(dict.fromkeys(unique_tags))
+
+
+def _apply_sector_cap(frame: pd.DataFrame, *, sector_col: str, limit_per_sector: int, total_limit: int) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    working = frame.copy()
+    working["_sector_slot"] = working.groupby(sector_col).cumcount()
+    capped = working[working["_sector_slot"] < limit_per_sector].copy()
+    capped = capped.head(total_limit).drop(columns="_sector_slot")
+    return capped.reset_index(drop=True)
+
+
 def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard: pd.DataFrame, persistence_tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     if merged.empty:
         empty = pd.DataFrame()
@@ -2176,6 +2255,14 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
     working["finance_health_flag"] = finance_score_raw.apply(lambda value: "不明" if pd.isna(value) else ("無難" if float(value) >= -1.0 else "注意"))
     working["rs_ok"] = _coerce_numeric(working["rs_vs_topix_1w"]).gt(0.0).fillna(False)
     working["flow_ok"] = (_coerce_numeric(working["live_turnover_ratio_20d"]).fillna(0.0) >= 1.2) | (_coerce_numeric(working["live_volume_ratio_20d"]).fillna(0.0) >= 1.2)
+    working["swing_pass_1w"] = (
+        working["belongs_today_sector"]
+        & working["liquidity_ok"]
+        & working["flow_ok"]
+        & working["rs_ok"]
+        & ~working["earnings_risk_flag"]
+        & ~working["extension_flag"]
+    )
     working["candidate_sector_component_1w"] = working["belongs_today_sector"].astype(float) * 1.0
     working["candidate_turnover_component_1w"] = _score_percentile(working["live_turnover"]) * 1.0
     working["candidate_volume_component_1w"] = _score_percentile(working["live_volume_ratio_20d"]) * 0.95
@@ -2195,29 +2282,15 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
         + working["candidate_liquidity_component_1w"]
         + working["candidate_earnings_component_1w"]
     )
-    swing_1w = (
-        working[
-            working["belongs_today_sector"]
-            & working["liquidity_pass"]
-        ]
-        .sort_values(["swing_score_1w", "live_turnover"], ascending=[False, False])[
-            [
-                "code",
-                "name",
-                "sector_name",
-                "rs_vs_topix_1w",
-                "live_ret_vs_prev_close",
-                "live_turnover",
-                "avg_turnover_20d",
-                "earnings_buffer_days",
-                "nikkei_search",
-                "material_link",
-            ]
-        ]
-        .head(20)
-        .reset_index(drop=True)
-    )
     working["medium_term_rs_ok"] = (_coerce_numeric(working["rs_vs_topix_1m"]).gt(0.0) & _coerce_numeric(working["rs_vs_topix_3m"]).gt(0.0)).fillna(False)
+    working["swing_pass_1m"] = (
+        working["belongs_persistence_sector"]
+        & working["medium_term_rs_ok"]
+        & working["liquidity_ok"]
+        & ~working["earnings_risk_flag"]
+        & ~working["extension_flag"]
+        & ~working["finance_risk_flag"]
+    )
     working["candidate_sector_component_1m"] = working["belongs_persistence_sector"].astype(float) * 1.0
     working["candidate_rs_component_1m"] = _score_percentile(working["rs_vs_topix_1m"]) * 1.0
     working["candidate_rs_component_3m"] = _score_percentile(working["rs_vs_topix_3m"]) * 0.9
@@ -2242,31 +2315,6 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
         + working["candidate_sector_rank_component_3m"]
         + working["candidate_earnings_component_1m"]
         + working["candidate_finance_component_1m"]
-    )
-    swing_1m = (
-        working[
-            working["belongs_persistence_sector"]
-            & working["liquidity_pass"]
-            & working["ma20_band_pass"]
-            & working["finance_health_guard"]
-        ]
-        .sort_values(["swing_score_1m", "TradingValue_latest"], ascending=[False, False])[
-            [
-                "code",
-                "name",
-                "sector_name",
-                "rs_vs_topix_1m",
-                "rs_vs_topix_3m",
-                "price_vs_ma20_pct",
-                "avg_turnover_20d",
-                "earnings_buffer_days",
-                "finance_health_flag",
-                "nikkei_search",
-                "material_link",
-            ]
-        ]
-        .head(20)
-        .reset_index(drop=True)
     )
     working["selection_reason_1w"] = working.apply(
         lambda row: _join_candidate_tags(
@@ -2322,31 +2370,97 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
         lambda row: _build_candidate_commentary(row.get("selection_reason_1m", ""), row.get("risk_note_1m", "")),
         axis=1,
     )
-    if not swing_1w.empty:
-        swing_1w = swing_1w.merge(
-            working[["code", "selection_reason_1w", "risk_note_1w", "candidate_commentary_1w", "liquidity_ok", "earnings_risk_flag", "extension_flag", "finance_risk_flag", "rs_ok", "flow_ok"]],
-            on="code",
-            how="left",
-        ).rename(
+    working["candidate_quality_score_1w"] = 0.0
+    working.loc[working["swing_pass_1w"], "candidate_quality_score_1w"] += 2.0
+    working.loc[working["flow_ok"], "candidate_quality_score_1w"] += 1.0
+    working.loc[working["rs_ok"], "candidate_quality_score_1w"] += 1.0
+    working.loc[working["liquidity_ok"], "candidate_quality_score_1w"] += 0.5
+    working.loc[working["earnings_unknown_flag"], "candidate_quality_score_1w"] -= 0.25
+    working.loc[working["earnings_risk_flag"], "candidate_quality_score_1w"] -= 1.0
+    working.loc[working["extension_flag"], "candidate_quality_score_1w"] -= 0.75
+    working["candidate_quality_1w"] = "低"
+    working.loc[working["candidate_quality_score_1w"] >= 4.0, "candidate_quality_1w"] = "高"
+    working.loc[(working["candidate_quality_score_1w"] >= 2.5) & (working["candidate_quality_score_1w"] < 4.0), "candidate_quality_1w"] = "中"
+    working["candidate_quality_score_1m"] = 0.0
+    working.loc[working["swing_pass_1m"], "candidate_quality_score_1m"] += 2.0
+    working.loc[working["medium_term_rs_ok"], "candidate_quality_score_1m"] += 1.0
+    working.loc[working["liquidity_ok"], "candidate_quality_score_1m"] += 0.5
+    working.loc[~working["finance_risk_flag"], "candidate_quality_score_1m"] += 0.5
+    working.loc[working["earnings_unknown_flag"], "candidate_quality_score_1m"] -= 0.25
+    working.loc[working["finance_health_flag"].eq("不明"), "candidate_quality_score_1m"] -= 0.25
+    working.loc[working["earnings_risk_flag"], "candidate_quality_score_1m"] -= 1.0
+    working.loc[working["extension_flag"], "candidate_quality_score_1m"] -= 0.75
+    working.loc[working["finance_risk_flag"], "candidate_quality_score_1m"] -= 1.0
+    working["candidate_quality_1m"] = "低"
+    working.loc[working["candidate_quality_score_1m"] >= 4.0, "candidate_quality_1m"] = "高"
+    working.loc[(working["candidate_quality_score_1m"] >= 2.5) & (working["candidate_quality_score_1m"] < 4.0), "candidate_quality_1m"] = "中"
+    swing_1w = (
+        working[
+            working["swing_pass_1w"]
+            & working["candidate_quality_1w"].isin(["高", "中"])
+        ]
+        .sort_values(["candidate_quality_score_1w", "swing_score_1w", "live_turnover"], ascending=[False, False, False])[
+            [
+                "code",
+                "name",
+                "sector_name",
+                "candidate_quality_1w",
+                "selection_reason_1w",
+                "risk_note_1w",
+                "candidate_commentary_1w",
+                "rs_vs_topix_1w",
+                "live_ret_vs_prev_close",
+                "live_turnover",
+                "earnings_buffer_days",
+                "nikkei_search",
+                "material_link",
+            ]
+        ]
+        .reset_index(drop=True)
+        .rename(
             columns={
+                "candidate_quality_1w": "candidate_quality",
                 "selection_reason_1w": "selection_reason",
                 "risk_note_1w": "risk_note",
                 "candidate_commentary_1w": "candidate_commentary",
             }
         )
-    if not swing_1m.empty:
-        swing_1m = swing_1m.merge(
-            working[["code", "selection_reason_1m", "risk_note_1m", "candidate_commentary_1m", "liquidity_ok", "earnings_risk_flag", "extension_flag", "finance_risk_flag", "medium_term_rs_ok", "flow_ok"]],
-            on="code",
-            how="left",
-        ).rename(
+    )
+    swing_1w = _apply_sector_cap(swing_1w, sector_col="sector_name", limit_per_sector=2, total_limit=6)
+    swing_1m = (
+        working[
+            working["swing_pass_1m"]
+            & working["candidate_quality_1m"].isin(["高", "中"])
+        ]
+        .sort_values(["candidate_quality_score_1m", "swing_score_1m", "TradingValue_latest"], ascending=[False, False, False])[
+            [
+                "code",
+                "name",
+                "sector_name",
+                "candidate_quality_1m",
+                "selection_reason_1m",
+                "risk_note_1m",
+                "candidate_commentary_1m",
+                "rs_vs_topix_1m",
+                "rs_vs_topix_3m",
+                "price_vs_ma20_pct",
+                "earnings_buffer_days",
+                "finance_health_flag",
+                "nikkei_search",
+                "material_link",
+            ]
+        ]
+        .reset_index(drop=True)
+        .rename(
             columns={
+                "candidate_quality_1m": "candidate_quality",
                 "selection_reason_1m": "selection_reason",
                 "risk_note_1m": "risk_note",
                 "candidate_commentary_1m": "candidate_commentary",
-                "medium_term_rs_ok": "rs_ok",
             }
         )
+    )
+    swing_1m = _apply_sector_cap(swing_1m, sector_col="sector_name", limit_per_sector=2, total_limit=6)
     if not swing_1w.empty:
         swing_1w.insert(0, "candidate_rank_1w", range(1, len(swing_1w) + 1))
     if not swing_1m.empty:
@@ -2393,9 +2507,9 @@ TODAY_SECTOR_DISPLAY_COLUMNS = [
     "price_block_score",
     "flow_block_score",
     "participation_block_score",
+    "sector_confidence",
+    "sector_caution",
     "industry_rank_live",
-    "price_up_share_of_sector",
-    "turnover_share_of_sector",
     "breadth",
 ]
 
@@ -2403,31 +2517,32 @@ PERSISTENCE_DISPLAY_COLUMNS = [
     "persistence_rank",
     "sector_name",
     "sector_rs_vs_topix",
-    "sector_positive_ratio",
     "representative_stock",
+    "sector_confidence",
+    "sector_caution",
 ]
 SWING_1W_DISPLAY_COLUMNS = [
     "candidate_rank_1w",
     "name",
     "sector_name",
+    "candidate_quality",
     "selection_reason",
     "risk_note",
     "rs_vs_topix_1w",
     "live_ret_vs_prev_close",
     "live_turnover",
-    "avg_turnover_20d",
     "earnings_buffer_days",
 ]
 SWING_1M_DISPLAY_COLUMNS = [
     "candidate_rank_1m",
     "name",
     "sector_name",
+    "candidate_quality",
     "selection_reason",
     "risk_note",
     "rs_vs_topix_1m",
     "rs_vs_topix_3m",
     "price_vs_ma20_pct",
-    "avg_turnover_20d",
     "earnings_buffer_days",
     "finance_health_flag",
 ]
@@ -2438,7 +2553,7 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
     if df is None or df.empty:
         return pd.DataFrame(columns=columns), compatibility_notes
     prepared = df.copy()
-    string_columns = {"sector_name", "breadth", "representative_stock", "name", "selection_reason", "risk_note", "candidate_commentary", "finance_health_flag"}
+    string_columns = {"sector_name", "breadth", "representative_stock", "name", "candidate_quality", "selection_reason", "risk_note", "candidate_commentary", "finance_health_flag", "sector_confidence", "sector_caution"}
     for column in columns:
         if column not in prepared.columns:
             prepared[column] = "" if column in string_columns else pd.NA
