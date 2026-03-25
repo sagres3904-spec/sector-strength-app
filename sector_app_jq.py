@@ -369,6 +369,7 @@ UI_COLUMN_LABELS = {
     "candidate_rank_1w": "順位",
     "candidate_rank_1m": "順位",
     "candidate_quality": "候補品質",
+    "entry_fit": "今の判定",
     "selection_reason": "採用理由",
     "risk_note": "注意点",
     "candidate_commentary": "コメント",
@@ -2227,6 +2228,34 @@ def _apply_sector_cap(frame: pd.DataFrame, *, sector_col: str, limit_per_sector:
     return capped.reset_index(drop=True)
 
 
+def _entry_fit_1w_label(*, candidate_quality: str, belongs_today_sector: bool, sector_confidence: str, flow_ok: bool, rs_ok: bool, liquidity_ok: bool, earnings_risk_flag: bool, extension_flag: bool) -> str:
+    if str(candidate_quality) == "低":
+        return "見送り"
+    if earnings_risk_flag:
+        return "見送り"
+    if not (belongs_today_sector and flow_ok and rs_ok and liquidity_ok):
+        return "見送り"
+    if extension_flag:
+        return "監視候補"
+    if str(candidate_quality) == "高" and str(sector_confidence) == "高":
+        return "買い候補"
+    return "監視候補"
+
+
+def _entry_fit_1m_label(*, candidate_quality: str, belongs_persistence_sector: bool, sector_confidence: str, medium_term_rs_ok: bool, liquidity_ok: bool, earnings_risk_flag: bool, extension_flag: bool, finance_risk_flag: bool) -> str:
+    if str(candidate_quality) == "低":
+        return "見送り"
+    if earnings_risk_flag or finance_risk_flag:
+        return "見送り"
+    if not (belongs_persistence_sector and medium_term_rs_ok and liquidity_ok):
+        return "見送り"
+    if extension_flag:
+        return "監視候補"
+    if str(candidate_quality) == "高" and str(sector_confidence) in {"高", "中"}:
+        return "買い候補"
+    return "監視候補"
+
+
 def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard: pd.DataFrame, persistence_tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     if merged.empty:
         empty = pd.DataFrame()
@@ -2242,8 +2271,14 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
     top_today_sectors = set(today_sector_leaderboard.head(6)["sector_name"].astype(str).tolist()) if not today_sector_leaderboard.empty else set()
     top_1m_sectors = set(persistence_tables.get("1m", pd.DataFrame()).head(8)["sector_name"].astype(str).tolist())
     top_3m_sectors = set(persistence_tables.get("3m", pd.DataFrame()).head(8)["sector_name"].astype(str).tolist())
+    today_sector_conf_map = today_sector_leaderboard.set_index("sector_name")["sector_confidence"] if not today_sector_leaderboard.empty and "sector_confidence" in today_sector_leaderboard.columns else pd.Series(dtype=str)
+    persistence_conf_frames = [persistence_tables.get(key, pd.DataFrame()) for key in ["1m", "3m"]]
+    persistence_conf_source = pd.concat([frame[["sector_name", "sector_confidence"]] for frame in persistence_conf_frames if not frame.empty and "sector_confidence" in frame.columns], ignore_index=True).drop_duplicates("sector_name") if any(not frame.empty and "sector_confidence" in frame.columns for frame in persistence_conf_frames) else pd.DataFrame(columns=["sector_name", "sector_confidence"])
+    persistence_sector_conf_map = persistence_conf_source.set_index("sector_name")["sector_confidence"] if not persistence_conf_source.empty else pd.Series(dtype=str)
     working["belongs_today_sector"] = working["sector_name"].astype(str).isin(top_today_sectors)
     working["belongs_persistence_sector"] = working["sector_name"].astype(str).isin(top_1m_sectors | top_3m_sectors)
+    working["sector_confidence_1w"] = working["sector_name"].map(today_sector_conf_map).fillna("")
+    working["sector_confidence_1m"] = working["sector_name"].map(persistence_sector_conf_map).fillna("")
     working["liquidity_ok"] = (_coerce_numeric(working["avg_turnover_20d"]).fillna(0.0) >= turnover_floor) & (_coerce_numeric(working["avg_volume_20d"]).fillna(0.0) >= volume_floor)
     working["liquidity_pass"] = working["liquidity_ok"]
     working["extension_flag"] = _coerce_numeric(working["price_vs_ma20_pct"]).abs().gt(12.0).fillna(False)
@@ -2394,17 +2429,65 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
     working["candidate_quality_1m"] = "低"
     working.loc[working["candidate_quality_score_1m"] >= 4.0, "candidate_quality_1m"] = "高"
     working.loc[(working["candidate_quality_score_1m"] >= 2.5) & (working["candidate_quality_score_1m"] < 4.0), "candidate_quality_1m"] = "中"
+    working["entry_fit_1w"] = working.apply(
+        lambda row: _entry_fit_1w_label(
+            candidate_quality=str(row.get("candidate_quality_1w", "")),
+            belongs_today_sector=bool(row.get("belongs_today_sector")),
+            sector_confidence=str(row.get("sector_confidence_1w", "")),
+            flow_ok=bool(row.get("flow_ok")),
+            rs_ok=bool(row.get("rs_ok")),
+            liquidity_ok=bool(row.get("liquidity_ok")),
+            earnings_risk_flag=bool(row.get("earnings_risk_flag")),
+            extension_flag=bool(row.get("extension_flag")),
+        ),
+        axis=1,
+    )
+    working["entry_fit_1m"] = working.apply(
+        lambda row: _entry_fit_1m_label(
+            candidate_quality=str(row.get("candidate_quality_1m", "")),
+            belongs_persistence_sector=bool(row.get("belongs_persistence_sector")),
+            sector_confidence=str(row.get("sector_confidence_1m", "")),
+            medium_term_rs_ok=bool(row.get("medium_term_rs_ok")),
+            liquidity_ok=bool(row.get("liquidity_ok")),
+            earnings_risk_flag=bool(row.get("earnings_risk_flag")),
+            extension_flag=bool(row.get("extension_flag")),
+            finance_risk_flag=bool(row.get("finance_risk_flag")),
+        ),
+        axis=1,
+    )
+    working["candidate_commentary_1w"] = working.apply(
+        lambda row: (
+            "決算近く様子見" if bool(row.get("earnings_risk_flag")) else
+            "強いが伸び過ぎ" if bool(row.get("extension_flag")) else
+            "強セクター・資金流入継続" if str(row.get("entry_fit_1w", "")) == "買い候補" else
+            "強いが待ち伏せ" if str(row.get("entry_fit_1w", "")) == "監視候補" else
+            _build_candidate_commentary(row.get("selection_reason_1w", ""), row.get("risk_note_1w", ""))
+        ),
+        axis=1,
+    )
+    working["candidate_commentary_1m"] = working.apply(
+        lambda row: (
+            "決算近く様子見" if bool(row.get("earnings_risk_flag")) else
+            "財務懸念で様子見" if bool(row.get("finance_risk_flag")) else
+            "中期強いが乖離大" if bool(row.get("extension_flag")) else
+            "中期上昇継続" if str(row.get("entry_fit_1m", "")) == "買い候補" else
+            "強いが押し目待ち" if str(row.get("entry_fit_1m", "")) == "監視候補" else
+            _build_candidate_commentary(row.get("selection_reason_1m", ""), row.get("risk_note_1m", ""))
+        ),
+        axis=1,
+    )
     swing_1w = (
         working[
-            working["swing_pass_1w"]
-            & working["candidate_quality_1w"].isin(["高", "中"])
+            working["candidate_quality_1w"].isin(["高", "中"])
+            & working["entry_fit_1w"].isin(["買い候補", "監視候補"])
         ]
-        .sort_values(["candidate_quality_score_1w", "swing_score_1w", "live_turnover"], ascending=[False, False, False])[
+        .sort_values(["entry_fit_1w", "candidate_quality_score_1w", "swing_score_1w", "live_turnover"], ascending=[True, False, False, False])[
             [
                 "code",
                 "name",
                 "sector_name",
                 "candidate_quality_1w",
+                "entry_fit_1w",
                 "selection_reason_1w",
                 "risk_note_1w",
                 "candidate_commentary_1w",
@@ -2420,6 +2503,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
         .rename(
             columns={
                 "candidate_quality_1w": "candidate_quality",
+                "entry_fit_1w": "entry_fit",
                 "selection_reason_1w": "selection_reason",
                 "risk_note_1w": "risk_note",
                 "candidate_commentary_1w": "candidate_commentary",
@@ -2429,15 +2513,16 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
     swing_1w = _apply_sector_cap(swing_1w, sector_col="sector_name", limit_per_sector=2, total_limit=6)
     swing_1m = (
         working[
-            working["swing_pass_1m"]
-            & working["candidate_quality_1m"].isin(["高", "中"])
+            working["candidate_quality_1m"].isin(["高", "中"])
+            & working["entry_fit_1m"].isin(["買い候補", "監視候補"])
         ]
-        .sort_values(["candidate_quality_score_1m", "swing_score_1m", "TradingValue_latest"], ascending=[False, False, False])[
+        .sort_values(["entry_fit_1m", "candidate_quality_score_1m", "swing_score_1m", "TradingValue_latest"], ascending=[True, False, False, False])[
             [
                 "code",
                 "name",
                 "sector_name",
                 "candidate_quality_1m",
+                "entry_fit_1m",
                 "selection_reason_1m",
                 "risk_note_1m",
                 "candidate_commentary_1m",
@@ -2454,6 +2539,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
         .rename(
             columns={
                 "candidate_quality_1m": "candidate_quality",
+                "entry_fit_1m": "entry_fit",
                 "selection_reason_1m": "selection_reason",
                 "risk_note_1m": "risk_note",
                 "candidate_commentary_1m": "candidate_commentary",
@@ -2461,11 +2547,30 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
         )
     )
     swing_1m = _apply_sector_cap(swing_1m, sector_col="sector_name", limit_per_sector=2, total_limit=6)
+    swing_buy_1w = swing_1w[swing_1w["entry_fit"].eq("買い候補")].head(5).reset_index(drop=True) if not swing_1w.empty else pd.DataFrame(columns=swing_1w.columns)
+    swing_watch_1w = swing_1w[swing_1w["entry_fit"].eq("監視候補")].head(5).reset_index(drop=True) if not swing_1w.empty else pd.DataFrame(columns=swing_1w.columns)
+    swing_buy_1m = swing_1m[swing_1m["entry_fit"].eq("買い候補")].head(5).reset_index(drop=True) if not swing_1m.empty else pd.DataFrame(columns=swing_1m.columns)
+    swing_watch_1m = swing_1m[swing_1m["entry_fit"].eq("監視候補")].head(5).reset_index(drop=True) if not swing_1m.empty else pd.DataFrame(columns=swing_1m.columns)
     if not swing_1w.empty:
         swing_1w.insert(0, "candidate_rank_1w", range(1, len(swing_1w) + 1))
+    if not swing_buy_1w.empty:
+        swing_buy_1w["candidate_rank_1w"] = range(1, len(swing_buy_1w) + 1)
+    if not swing_watch_1w.empty:
+        swing_watch_1w["candidate_rank_1w"] = range(1, len(swing_watch_1w) + 1)
     if not swing_1m.empty:
         swing_1m.insert(0, "candidate_rank_1m", range(1, len(swing_1m) + 1))
-    return {"1w": swing_1w, "1m": swing_1m}
+    if not swing_buy_1m.empty:
+        swing_buy_1m["candidate_rank_1m"] = range(1, len(swing_buy_1m) + 1)
+    if not swing_watch_1m.empty:
+        swing_watch_1m["candidate_rank_1m"] = range(1, len(swing_watch_1m) + 1)
+    return {
+        "1w": swing_1w,
+        "1m": swing_1m,
+        "buy_1w": swing_buy_1w,
+        "watch_1w": swing_watch_1w,
+        "buy_1m": swing_buy_1m,
+        "watch_1m": swing_watch_1m,
+    }
 
 
 def _make_nikkei_search_link(name: str, code: str) -> str:
@@ -2521,30 +2626,54 @@ PERSISTENCE_DISPLAY_COLUMNS = [
     "sector_confidence",
     "sector_caution",
 ]
-SWING_1W_DISPLAY_COLUMNS = [
+SWING_BUY_1W_DISPLAY_COLUMNS = [
     "candidate_rank_1w",
     "name",
     "sector_name",
     "candidate_quality",
     "selection_reason",
     "risk_note",
+    "candidate_commentary",
     "rs_vs_topix_1w",
     "live_ret_vs_prev_close",
     "live_turnover",
     "earnings_buffer_days",
 ]
-SWING_1M_DISPLAY_COLUMNS = [
+SWING_BUY_1M_DISPLAY_COLUMNS = [
     "candidate_rank_1m",
     "name",
     "sector_name",
     "candidate_quality",
     "selection_reason",
     "risk_note",
+    "candidate_commentary",
     "rs_vs_topix_1m",
     "rs_vs_topix_3m",
     "price_vs_ma20_pct",
     "earnings_buffer_days",
     "finance_health_flag",
+]
+SWING_WATCH_1W_DISPLAY_COLUMNS = [
+    "candidate_rank_1w",
+    "name",
+    "sector_name",
+    "entry_fit",
+    "risk_note",
+    "candidate_commentary",
+    "rs_vs_topix_1w",
+    "earnings_buffer_days",
+]
+SWING_WATCH_1M_DISPLAY_COLUMNS = [
+    "candidate_rank_1m",
+    "name",
+    "sector_name",
+    "entry_fit",
+    "risk_note",
+    "candidate_commentary",
+    "rs_vs_topix_1m",
+    "rs_vs_topix_3m",
+    "price_vs_ma20_pct",
+    "earnings_buffer_days",
 ]
 
 
@@ -2553,7 +2682,7 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
     if df is None or df.empty:
         return pd.DataFrame(columns=columns), compatibility_notes
     prepared = df.copy()
-    string_columns = {"sector_name", "breadth", "representative_stock", "name", "candidate_quality", "selection_reason", "risk_note", "candidate_commentary", "finance_health_flag", "sector_confidence", "sector_caution"}
+    string_columns = {"sector_name", "breadth", "representative_stock", "name", "candidate_quality", "entry_fit", "selection_reason", "risk_note", "candidate_commentary", "finance_health_flag", "sector_confidence", "sector_caution"}
     for column in columns:
         if column not in prepared.columns:
             prepared[column] = "" if column in string_columns else pd.NA
@@ -2610,6 +2739,10 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
         "sector_persistence_3m": "" if not persistence_tables["3m"].empty else "TOPIX 比 3か月継続性を出せるセクターがありません。",
         "swing_candidates_1w": "" if not swing_candidates["1w"].empty else "1週間スイング候補の条件を満たす銘柄がありません。",
         "swing_candidates_1m": "" if not swing_candidates["1m"].empty else "1か月スイング候補の条件を満たす銘柄がありません。",
+        "swing_buy_candidates_1w": "" if not swing_candidates["buy_1w"].empty else "1週間スイング買い候補はありません。",
+        "swing_watch_candidates_1w": "" if not swing_candidates["watch_1w"].empty else "1週間スイング監視候補はありません。",
+        "swing_buy_candidates_1m": "" if not swing_candidates["buy_1m"].empty else "1か月スイング買い候補はありません。",
+        "swing_watch_candidates_1m": "" if not swing_candidates["watch_1m"].empty else "1か月スイング監視候補はありません。",
         "sector_representatives": "" if not sector_representatives.empty else "今日の本命セクターに紐づく代表銘柄を抽出できませんでした。",
     }
     meta = build_snapshot_meta(mode=mode, generated_at=now_ts, source_profile="local_kabu_jq_yanoshin", includes_kabu=True)
@@ -2631,6 +2764,10 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
         "buy_candidates": swing_candidates["1m"],
         "swing_candidates_1w": swing_candidates["1w"],
         "swing_candidates_1m": swing_candidates["1m"],
+        "swing_buy_candidates_1w": swing_candidates["buy_1w"],
+        "swing_watch_candidates_1w": swing_candidates["watch_1w"],
+        "swing_buy_candidates_1m": swing_candidates["buy_1m"],
+        "swing_watch_candidates_1m": swing_candidates["watch_1m"],
         "empty_reasons": empty_state,
         "diagnostics": {
             "mode": mode,
@@ -2681,6 +2818,10 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
     sector_representatives = pd.DataFrame(payload.get("sector_representatives", payload.get("center_stocks", payload.get("leaders_by_sector", []))))
     swing_candidates_1w = pd.DataFrame(payload.get("swing_candidates_1w", payload.get("watch_candidates", payload.get("focus_candidates", []))))
     swing_candidates_1m = pd.DataFrame(payload.get("swing_candidates_1m", payload.get("buy_candidates", [])))
+    swing_buy_candidates_1w = pd.DataFrame(payload.get("swing_buy_candidates_1w", []))
+    swing_watch_candidates_1w = pd.DataFrame(payload.get("swing_watch_candidates_1w", []))
+    swing_buy_candidates_1m = pd.DataFrame(payload.get("swing_buy_candidates_1m", []))
+    swing_watch_candidates_1m = pd.DataFrame(payload.get("swing_watch_candidates_1m", []))
     if bool(snapshot_guard.get("is_stale")):
         stale_reason = str(snapshot_guard.get("reason", "")).strip()
         today_sector_summary = pd.DataFrame()
@@ -2690,6 +2831,10 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
         sector_representatives = pd.DataFrame()
         swing_candidates_1w = pd.DataFrame()
         swing_candidates_1m = pd.DataFrame()
+        swing_buy_candidates_1w = pd.DataFrame()
+        swing_watch_candidates_1w = pd.DataFrame()
+        swing_buy_candidates_1m = pd.DataFrame()
+        swing_watch_candidates_1m = pd.DataFrame()
         payload_empty_reasons = dict(payload.get("empty_reasons", {}))
         for key in [
             "today_sector_leaderboard",
@@ -2699,6 +2844,10 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
             "sector_representatives",
             "swing_candidates_1w",
             "swing_candidates_1m",
+            "swing_buy_candidates_1w",
+            "swing_watch_candidates_1w",
+            "swing_buy_candidates_1m",
+            "swing_watch_candidates_1m",
             "weekly_sector_summary",
             "monthly_sector_summary",
             "center_stocks",
@@ -2728,6 +2877,10 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
         "buy_candidates": swing_candidates_1m,
         "swing_candidates_1w": swing_candidates_1w,
         "swing_candidates_1m": swing_candidates_1m,
+        "swing_buy_candidates_1w": swing_buy_candidates_1w if not swing_buy_candidates_1w.empty else swing_candidates_1w[swing_candidates_1w.get("entry_fit", pd.Series(dtype=str)).eq("買い候補")] if not swing_candidates_1w.empty and "entry_fit" in swing_candidates_1w.columns else pd.DataFrame(),
+        "swing_watch_candidates_1w": swing_watch_candidates_1w if not swing_watch_candidates_1w.empty else swing_candidates_1w[swing_candidates_1w.get("entry_fit", pd.Series(dtype=str)).eq("監視候補")] if not swing_candidates_1w.empty and "entry_fit" in swing_candidates_1w.columns else pd.DataFrame(),
+        "swing_buy_candidates_1m": swing_buy_candidates_1m if not swing_buy_candidates_1m.empty else swing_candidates_1m[swing_candidates_1m.get("entry_fit", pd.Series(dtype=str)).eq("買い候補")] if not swing_candidates_1m.empty and "entry_fit" in swing_candidates_1m.columns else pd.DataFrame(),
+        "swing_watch_candidates_1m": swing_watch_candidates_1m if not swing_watch_candidates_1m.empty else swing_candidates_1m[swing_candidates_1m.get("entry_fit", pd.Series(dtype=str)).eq("監視候補")] if not swing_candidates_1m.empty and "entry_fit" in swing_candidates_1m.columns else pd.DataFrame(),
         "empty_reasons": payload.get("empty_reasons", {}),
         "diagnostics": payload.get("diagnostics", {}),
         "snapshot_guard": snapshot_guard,
@@ -2786,9 +2939,11 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     weekly_sector_view, weekly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1w", bundle.get("weekly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
     monthly_sector_view, monthly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1m", bundle.get("monthly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
     quarter_sector_view, quarter_sector_notes = _prepare_table_view(bundle.get("sector_persistence_3m", pd.DataFrame()), PERSISTENCE_DISPLAY_COLUMNS)
-    swing_1w_view, swing_1w_notes = _prepare_table_view(bundle.get("swing_candidates_1w", bundle.get("watch_candidates", bundle["focus_candidates"])), SWING_1W_DISPLAY_COLUMNS)
-    swing_1m_view, swing_1m_notes = _prepare_table_view(bundle.get("swing_candidates_1m", bundle.get("buy_candidates", pd.DataFrame())), SWING_1M_DISPLAY_COLUMNS)
-    sector_compat_notes = sorted(set(today_sector_notes + weekly_sector_notes + monthly_sector_notes + quarter_sector_notes + swing_1w_notes + swing_1m_notes))
+    swing_buy_1w_view, swing_buy_1w_notes = _prepare_table_view(bundle.get("swing_buy_candidates_1w", pd.DataFrame()), SWING_BUY_1W_DISPLAY_COLUMNS)
+    swing_buy_1m_view, swing_buy_1m_notes = _prepare_table_view(bundle.get("swing_buy_candidates_1m", pd.DataFrame()), SWING_BUY_1M_DISPLAY_COLUMNS)
+    swing_watch_1w_view, swing_watch_1w_notes = _prepare_table_view(bundle.get("swing_watch_candidates_1w", pd.DataFrame()), SWING_WATCH_1W_DISPLAY_COLUMNS)
+    swing_watch_1m_view, swing_watch_1m_notes = _prepare_table_view(bundle.get("swing_watch_candidates_1m", pd.DataFrame()), SWING_WATCH_1M_DISPLAY_COLUMNS)
+    sector_compat_notes = sorted(set(today_sector_notes + weekly_sector_notes + monthly_sector_notes + quarter_sector_notes + swing_buy_1w_notes + swing_buy_1m_notes + swing_watch_1w_notes + swing_watch_1m_notes))
     if generated_at_jst or mode:
         with st.expander("運用状態", expanded=False):
             mode_label = f"{expected_time_label} = {timepoint_meaning}" if expected_time_label and timepoint_meaning else expected_time_label or mode
@@ -2838,15 +2993,27 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         reason=str(empty_reasons.get("sector_persistence_3m", "")),
     )
     _render_dataframe_or_reason(
-        "1週間スイング候補銘柄",
-        swing_1w_view,
-        reason=str(empty_reasons.get("swing_candidates_1w", empty_reasons.get("watch_candidates", ""))),
+        "1週間スイング買い候補",
+        swing_buy_1w_view,
+        reason=str(empty_reasons.get("swing_buy_candidates_1w", "")),
         link_columns=True,
     )
     _render_dataframe_or_reason(
-        "1か月スイング候補銘柄",
-        swing_1m_view,
-        reason=str(empty_reasons.get("swing_candidates_1m", empty_reasons.get("buy_candidates", ""))),
+        "1か月スイング買い候補",
+        swing_buy_1m_view,
+        reason=str(empty_reasons.get("swing_buy_candidates_1m", "")),
+        link_columns=True,
+    )
+    _render_dataframe_or_reason(
+        "1週間スイング監視候補",
+        swing_watch_1w_view,
+        reason=str(empty_reasons.get("swing_watch_candidates_1w", "")),
+        link_columns=True,
+    )
+    _render_dataframe_or_reason(
+        "1か月スイング監視候補",
+        swing_watch_1m_view,
+        reason=str(empty_reasons.get("swing_watch_candidates_1m", "")),
         link_columns=True,
     )
     diagnostics = bundle.get("diagnostics", {})
