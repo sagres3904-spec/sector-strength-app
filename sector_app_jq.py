@@ -256,6 +256,18 @@ UI_COLUMN_LABELS = {
     "buyability_score": "買い候補スコア",
     "buyability_label": "買い候補判定",
     "today_sector_score": "本命セクタースコア",
+    "price_block_score": "価格ブロック",
+    "flow_block_score": "資金流入ブロック",
+    "participation_block_score": "参加・広がりブロック",
+    "representative_stock": "代表銘柄",
+    "sector_confidence": "信頼度",
+    "sector_caution": "注意点",
+    "candidate_quality": "候補品質",
+    "selection_reason": "採用理由",
+    "risk_note": "注意点",
+    "candidate_commentary": "コメント",
+    "entry_fit": "今の判定",
+    "sector_rs_vs_topix": "セクターTOPIX比RS",
     "earnings_proximity_flag": "決算接近除外(仮)",
     "atr_pct": "ATR%(土台)",
     "nikkei_search": "日経で検索",
@@ -1828,96 +1840,132 @@ def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str,
     st.dataframe(frame.rename(columns=UI_COLUMN_LABELS), **kwargs)
 
 
-SECTOR_DISPLAY_COLUMNS = [
+TODAY_SECTOR_DISPLAY_COLUMNS = [
+    "today_rank",
     "sector_name",
-    "n",
-    "breadth",
-    "median_ret",
-    "turnover_ratio_median",
+    "representative_stock",
+    "price_block_score",
+    "flow_block_score",
+    "participation_block_score",
+    "sector_confidence",
+    "sector_caution",
     "industry_rank_live",
-    "sector_rank_1w",
-    "sector_rank_1m",
-    "sector_rank_3m",
-    "leaders",
+    "breadth",
+]
+PERSISTENCE_DISPLAY_COLUMNS = [
+    "persistence_rank",
+    "sector_name",
+    "sector_rs_vs_topix",
+    "representative_stock",
+    "sector_confidence",
+    "sector_caution",
+]
+SWING_BUY_1W_DISPLAY_COLUMNS = [
+    "candidate_rank_1w",
+    "name",
+    "sector_name",
+    "candidate_quality",
+    "selection_reason",
+    "risk_note",
+    "candidate_commentary",
+    "rs_vs_topix_1w",
+    "live_ret_vs_prev_close",
+    "live_turnover",
+    "earnings_buffer_days",
+]
+SWING_BUY_1M_DISPLAY_COLUMNS = [
+    "candidate_rank_1m",
+    "name",
+    "sector_name",
+    "candidate_quality",
+    "selection_reason",
+    "risk_note",
+    "candidate_commentary",
+    "rs_vs_topix_1m",
+    "rs_vs_topix_3m",
+    "price_vs_ma20_pct",
+    "earnings_buffer_days",
+    "finance_health_flag",
+]
+SWING_WATCH_1W_DISPLAY_COLUMNS = [
+    "candidate_rank_1w",
+    "name",
+    "sector_name",
+    "entry_fit",
+    "risk_note",
+    "candidate_commentary",
+    "rs_vs_topix_1w",
+    "earnings_buffer_days",
+]
+SWING_WATCH_1M_DISPLAY_COLUMNS = [
+    "candidate_rank_1m",
+    "name",
+    "sector_name",
+    "entry_fit",
+    "risk_note",
+    "candidate_commentary",
+    "rs_vs_topix_1m",
+    "rs_vs_topix_3m",
+    "price_vs_ma20_pct",
+    "earnings_buffer_days",
 ]
 
 
-def _prepare_today_sector_view(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFrame, list[str]]:
     compatibility_notes: list[str] = []
     if df is None or df.empty:
-        return pd.DataFrame(columns=SECTOR_DISPLAY_COLUMNS), compatibility_notes
+        return pd.DataFrame(columns=columns), compatibility_notes
 
     prepared = df.copy()
-
-    def _to_count_text(value: Any) -> str:
-        numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-        return str(int(numeric)) if pd.notna(numeric) else "0"
-
-    if "sector_name" not in prepared.columns:
-        prepared["sector_name"] = ""
-        compatibility_notes.append("sector_name")
-
-    if "n" not in prepared.columns:
-        if "count" in prepared.columns:
-            prepared["n"] = _coerce_numeric(prepared["count"])
+    if "today_rank" not in prepared.columns and "sector_name" in prepared.columns and "price_block_score" in prepared.columns:
+        prepared["today_rank"] = range(1, len(prepared) + 1)
+        compatibility_notes.append("today_rank")
+    if "persistence_rank" not in prepared.columns and "sector_name" in prepared.columns and "sector_rs_vs_topix" in prepared.columns:
+        prepared["persistence_rank"] = range(1, len(prepared) + 1)
+        compatibility_notes.append("persistence_rank")
+    if "representative_stock" not in prepared.columns:
+        prepared["representative_stock"] = ""
+        compatibility_notes.append("representative_stock")
+    if "sector_confidence" not in prepared.columns:
+        prepared["sector_confidence"] = ""
+        compatibility_notes.append("sector_confidence")
+    if "sector_caution" not in prepared.columns:
+        prepared["sector_caution"] = ""
+        compatibility_notes.append("sector_caution")
+    if "sector_rs_vs_topix" not in prepared.columns:
+        if "sector_rs_vs_topix_1w" in prepared.columns:
+            prepared["sector_rs_vs_topix"] = _coerce_numeric(prepared["sector_rs_vs_topix_1w"])
+        elif "sector_rs_vs_topix_1m" in prepared.columns:
+            prepared["sector_rs_vs_topix"] = _coerce_numeric(prepared["sector_rs_vs_topix_1m"])
+        elif "sector_rs_vs_topix_3m" in prepared.columns:
+            prepared["sector_rs_vs_topix"] = _coerce_numeric(prepared["sector_rs_vs_topix_3m"])
         else:
-            prepared["n"] = pd.NA
-        compatibility_notes.append("n")
-
-    if "breadth" not in prepared.columns:
-        if "advancing_count" in prepared.columns and "declining_count" in prepared.columns:
-            prepared["breadth"] = prepared.apply(
-                lambda row: f"{_to_count_text(row.get('advancing_count'))} : {_to_count_text(row.get('declining_count'))}",
-                axis=1,
-            )
+            prepared["sector_rs_vs_topix"] = pd.NA
+        compatibility_notes.append("sector_rs_vs_topix")
+    string_columns = {
+        "sector_name",
+        "representative_stock",
+        "sector_confidence",
+        "sector_caution",
+        "breadth",
+        "name",
+        "candidate_quality",
+        "entry_fit",
+        "selection_reason",
+        "risk_note",
+        "candidate_commentary",
+        "finance_health_flag",
+    }
+    for column in columns:
+        if column not in prepared.columns:
+            prepared[column] = "" if column in string_columns else pd.NA
+            compatibility_notes.append(column)
+    for column in columns:
+        if column in string_columns:
+            prepared[column] = prepared[column].fillna("").astype(str)
         else:
-            prepared["breadth"] = ""
-        compatibility_notes.append("breadth")
-
-    if "median_ret" not in prepared.columns:
-        if "live_sector_ret" in prepared.columns:
-            prepared["median_ret"] = _coerce_numeric(prepared["live_sector_ret"])
-        else:
-            prepared["median_ret"] = pd.NA
-        compatibility_notes.append("median_ret")
-
-    if "turnover_ratio_median" not in prepared.columns:
-        if "live_sector_turnover_score" in prepared.columns:
-            prepared["turnover_ratio_median"] = _coerce_numeric(prepared["live_sector_turnover_score"])
-        else:
-            prepared["turnover_ratio_median"] = pd.NA
-        compatibility_notes.append("turnover_ratio_median")
-
-    if "industry_rank_live" not in prepared.columns:
-        if "industry_up_rank" in prepared.columns:
-            prepared["industry_rank_live"] = _coerce_numeric(prepared["industry_up_rank"])
-        else:
-            prepared["industry_rank_live"] = pd.NA
-        compatibility_notes.append("industry_rank_live")
-
-    if "sector_rank_1w" not in prepared.columns:
-        prepared["sector_rank_1w"] = pd.NA
-        compatibility_notes.append("sector_rank_1w")
-
-    if "sector_rank_1m" not in prepared.columns:
-        prepared["sector_rank_1m"] = pd.NA
-        compatibility_notes.append("sector_rank_1m")
-
-    if "sector_rank_3m" not in prepared.columns:
-        prepared["sector_rank_3m"] = pd.NA
-        compatibility_notes.append("sector_rank_3m")
-
-    if "leaders" not in prepared.columns:
-        prepared["leaders"] = ""
-        compatibility_notes.append("leaders")
-
-    prepared["sector_name"] = prepared["sector_name"].fillna("").astype(str)
-    prepared["breadth"] = prepared["breadth"].fillna("").astype(str)
-    prepared["leaders"] = prepared["leaders"].fillna("").astype(str)
-    for column in ["n", "median_ret", "turnover_ratio_median", "industry_rank_live", "sector_rank_1w", "sector_rank_1m", "sector_rank_3m"]:
-        prepared[column] = _coerce_numeric(prepared[column])
-
-    return prepared.reindex(columns=SECTOR_DISPLAY_COLUMNS), compatibility_notes
+            prepared[column] = _coerce_numeric(prepared[column])
+    return prepared.reindex(columns=columns), compatibility_notes
 
 
 def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.DataFrame, board_df: pd.DataFrame, base_df: pd.DataFrame, now_ts: datetime) -> dict[str, Any]:
@@ -2011,13 +2059,30 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
     loaded_snapshot_diagnostics = dict(payload.get("diagnostics", {}))
     meta = normalize_snapshot_meta(payload.get("meta", {}))
     focus_candidates = pd.DataFrame(payload.get("focus_candidates", []))
-    watch_candidates = pd.DataFrame(payload.get("watch_candidates", payload.get("focus_candidates", [])))
-    buy_candidates = pd.DataFrame(payload.get("buy_candidates", []))
-    center_stocks = pd.DataFrame(payload.get("center_stocks", payload.get("leaders_by_sector", [])))
-    today_sector_summary = pd.DataFrame(payload.get("today_sector_summary", payload.get("sector_summary", [])))
-    weekly_sector_summary = pd.DataFrame(payload.get("weekly_sector_summary", []))
-    monthly_sector_summary = pd.DataFrame(payload.get("monthly_sector_summary", []))
-    for frame in [focus_candidates, watch_candidates, buy_candidates, center_stocks]:
+    legacy_watch_candidates = pd.DataFrame(payload.get("watch_candidates", payload.get("focus_candidates", [])))
+    legacy_buy_candidates = pd.DataFrame(payload.get("buy_candidates", []))
+    center_stocks = pd.DataFrame(payload.get("sector_representatives", payload.get("center_stocks", payload.get("leaders_by_sector", []))))
+    today_sector_summary = pd.DataFrame(payload.get("today_sector_leaderboard", payload.get("today_sector_summary", payload.get("sector_summary", []))))
+    weekly_sector_summary = pd.DataFrame(payload.get("sector_persistence_1w", payload.get("weekly_sector_summary", [])))
+    monthly_sector_summary = pd.DataFrame(payload.get("sector_persistence_1m", payload.get("monthly_sector_summary", [])))
+    quarter_sector_summary = pd.DataFrame(payload.get("sector_persistence_3m", []))
+    swing_candidates_1w = pd.DataFrame(payload.get("swing_candidates_1w", payload.get("watch_candidates", payload.get("focus_candidates", []))))
+    swing_candidates_1m = pd.DataFrame(payload.get("swing_candidates_1m", payload.get("buy_candidates", [])))
+    swing_buy_candidates_1w = pd.DataFrame(payload.get("swing_buy_candidates_1w", []))
+    swing_watch_candidates_1w = pd.DataFrame(payload.get("swing_watch_candidates_1w", []))
+    swing_buy_candidates_1m = pd.DataFrame(payload.get("swing_buy_candidates_1m", []))
+    swing_watch_candidates_1m = pd.DataFrame(payload.get("swing_watch_candidates_1m", []))
+    if swing_buy_candidates_1w.empty and not swing_candidates_1w.empty and "entry_fit" in swing_candidates_1w.columns:
+        swing_buy_candidates_1w = swing_candidates_1w[swing_candidates_1w["entry_fit"].astype(str).eq("買い候補")].copy()
+    if swing_watch_candidates_1w.empty and not swing_candidates_1w.empty and "entry_fit" in swing_candidates_1w.columns:
+        swing_watch_candidates_1w = swing_candidates_1w[swing_candidates_1w["entry_fit"].astype(str).eq("監視候補")].copy()
+    if swing_buy_candidates_1m.empty and not swing_candidates_1m.empty and "entry_fit" in swing_candidates_1m.columns:
+        swing_buy_candidates_1m = swing_candidates_1m[swing_candidates_1m["entry_fit"].astype(str).eq("買い候補")].copy()
+    if swing_watch_candidates_1m.empty and not swing_candidates_1m.empty and "entry_fit" in swing_candidates_1m.columns:
+        swing_watch_candidates_1m = swing_candidates_1m[swing_candidates_1m["entry_fit"].astype(str).eq("監視候補")].copy()
+    watch_candidates = swing_watch_candidates_1w if not swing_watch_candidates_1w.empty else legacy_watch_candidates
+    buy_candidates = swing_buy_candidates_1m if not swing_buy_candidates_1m.empty else legacy_buy_candidates
+    for frame in [focus_candidates, legacy_watch_candidates, legacy_buy_candidates, watch_candidates, buy_candidates, swing_candidates_1w, swing_candidates_1m, swing_buy_candidates_1w, swing_watch_candidates_1w, swing_buy_candidates_1m, swing_watch_candidates_1m, center_stocks]:
         if not frame.empty and "name" in frame.columns:
             frame["nikkei_search"] = frame.apply(lambda row: _make_nikkei_search_link(str(row.get("name", "")), str(row.get("code", ""))), axis=1)
     return {
@@ -2026,11 +2091,21 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
         "today_sector_summary": today_sector_summary,
         "weekly_sector_summary": weekly_sector_summary,
         "monthly_sector_summary": monthly_sector_summary,
+        "sector_persistence_1w": weekly_sector_summary,
+        "sector_persistence_1m": monthly_sector_summary,
+        "sector_persistence_3m": quarter_sector_summary,
         "leaders_by_sector": center_stocks,
         "center_stocks": center_stocks,
+        "sector_representatives": center_stocks,
         "focus_candidates": focus_candidates,
         "watch_candidates": watch_candidates,
         "buy_candidates": buy_candidates,
+        "swing_candidates_1w": swing_candidates_1w,
+        "swing_candidates_1m": swing_candidates_1m,
+        "swing_buy_candidates_1w": swing_buy_candidates_1w,
+        "swing_watch_candidates_1w": swing_watch_candidates_1w,
+        "swing_buy_candidates_1m": swing_buy_candidates_1m,
+        "swing_watch_candidates_1m": swing_watch_candidates_1m,
         "empty_reasons": payload.get("empty_reasons", {}),
         "diagnostics": loaded_snapshot_diagnostics,
         "loaded_snapshot_meta": loaded_snapshot_meta,
@@ -2086,10 +2161,15 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     timepoint_meaning = _timepoint_meaning(mode)
     empty_reasons = bundle.get("empty_reasons", {})
     warning_text = saved_snapshot_timing_warning(meta) if is_saved_snapshot else ""
-    today_sector_view, today_sector_notes = _prepare_today_sector_view(bundle.get("today_sector_summary", bundle["sector_summary"]))
-    weekly_sector_view, weekly_sector_notes = _prepare_today_sector_view(bundle.get("weekly_sector_summary", pd.DataFrame()))
-    monthly_sector_view, monthly_sector_notes = _prepare_today_sector_view(bundle.get("monthly_sector_summary", pd.DataFrame()))
-    sector_compat_notes = sorted(set(today_sector_notes + weekly_sector_notes + monthly_sector_notes))
+    today_sector_view, today_sector_notes = _prepare_table_view(bundle.get("today_sector_leaderboard", bundle.get("today_sector_summary", bundle["sector_summary"])), TODAY_SECTOR_DISPLAY_COLUMNS)
+    weekly_sector_view, weekly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1w", bundle.get("weekly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
+    monthly_sector_view, monthly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1m", bundle.get("monthly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
+    quarter_sector_view, quarter_sector_notes = _prepare_table_view(bundle.get("sector_persistence_3m", pd.DataFrame()), PERSISTENCE_DISPLAY_COLUMNS)
+    swing_buy_1w_view, swing_buy_1w_notes = _prepare_table_view(bundle.get("swing_buy_candidates_1w", pd.DataFrame()), SWING_BUY_1W_DISPLAY_COLUMNS)
+    swing_buy_1m_view, swing_buy_1m_notes = _prepare_table_view(bundle.get("swing_buy_candidates_1m", pd.DataFrame()), SWING_BUY_1M_DISPLAY_COLUMNS)
+    swing_watch_1w_view, swing_watch_1w_notes = _prepare_table_view(bundle.get("swing_watch_candidates_1w", pd.DataFrame()), SWING_WATCH_1W_DISPLAY_COLUMNS)
+    swing_watch_1m_view, swing_watch_1m_notes = _prepare_table_view(bundle.get("swing_watch_candidates_1m", pd.DataFrame()), SWING_WATCH_1M_DISPLAY_COLUMNS)
+    sector_compat_notes = sorted(set(today_sector_notes + weekly_sector_notes + monthly_sector_notes + quarter_sector_notes + swing_buy_1w_notes + swing_buy_1m_notes + swing_watch_1w_notes + swing_watch_1m_notes))
     if generated_at_jst or mode:
         with st.expander("運用状態", expanded=False):
             mode_label = f"{expected_time_label} = {timepoint_meaning}" if expected_time_label and timepoint_meaning else expected_time_label or mode
@@ -2116,9 +2196,9 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         reason="市場横断ランキングと daily base の突合条件を満たす本命セクターがありません。",
     )
     _render_dataframe_or_reason(
-        "各本命セクターの中心銘柄",
-        bundle.get("center_stocks", bundle["leaders_by_sector"]),
-        reason=str(empty_reasons.get("center_stocks", "")),
+        "今日の本命セクター代表銘柄",
+        bundle.get("sector_representatives", bundle.get("center_stocks", bundle["leaders_by_sector"])),
+        reason=str(empty_reasons.get("sector_representatives", empty_reasons.get("center_stocks", ""))),
         link_columns=True,
     )
     _render_dataframe_or_reason(
@@ -2132,15 +2212,32 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         reason=str(empty_reasons.get("monthly_sector_summary", "")),
     )
     _render_dataframe_or_reason(
-        "買い候補",
-        bundle.get("buy_candidates", pd.DataFrame()),
-        reason=str(empty_reasons.get("buy_candidates", "")),
+        "3か月主力セクター",
+        quarter_sector_view,
+        reason=str(empty_reasons.get("sector_persistence_3m", "")),
+    )
+    _render_dataframe_or_reason(
+        "1週間スイング買い候補",
+        swing_buy_1w_view,
+        reason=str(empty_reasons.get("swing_buy_candidates_1w", empty_reasons.get("swing_candidates_1w", ""))),
         link_columns=True,
     )
     _render_dataframe_or_reason(
-        "監視候補",
-        bundle.get("watch_candidates", bundle["focus_candidates"]),
-        reason=str(empty_reasons.get("watch_candidates", "")),
+        "1か月スイング買い候補",
+        swing_buy_1m_view,
+        reason=str(empty_reasons.get("swing_buy_candidates_1m", empty_reasons.get("swing_candidates_1m", empty_reasons.get("buy_candidates", "")))),
+        link_columns=True,
+    )
+    _render_dataframe_or_reason(
+        "1週間スイング監視候補",
+        swing_watch_1w_view,
+        reason=str(empty_reasons.get("swing_watch_candidates_1w", empty_reasons.get("watch_candidates", ""))),
+        link_columns=True,
+    )
+    _render_dataframe_or_reason(
+        "1か月スイング監視候補",
+        swing_watch_1m_view,
+        reason=str(empty_reasons.get("swing_watch_candidates_1m", "")),
         link_columns=True,
     )
     diagnostics = bundle.get("loaded_snapshot_diagnostics", bundle.get("diagnostics", {})) if is_saved_snapshot else bundle.get("diagnostics", {})
