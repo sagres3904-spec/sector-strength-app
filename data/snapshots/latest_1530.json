@@ -1,8 +1,8 @@
 {
   "meta": {
-    "generated_at": "2026-03-26T08:49:14.149582+00:00",
-    "generated_at_utc": "2026-03-26T08:49:14.149582+00:00",
-    "generated_at_jst": "2026-03-26 17:49:14 JST",
+    "generated_at": "2026-03-26T09:19:06.576760+00:00",
+    "generated_at_utc": "2026-03-26T09:19:06.576760+00:00",
+    "generated_at_jst": "2026-03-26 18:19:06 JST",
     "mode": "1530",
     "is_true_timepoint": false,
     "expected_time_label": "15:30",
@@ -7377,7 +7377,7 @@
   },
   "diagnostics": {
     "mode": "1530",
-    "generated_at": "2026-03-26T08:49:14.149582+00:00",
+    "generated_at": "2026-03-26T09:19:06.576760+00:00",
     "watch_candidate_count": 3,
     "buy_candidate_count": 4,
     "center_stock_count": 10,
@@ -7392,7 +7392,7 @@
       "fast_check": false,
       "topix_source_rows": 70,
       "earnings_coverage_count": 0,
-      "finance_coverage_count": 1463
+      "finance_coverage_count": 1479
     },
     "ranking": {
       "ranking_counts": {
@@ -7448,7 +7448,7 @@
   "paths": {
     "json_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\latest_1530.json",
     "markdown_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\latest_1530.md",
-    "dated_json_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\2026-03-26_174914_1530.json",
-    "dated_markdown_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\2026-03-26_174914_1530.md"
+    "dated_json_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\2026-03-26_181906_1530.json",
+    "dated_markdown_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\2026-03-26_181906_1530.md"
   }
 }
