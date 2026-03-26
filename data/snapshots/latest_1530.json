@@ -1,8 +1,8 @@
 {
   "meta": {
-    "generated_at": "2026-03-26T09:31:27.793765+00:00",
-    "generated_at_utc": "2026-03-26T09:31:27.793765+00:00",
-    "generated_at_jst": "2026-03-26 18:31:27 JST",
+    "generated_at": "2026-03-26T09:38:56.863162+00:00",
+    "generated_at_utc": "2026-03-26T09:38:56.863162+00:00",
+    "generated_at_jst": "2026-03-26 18:38:56 JST",
     "mode": "1530",
     "is_true_timepoint": false,
     "expected_time_label": "15:30",
@@ -3128,8 +3128,112 @@
       "material_link": ""
     }
   ],
-  "focus_candidates": [],
-  "watch_candidates": [],
+  "focus_candidates": [
+    {
+      "candidate_rank_1w": 1,
+      "code": "6526",
+      "name": "ソシオネクスト",
+      "sector_name": "電気機器",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 13.731303187282574,
+      "live_ret_vs_prev_close": 6.484458735262599,
+      "live_turnover": 34475993850.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%BD%E3%82%B7%E3%82%AA%E3%83%8D%E3%82%AF%E3%82%B9%E3%83%88",
+      "material_link": ""
+    },
+    {
+      "candidate_rank_1w": 2,
+      "code": "9984",
+      "name": "ソフトバンクグループ",
+      "sector_name": "情報･通信業",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 6.494537263624278,
+      "live_ret_vs_prev_close": 0.34129692832765013,
+      "live_turnover": 277513058100.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%BD%E3%83%95%E3%83%88%E3%83%90%E3%83%B3%E3%82%AF%E3%82%B0%E3%83%AB%E3%83%BC%E3%83%97",
+      "material_link": ""
+    },
+    {
+      "candidate_rank_1w": 3,
+      "code": "7220",
+      "name": "武蔵精密工業",
+      "sector_name": "輸送用機器",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 6.7411810566418096,
+      "live_ret_vs_prev_close": 10.209523809523802,
+      "live_turnover": 12765376900.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E6%AD%A6%E8%94%B5%E7%B2%BE%E5%AF%86%E5%B7%A5%E6%A5%AD",
+      "material_link": ""
+    }
+  ],
+  "watch_candidates": [
+    {
+      "candidate_rank_1w": 1,
+      "code": "6526",
+      "name": "ソシオネクスト",
+      "sector_name": "電気機器",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 13.731303187282574,
+      "live_ret_vs_prev_close": 6.484458735262599,
+      "live_turnover": 34475993850.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%BD%E3%82%B7%E3%82%AA%E3%83%8D%E3%82%AF%E3%82%B9%E3%83%88",
+      "material_link": ""
+    },
+    {
+      "candidate_rank_1w": 2,
+      "code": "9984",
+      "name": "ソフトバンクグループ",
+      "sector_name": "情報･通信業",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 6.494537263624278,
+      "live_ret_vs_prev_close": 0.34129692832765013,
+      "live_turnover": 277513058100.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%BD%E3%83%95%E3%83%88%E3%83%90%E3%83%B3%E3%82%AF%E3%82%B0%E3%83%AB%E3%83%BC%E3%83%97",
+      "material_link": ""
+    },
+    {
+      "candidate_rank_1w": 3,
+      "code": "7220",
+      "name": "武蔵精密工業",
+      "sector_name": "輸送用機器",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 6.7411810566418096,
+      "live_ret_vs_prev_close": 10.209523809523802,
+      "live_turnover": 12765376900.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E6%AD%A6%E8%94%B5%E7%B2%BE%E5%AF%86%E5%B7%A5%E6%A5%AD",
+      "material_link": ""
+    }
+  ],
   "buy_candidates": [
     {
       "candidate_rank_1m": 1,
@@ -3204,7 +3308,59 @@
       "material_link": ""
     }
   ],
-  "swing_candidates_1w": [],
+  "swing_candidates_1w": [
+    {
+      "candidate_rank_1w": 1,
+      "code": "6526",
+      "name": "ソシオネクスト",
+      "sector_name": "電気機器",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 13.731303187282574,
+      "live_ret_vs_prev_close": 6.484458735262599,
+      "live_turnover": 34475993850.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%BD%E3%82%B7%E3%82%AA%E3%83%8D%E3%82%AF%E3%82%B9%E3%83%88",
+      "material_link": ""
+    },
+    {
+      "candidate_rank_1w": 2,
+      "code": "9984",
+      "name": "ソフトバンクグループ",
+      "sector_name": "情報･通信業",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 6.494537263624278,
+      "live_ret_vs_prev_close": 0.34129692832765013,
+      "live_turnover": 277513058100.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%BD%E3%83%95%E3%83%88%E3%83%90%E3%83%B3%E3%82%AF%E3%82%B0%E3%83%AB%E3%83%BC%E3%83%97",
+      "material_link": ""
+    },
+    {
+      "candidate_rank_1w": 3,
+      "code": "7220",
+      "name": "武蔵精密工業",
+      "sector_name": "輸送用機器",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 6.7411810566418096,
+      "live_ret_vs_prev_close": 10.209523809523802,
+      "live_turnover": 12765376900.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E6%AD%A6%E8%94%B5%E7%B2%BE%E5%AF%86%E5%B7%A5%E6%A5%AD",
+      "material_link": ""
+    }
+  ],
   "swing_candidates_1m": [
     {
       "candidate_rank_1m": 1,
@@ -3279,7 +3435,59 @@
       "material_link": ""
     }
   ],
-  "swing_buy_candidates_1w": [],
+  "swing_buy_candidates_1w": [
+    {
+      "code": "6526",
+      "name": "ソシオネクスト",
+      "sector_name": "電気機器",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 13.731303187282574,
+      "live_ret_vs_prev_close": 6.484458735262599,
+      "live_turnover": 34475993850.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%BD%E3%82%B7%E3%82%AA%E3%83%8D%E3%82%AF%E3%82%B9%E3%83%88",
+      "material_link": "",
+      "candidate_rank_1w": 1
+    },
+    {
+      "code": "9984",
+      "name": "ソフトバンクグループ",
+      "sector_name": "情報･通信業",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 6.494537263624278,
+      "live_ret_vs_prev_close": 0.34129692832765013,
+      "live_turnover": 277513058100.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E3%82%BD%E3%83%95%E3%83%88%E3%83%90%E3%83%B3%E3%82%AF%E3%82%B0%E3%83%AB%E3%83%BC%E3%83%97",
+      "material_link": "",
+      "candidate_rank_1w": 2
+    },
+    {
+      "code": "7220",
+      "name": "武蔵精密工業",
+      "sector_name": "輸送用機器",
+      "candidate_quality": "高",
+      "entry_fit": "買い候補",
+      "selection_reason": "今日強セクター / 当日資金流入 / 1週RS強い / 流動性十分",
+      "risk_note": "決算不明",
+      "candidate_commentary": "強セクター・資金流入継続",
+      "rs_vs_topix_1w": 6.7411810566418096,
+      "live_ret_vs_prev_close": 10.209523809523802,
+      "live_turnover": 12765376900.0,
+      "earnings_buffer_days": NaN,
+      "nikkei_search": "https://www.nikkei.com/search?keyword=%E6%AD%A6%E8%94%B5%E7%B2%BE%E5%AF%86%E5%B7%A5%E6%A5%AD",
+      "material_link": "",
+      "candidate_rank_1w": 3
+    }
+  ],
   "swing_watch_candidates_1w": [],
   "swing_buy_candidates_1m": [],
   "swing_watch_candidates_1m": [
@@ -3361,9 +3569,9 @@
     "sector_persistence_1w": "",
     "sector_persistence_1m": "",
     "sector_persistence_3m": "",
-    "swing_candidates_1w": "1週間スイング候補の条件を満たす銘柄がありません。",
+    "swing_candidates_1w": "",
     "swing_candidates_1m": "",
-    "swing_buy_candidates_1w": "1週間スイング買い候補はありません。",
+    "swing_buy_candidates_1w": "",
     "swing_watch_candidates_1w": "1週間スイング監視候補はありません。",
     "swing_buy_candidates_1m": "1か月スイング買い候補はありません。",
     "swing_watch_candidates_1m": "",
@@ -3371,8 +3579,8 @@
   },
   "diagnostics": {
     "mode": "1530",
-    "generated_at": "2026-03-26T09:31:27.793765+00:00",
-    "watch_candidate_count": 0,
+    "generated_at": "2026-03-26T09:38:56.863162+00:00",
+    "watch_candidate_count": 3,
     "buy_candidate_count": 4,
     "center_stock_count": 1,
     "ranking_candidate_count": 133,
@@ -3442,7 +3650,7 @@
   "paths": {
     "json_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\latest_1530.json",
     "markdown_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\latest_1530.md",
-    "dated_json_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\2026-03-26_183127_1530.json",
-    "dated_markdown_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\2026-03-26_183127_1530.md"
+    "dated_json_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\2026-03-26_183856_1530.json",
+    "dated_markdown_path": "D:\\株アプリ\\sector-strength-app-logic\\data\\snapshots\\2026-03-26_183856_1530.md"
   }
 }
