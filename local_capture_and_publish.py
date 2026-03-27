@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -90,10 +91,29 @@ def _clear_request(token: str, settings: dict[str, Any], *, session: Any = None,
     )
 
 
-def _publish_deploy_snapshot(token: str, settings: dict[str, Any], bundle: dict[str, Any], *, session: Any = None) -> None:
+def _load_local_snapshot_bundle(mode: str) -> dict[str, Any]:
+    snapshot_path = ROOT_DIR / "data" / "snapshots" / f"latest_{mode}.json"
+    if not snapshot_path.exists():
+        raise FileNotFoundError(f"Local snapshot not found: {snapshot_path}")
+    return json.loads(snapshot_path.read_text(encoding="utf-8"))
+
+
+def _resolve_deploy_snapshot_paths(settings: dict[str, Any], mode: str) -> tuple[dict[str, str], str, str]:
     config = get_github_control_config(settings)
-    json_path = config["deploy_snapshot_json_path"]
-    md_path = config["deploy_snapshot_md_path"]
+    if mode == "1130":
+        return config, config["deploy_snapshot_json_path"], config["deploy_snapshot_md_path"]
+    if mode == "0915":
+        return config, "data/snapshots/latest_0915.json", "data/snapshots/latest_0915.md"
+    if mode == "1530":
+        return config, "data/snapshots/latest_1530.json", "data/snapshots/latest_1530.md"
+    raise ValueError(f"Unsupported publish mode: {mode}")
+
+
+def publish_snapshot_bundle(token: str, settings: dict[str, Any], bundle: dict[str, Any], *, mode: str | None = None, session: Any = None) -> dict[str, str]:
+    publish_mode = str(mode or bundle.get("meta", {}).get("mode", "")).strip()
+    if publish_mode not in {"0915", "1130", "1530"}:
+        raise ValueError(f"Unsupported publish mode: {publish_mode}")
+    config, json_path, md_path = _resolve_deploy_snapshot_paths(settings, publish_mode)
 
     json_sha = ""
     md_sha = ""
@@ -112,7 +132,7 @@ def _publish_deploy_snapshot(token: str, settings: dict[str, Any], bundle: dict[
         json_path,
         token,
         bundle_to_json_text(bundle),
-        "Publish latest_1130 snapshot from local collector",
+        f"Publish latest_{publish_mode} snapshot from local collector",
         sha=json_sha,
         session=session,
     )
@@ -122,10 +142,22 @@ def _publish_deploy_snapshot(token: str, settings: dict[str, Any], bundle: dict[
         md_path,
         token,
         bundle_to_markdown(bundle),
-        "Publish latest_1130 snapshot markdown from local collector",
+        f"Publish latest_{publish_mode} snapshot markdown from local collector",
         sha=md_sha,
         session=session,
     )
+    return {"mode": publish_mode, "json_path": json_path, "markdown_path": md_path, "deploy_branch": config["deploy_branch"]}
+
+
+def _publish_local_snapshot_mode(mode: str, *, session: Any = None) -> None:
+    if mode not in {"0915", "1130", "1530"}:
+        raise ValueError(f"Unsupported publish mode: {mode}")
+    settings = get_settings()
+    token = _github_token()
+    if not token:
+        raise RuntimeError(f"{GITHUB_CONTROL_TOKEN_SECRET_NAME} is missing.")
+    bundle = _load_local_snapshot_bundle(mode)
+    publish_snapshot_bundle(token, settings, bundle, mode=mode, session=session)
 
 
 def process_update_request(
@@ -147,7 +179,7 @@ def process_update_request(
     try:
         _update_status(token, settings, status="running", message="Fast snapshot refresh is running.", last_run_at=started_at, session=session)
         bundle = runner(mode="1130", write_drive=False, fast_check=True)
-        _publish_deploy_snapshot(token, settings, bundle, session=session)
+        publish_snapshot_bundle(token, settings, bundle, mode="1130", session=session)
         finished_at = _utc_now()
         summary = f"latest_1130.json updated at {finished_at}"
         _update_status(token, settings, status="success", message=summary, last_run_at=finished_at, session=session)
@@ -166,11 +198,22 @@ def process_update_request(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Poll control-plane update request and publish latest_1130 snapshot.")
-    parser.add_argument("--force", action="store_true", help="Ignore request flag and run once immediately.")
+    exclusive = parser.add_mutually_exclusive_group()
+    exclusive.add_argument("--force", action="store_true", help="Ignore request flag and run once immediately.")
+    exclusive.add_argument("--publish-local-mode", choices=["0915", "1130", "1530"], help="Publish an existing local snapshot to the deploy branch.")
     args = parser.parse_args()
 
     try:
         with single_instance_lock(LOCK_PATH):
+            if args.publish_local_mode:
+                try:
+                    _publish_local_snapshot_mode(args.publish_local_mode)
+                    print(f"published latest_{args.publish_local_mode} snapshot")
+                    return 0
+                except Exception as exc:
+                    summary = _short_body(str(exc), limit=180)
+                    print(summary)
+                    return 1
             if args.force:
                 settings = get_settings()
                 token = _github_token()
@@ -180,7 +223,7 @@ def main() -> int:
                 try:
                     _update_status(token, settings, status="running", message="Forced fast snapshot refresh is running.", last_run_at=started_at)
                     bundle = run_cli(mode="1130", write_drive=False, fast_check=True)
-                    _publish_deploy_snapshot(token, settings, bundle)
+                    publish_snapshot_bundle(token, settings, bundle, mode="1130")
                     finished_at = _utc_now()
                     _update_status(token, settings, status="success", message=f"Forced latest_1130.json updated at {finished_at}", last_run_at=finished_at)
                     _clear_request(token, settings, status="success")
