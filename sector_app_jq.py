@@ -4265,6 +4265,8 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
     snapshot_path = _snapshot_json_path(mode, settings)
     cached_payload = _load_saved_snapshot_payload_cached(mode, str(snapshot_path), _snapshot_mtime_ns(snapshot_path))
     payload = cached_payload["payload"]
+    loaded_snapshot_meta = dict(payload.get("meta", {}))
+    loaded_snapshot_diagnostics = dict(payload.get("diagnostics", {}))
     meta = normalize_snapshot_meta(payload.get("meta", {}))
     snapshot_guard = evaluate_snapshot_guard(mode, meta)
     today_sector_summary = pd.DataFrame(payload.get("today_sector_leaderboard", payload.get("today_sector_summary", payload.get("sector_summary", []))))
@@ -4338,7 +4340,9 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
         "swing_buy_candidates_1m": swing_buy_candidates_1m if not swing_buy_candidates_1m.empty else swing_candidates_1m[swing_candidates_1m.get("entry_fit", pd.Series(dtype=str)).eq("買い候補")] if not swing_candidates_1m.empty and "entry_fit" in swing_candidates_1m.columns else pd.DataFrame(),
         "swing_watch_candidates_1m": swing_watch_candidates_1m if not swing_watch_candidates_1m.empty else swing_candidates_1m[swing_candidates_1m.get("entry_fit", pd.Series(dtype=str)).eq("監視候補")] if not swing_candidates_1m.empty and "entry_fit" in swing_candidates_1m.columns else pd.DataFrame(),
         "empty_reasons": payload.get("empty_reasons", {}),
-        "diagnostics": payload.get("diagnostics", {}),
+        "diagnostics": loaded_snapshot_diagnostics,
+        "loaded_snapshot_meta": loaded_snapshot_meta,
+        "loaded_snapshot_diagnostics": loaded_snapshot_diagnostics,
         "snapshot_guard": snapshot_guard,
         "paths": cached_payload["paths"],
         "snapshot_source_label": cached_payload["source_label"],
@@ -4383,10 +4387,11 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     del source_label
     snapshot_source_label = str(bundle.get("snapshot_source_label", "")).strip()
     snapshot_warning_message = str(bundle.get("snapshot_warning_message", "")).strip()
-    meta = bundle.get("meta", {})
-    generated_at_jst = str(meta.get("generated_at_jst", "") or meta.get("generated_at", ""))
-    mode = str(meta.get("mode", ""))
-    expected_time_label = str(meta.get("expected_time_label", "")).strip()
+    raw_meta = bundle.get("loaded_snapshot_meta", bundle.get("meta", {})) if is_saved_snapshot else bundle.get("meta", {})
+    meta = normalize_snapshot_meta(raw_meta)
+    generated_at_jst = str(raw_meta.get("generated_at_jst", "")).strip() or str(meta.get("generated_at_jst", "") or meta.get("generated_at", ""))
+    mode = str(raw_meta.get("mode", "")).strip() or str(meta.get("mode", ""))
+    expected_time_label = str(raw_meta.get("expected_time_label", "")).strip() or str(meta.get("expected_time_label", "")).strip()
     timepoint_meaning = _timepoint_meaning(mode)
     empty_reasons = bundle.get("empty_reasons", {})
     snapshot_guard = bundle.get("snapshot_guard", {})
@@ -4472,7 +4477,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         reason=str(empty_reasons.get("swing_watch_candidates_1m", "")),
         link_columns=True,
     )
-    diagnostics = bundle.get("diagnostics", {})
+    diagnostics = bundle.get("loaded_snapshot_diagnostics", bundle.get("diagnostics", {})) if is_saved_snapshot else bundle.get("diagnostics", {})
     if diagnostics:
         with st.expander("diagnostics", expanded=False):
             st.json(diagnostics)
