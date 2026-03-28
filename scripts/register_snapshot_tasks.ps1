@@ -18,7 +18,7 @@ if (-not (Test-Path $powershellExe)) {
 }
 
 $taskSpecs = @(
-    @{ Mode = "0915"; Time = "09:15" },
+    @{ Mode = "0915"; Time = "09:14" },
     @{ Mode = "1130"; Time = "11:30" },
     @{ Mode = "1530"; Time = "15:30" }
 )
