@@ -196,7 +196,7 @@ MODE_SCORE_WEIGHTS = {
     "1530": {"live_ret_from_open": 1.3, "live_ret_vs_prev_close": 1.2, "closing_strength": 1.2, "high_close_score": 1.0, "live_volume_ratio_20d": 1.0, "live_turnover_ratio_20d": 1.2, "ret_1w": 0.7, "ret_1m": 0.6, "material_score": 0.3},
     "now": {"live_ret_from_open": 1.4, "live_ret_vs_prev_close": 1.1, "gap_pct": 1.0, "live_volume_ratio_20d": 1.1, "live_turnover_ratio_20d": 1.3, "ret_1w": 0.6, "ret_1m": 0.5, "material_score": 0.3},
 }
-VIEWER_ONLY_SNAPSHOT_MODES = ("1130", "1530", "now")
+VIEWER_ONLY_SNAPSHOT_MODES = ("0915", "1130", "1530", "now")
 DEFAULT_GITHUB_REPOSITORY = "sagres3904-spec/sector-strength-app"
 DEFAULT_GITHUB_CONTROL_BRANCH = "control-plane"
 DEFAULT_GITHUB_DEPLOY_BRANCH = "deploy/streamlit-live"
@@ -2279,14 +2279,27 @@ def _render_control_plane_status(settings: dict[str, Any]) -> None:
     requested_at = str(request_payload.get("requested_at", "")).strip()
     requested_by = str(request_payload.get("requested_by", "")).strip()
     request_mode = str(request_payload.get("request_mode", "") or "1130").strip() or "1130"
+    st.caption(f"request_mode: {request_mode}")
     if request_payload.get("request_update"):
         st.warning(f"更新依頼は受付中です。request_mode={request_mode} requested_at={requested_at or '-'} requested_by={requested_by or '-'}")
-        pending_cols = st.columns(2)
-        pending_cols[0].button("1130を更新", disabled=True, key="request-1130-disabled", help="すでに依頼済みです")
-        pending_cols[1].button("nowを更新", disabled=True, key="request-now-disabled", help="すでに依頼済みです")
+        pending_cols = st.columns(4)
+        pending_cols[0].button("0915を更新", disabled=True, key="request-0915-disabled", help="すでに依頼済みです")
+        pending_cols[1].button("1130を更新", disabled=True, key="request-1130-disabled", help="すでに依頼済みです")
+        pending_cols[2].button("1530を更新", disabled=True, key="request-1530-disabled", help="すでに依頼済みです")
+        pending_cols[3].button("nowを更新", disabled=True, key="request-now-disabled", help="すでに依頼済みです")
         return
-    action_cols = st.columns(2)
-    if action_cols[0].button("1130を更新", type="primary", key="request-1130", help="control-plane branch に 1130 更新依頼を書き込みます"):
+    action_cols = st.columns(4)
+    if action_cols[0].button("0915を更新", type="primary", key="request-0915", help="control-plane branch に 0915 更新依頼を書き込みます"):
+        try:
+            submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="0915")
+            if submitted:
+                st.success(f"0915 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
+            else:
+                st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"0915 更新依頼の送信に失敗しました: {exc}")
+    if action_cols[1].button("1130を更新", key="request-1130", help="control-plane branch に 1130 更新依頼を書き込みます"):
         try:
             submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="1130")
             if submitted:
@@ -2296,7 +2309,17 @@ def _render_control_plane_status(settings: dict[str, Any]) -> None:
             st.rerun()
         except Exception as exc:
             st.error(f"1130 更新依頼の送信に失敗しました: {exc}")
-    if action_cols[1].button("nowを更新", key="request-now", help="control-plane branch に now 更新依頼を書き込みます"):
+    if action_cols[2].button("1530を更新", key="request-1530", help="control-plane branch に 1530 更新依頼を書き込みます"):
+        try:
+            submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="1530")
+            if submitted:
+                st.success(f"1530 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
+            else:
+                st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"1530 更新依頼の送信に失敗しました: {exc}")
+    if action_cols[3].button("nowを更新", key="request-now", help="control-plane branch に now 更新依頼を書き込みます"):
         try:
             submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="now")
             if submitted:
@@ -2315,7 +2338,7 @@ def _render_viewer_only_app(settings: dict[str, Any]) -> None:
     available_modes = _available_viewer_snapshot_modes(settings)
     if not available_modes:
         st.warning("まだ snapshot がありません")
-        st.caption("表示対象: latest_1130.json / latest_1530.json / latest_now.json")
+        st.caption("表示対象: latest_0915.json / latest_1130.json / latest_1530.json / latest_now.json")
         return
     if len(available_modes) == 1:
         mode = available_modes[0]
@@ -2335,7 +2358,7 @@ def render_app() -> None:
     settings = get_settings()
     if _is_streamlit_cloud():
         st.caption("Cloud では viewer-only で動作します。保存済み snapshot の表示と更新依頼だけを行います。")
-        st.info("latest_1130.json / latest_1530.json / latest_now.json を優先して読み込みます。Cloud では collector / kabu live 取得は実行しません。")
+        st.info("latest_0915.json / latest_1130.json / latest_1530.json / latest_now.json を優先して読み込みます。Cloud では collector / kabu live 取得は実行しません。")
         _render_viewer_only_app(settings)
         return
     st.caption("J-Quants を土台に、kabu ステーション API のライブデータを重ねてスナップショットを作成・表示します。")
