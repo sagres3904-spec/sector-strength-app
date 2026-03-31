@@ -1,7 +1,7 @@
 {
-  "request_update": false,
-  "requested_at": "2026-03-31T06:44:56.148159+00:00",
+  "request_update": true,
+  "requested_at": "2026-03-31T06:56:05.480183+00:00",
   "requested_by": "streamlit-cloud-viewer",
-  "status": "success",
-  "request_mode": "now"
+  "status": "pending",
+  "request_mode": "1130"
 }
