@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-03-31T05:57:37.913520+00:00",
-  "status": "success",
-  "message": "Forced latest_now.json updated at 2026-03-31T05:57:37.913520+00:00",
-  "request_mode": "now"
+  "last_run_at": "2026-03-31T06:34:47.573784+00:00",
+  "status": "failed",
+  "message": "Unsupported request_mode: 1530",
+  "request_mode": "1530"
 }
