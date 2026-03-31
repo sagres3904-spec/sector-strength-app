@@ -137,12 +137,13 @@ def _update_status(
     status: str,
     message: str,
     last_run_at: str,
+    request_mode: str = "",
     session: Any = None,
 ) -> None:
-    logger.info("updating control-plane status: status=%s last_run_at=%s message=%s", status, last_run_at, message)
+    logger.info("updating control-plane status: status=%s request_mode=%s last_run_at=%s message=%s", status, request_mode, last_run_at, message)
     payload, sha = read_control_plane_status(token, settings, session=session)
     payload = dict(payload)
-    payload.update({"last_run_at": last_run_at, "status": status, "message": message})
+    payload.update({"last_run_at": last_run_at, "status": status, "message": message, "request_mode": str(request_mode or "").strip()})
     write_control_plane_status(
         token,
         payload,
@@ -153,11 +154,11 @@ def _update_status(
     )
 
 
-def _clear_request(token: str, settings: dict[str, Any], *, session: Any = None, status: str = "idle") -> None:
-    logger.info("clearing control-plane request: status=%s", status)
+def _clear_request(token: str, settings: dict[str, Any], *, session: Any = None, status: str = "idle", request_mode: str = "") -> None:
+    logger.info("clearing control-plane request: status=%s request_mode=%s", status, request_mode)
     payload, sha = read_control_plane_request(token, settings, session=session)
     payload = dict(payload)
-    payload.update({"request_update": False, "status": status})
+    payload.update({"request_update": False, "request_mode": str(request_mode or "").strip(), "status": status})
     write_control_plane_request(
         token,
         payload,
@@ -183,12 +184,14 @@ def _resolve_deploy_snapshot_paths(settings: dict[str, Any], mode: str) -> tuple
         return config, "data/snapshots/latest_0915.json", "data/snapshots/latest_0915.md"
     if mode == "1530":
         return config, "data/snapshots/latest_1530.json", "data/snapshots/latest_1530.md"
+    if mode == "now":
+        return config, "data/snapshots/latest_now.json", "data/snapshots/latest_now.md"
     raise ValueError(f"Unsupported publish mode: {mode}")
 
 
 def publish_snapshot_bundle(token: str, settings: dict[str, Any], bundle: dict[str, Any], *, mode: str | None = None, session: Any = None) -> dict[str, str]:
     publish_mode = str(mode or bundle.get("meta", {}).get("mode", "")).strip()
-    if publish_mode not in {"0915", "1130", "1530"}:
+    if publish_mode not in {"0915", "1130", "1530", "now"}:
         raise ValueError(f"Unsupported publish mode: {publish_mode}")
     config, json_path, md_path = _resolve_deploy_snapshot_paths(settings, publish_mode)
     logger.info("publishing deploy snapshot mode=%s branch=%s json_path=%s md_path=%s", publish_mode, config["deploy_branch"], json_path, md_path)
@@ -228,7 +231,7 @@ def publish_snapshot_bundle(token: str, settings: dict[str, Any], bundle: dict[s
 
 
 def _publish_local_snapshot_mode(mode: str, *, session: Any = None) -> None:
-    if mode not in {"0915", "1130", "1530"}:
+    if mode not in {"0915", "1130", "1530", "now"}:
         raise ValueError(f"Unsupported publish mode: {mode}")
     settings = get_settings()
     token = _github_token()
@@ -236,6 +239,18 @@ def _publish_local_snapshot_mode(mode: str, *, session: Any = None) -> None:
         raise RuntimeError(f"{GITHUB_CONTROL_TOKEN_SECRET_NAME} is missing.")
     bundle = _load_local_snapshot_bundle(mode)
     publish_snapshot_bundle(token, settings, bundle, mode=mode, session=session)
+
+
+def _run_cli_options(mode: str) -> tuple[bool, str]:
+    if mode == "0915":
+        return False, "0915 snapshot refresh is running."
+    if mode == "1130":
+        return True, "1130 snapshot refresh is running."
+    if mode == "1530":
+        return False, "1530 snapshot refresh is running."
+    if mode == "now":
+        return False, "Now snapshot refresh is running."
+    raise ValueError(f"Unsupported request_mode: {mode}")
 
 
 def process_update_request(
@@ -254,37 +269,48 @@ def process_update_request(
     if not bool(request_payload.get("request_update")):
         logger.info("no pending update request")
         return {"handled": False, "reason": "no_request"}
+    request_mode = str(request_payload.get("request_mode", "") or "1130").strip() or "1130"
+    try:
+        fast_check, status_message = _run_cli_options(request_mode)
+    except ValueError:
+        failed_at = _utc_now()
+        summary = f"Unsupported request_mode: {request_mode}"
+        logger.error(summary)
+        _update_status(token, settings, status="failed", message=summary, last_run_at=failed_at, request_mode=request_mode, session=session)
+        _clear_request(token, settings, session=session, status="failed", request_mode=request_mode)
+        return {"handled": True, "status": "failed", "message": summary, "request_mode": request_mode}
 
     started_at = _utc_now()
-    logger.info("update request accepted: requested_at=%s requested_by=%s", request_payload.get("requested_at", ""), request_payload.get("requested_by", ""))
+    logger.info("update request accepted: request_mode=%s requested_at=%s requested_by=%s", request_mode, request_payload.get("requested_at", ""), request_payload.get("requested_by", ""))
     try:
-        _update_status(token, settings, status="running", message="Fast snapshot refresh is running.", last_run_at=started_at, session=session)
-        logger.info("starting run_cli for mode=1130 fast_check=True")
-        bundle = runner(mode="1130", write_drive=False, fast_check=True)
-        publish_snapshot_bundle(token, settings, bundle, mode="1130", session=session)
+        _update_status(token, settings, status="running", message=status_message, last_run_at=started_at, request_mode=request_mode, session=session)
+        logger.info("starting run_cli for mode=%s fast_check=%s", request_mode, fast_check)
+        bundle = runner(mode=request_mode, write_drive=False, fast_check=fast_check)
+        publish_snapshot_bundle(token, settings, bundle, mode=request_mode, session=session)
         finished_at = _utc_now()
-        summary = f"latest_1130.json updated at {finished_at}"
-        _update_status(token, settings, status="success", message=summary, last_run_at=finished_at, session=session)
-        _clear_request(token, settings, session=session, status="success")
+        summary = f"latest_{request_mode}.json updated at {finished_at}"
+        _update_status(token, settings, status="success", message=summary, last_run_at=finished_at, request_mode=request_mode, session=session)
+        _clear_request(token, settings, session=session, status="success", request_mode=request_mode)
         logger.info("update request completed successfully")
-        return {"handled": True, "status": "success", "message": summary}
+        return {"handled": True, "status": "success", "message": summary, "request_mode": request_mode}
     except Exception as exc:
         failed_at = _utc_now()
         summary = _short_body(str(exc), limit=180)
         logger.exception("update request failed: %s", summary)
         try:
-            _update_status(token, settings, status="failed", message=summary, last_run_at=failed_at, session=session)
-            _clear_request(token, settings, session=session, status="failed")
+            _update_status(token, settings, status="failed", message=summary, last_run_at=failed_at, request_mode=request_mode, session=session)
+            _clear_request(token, settings, session=session, status="failed", request_mode=request_mode)
         except Exception:
             pass
-        return {"handled": True, "status": "failed", "message": summary}
+        return {"handled": True, "status": "failed", "message": summary, "request_mode": request_mode}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Poll control-plane update request and publish latest_1130 snapshot.")
     exclusive = parser.add_mutually_exclusive_group()
     exclusive.add_argument("--force", action="store_true", help="Ignore request flag and run once immediately.")
-    exclusive.add_argument("--publish-local-mode", choices=["0915", "1130", "1530"], help="Publish an existing local snapshot to the deploy branch without touching control-plane status.")
+    exclusive.add_argument("--force-mode", choices=["0915", "1130", "1530", "now"], help="Ignore request flag and run once immediately for the specified mode.")
+    exclusive.add_argument("--publish-local-mode", choices=["0915", "1130", "1530", "now"], help="Publish an existing local snapshot to the deploy branch without touching control-plane status.")
     args = parser.parse_args()
 
     try:
@@ -299,30 +325,36 @@ def main() -> int:
                     logger.exception("publish-local-mode failed: %s", summary)
                     print(summary)
                     return 1
-            if args.force:
+            force_mode = ""
+            if args.force_mode:
+                force_mode = args.force_mode
+            elif args.force:
+                force_mode = "1130"
+            if force_mode:
                 settings = get_settings()
                 token = _github_token()
                 if not token:
                     raise RuntimeError(f"{GITHUB_CONTROL_TOKEN_SECRET_NAME} is missing.")
                 started_at = _utc_now()
                 try:
-                    logger.info("forced snapshot refresh started")
-                    _update_status(token, settings, status="running", message="Forced fast snapshot refresh is running.", last_run_at=started_at)
-                    bundle = run_cli(mode="1130", write_drive=False, fast_check=True)
-                    publish_snapshot_bundle(token, settings, bundle, mode="1130")
+                    fast_check, status_message = _run_cli_options(force_mode)
+                    logger.info("forced snapshot refresh started mode=%s fast_check=%s", force_mode, fast_check)
+                    _update_status(token, settings, status="running", message=f"Forced {status_message[0].lower()}{status_message[1:]}", last_run_at=started_at, request_mode=force_mode)
+                    bundle = run_cli(mode=force_mode, write_drive=False, fast_check=fast_check)
+                    publish_snapshot_bundle(token, settings, bundle, mode=force_mode)
                     finished_at = _utc_now()
-                    _update_status(token, settings, status="success", message=f"Forced latest_1130.json updated at {finished_at}", last_run_at=finished_at)
-                    _clear_request(token, settings, status="success")
+                    _update_status(token, settings, status="success", message=f"Forced latest_{force_mode}.json updated at {finished_at}", last_run_at=finished_at, request_mode=force_mode)
+                    _clear_request(token, settings, status="success", request_mode=force_mode)
                     logger.info("forced snapshot refresh completed successfully")
-                    print("forced update completed")
+                    print(f"forced {force_mode} update completed")
                     return 0
                 except Exception as exc:
                     failed_at = _utc_now()
                     summary = _short_body(str(exc), limit=180)
                     logger.exception("forced snapshot refresh failed: %s", summary)
                     try:
-                        _update_status(token, settings, status="failed", message=summary, last_run_at=failed_at)
-                        _clear_request(token, settings, status="failed")
+                        _update_status(token, settings, status="failed", message=summary, last_run_at=failed_at, request_mode=force_mode)
+                        _clear_request(token, settings, status="failed", request_mode=force_mode)
                     except Exception:
                         pass
                     print(summary)
