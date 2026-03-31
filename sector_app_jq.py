@@ -650,6 +650,26 @@ def submit_control_plane_update_request(
     return True, updated_payload
 
 
+def cancel_control_plane_update_request(
+    token: str,
+    settings: dict[str, Any] | None = None,
+    *,
+    session: requests.sessions.Session | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    payload, sha = read_control_plane_request(token, settings, session=session)
+    if not bool(payload.get("request_update")):
+        return False, payload
+    updated_payload = dict(payload)
+    updated_payload.update(
+        {
+            "request_update": False,
+            "status": "cancelled",
+        }
+    )
+    write_control_plane_request(token, updated_payload, settings, sha=sha, session=session, message="Cancel snapshot refresh request from viewer")
+    return True, updated_payload
+
+
 def get_api_key(settings: dict[str, Any] | None = None) -> str:
     settings = settings or get_settings()
     streamlit_secret = _read_streamlit_secret("JQUANTS_API_KEY") if _is_streamlit_runtime() else ""
@@ -2252,7 +2272,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
 
 
 def _render_control_plane_status(settings: dict[str, Any]) -> None:
-    st.subheader("更新依頼")
+    st.subheader("運用状態")
     if st.button("状態を再読込", key="refresh-control-plane-status"):
         st.rerun()
     token = _github_control_token(use_streamlit_secrets=True)
@@ -2280,76 +2300,90 @@ def _render_control_plane_status(settings: dict[str, Any]) -> None:
     requested_by = str(request_payload.get("requested_by", "")).strip()
     request_mode = str(request_payload.get("request_mode", "") or "1130").strip() or "1130"
     st.caption(f"request_mode: {request_mode}")
-    if request_payload.get("request_update"):
-        st.warning(f"更新依頼は受付中です。request_mode={request_mode} requested_at={requested_at or '-'} requested_by={requested_by or '-'}")
-        pending_cols = st.columns(4)
-        pending_cols[0].button("0915を更新", disabled=True, key="request-0915-disabled", help="すでに依頼済みです")
-        pending_cols[1].button("1130を更新", disabled=True, key="request-1130-disabled", help="すでに依頼済みです")
-        pending_cols[2].button("1530を更新", disabled=True, key="request-1530-disabled", help="すでに依頼済みです")
-        pending_cols[3].button("nowを更新", disabled=True, key="request-now-disabled", help="すでに依頼済みです")
-        return
-    action_cols = st.columns(4)
-    if action_cols[0].button("0915を更新", type="primary", key="request-0915", help="control-plane branch に 0915 更新依頼を書き込みます"):
-        try:
-            submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="0915")
-            if submitted:
-                st.success(f"0915 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
-            else:
-                st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"0915 更新依頼の送信に失敗しました: {exc}")
-    if action_cols[1].button("1130を更新", key="request-1130", help="control-plane branch に 1130 更新依頼を書き込みます"):
-        try:
-            submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="1130")
-            if submitted:
-                st.success(f"1130 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
-            else:
-                st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"1130 更新依頼の送信に失敗しました: {exc}")
-    if action_cols[2].button("1530を更新", key="request-1530", help="control-plane branch に 1530 更新依頼を書き込みます"):
-        try:
-            submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="1530")
-            if submitted:
-                st.success(f"1530 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
-            else:
-                st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"1530 更新依頼の送信に失敗しました: {exc}")
-    if action_cols[3].button("nowを更新", key="request-now", help="control-plane branch に now 更新依頼を書き込みます"):
-        try:
-            submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="now")
-            if submitted:
-                st.success(f"now 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
-            else:
-                st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"now 更新依頼の送信に失敗しました: {exc}")
+    if requested_at or requested_by:
+        st.caption(f"requested_at: {requested_at or '-'} requested_by: {requested_by or '-'}")
+    with st.expander("更新依頼", expanded=bool(request_payload.get("request_update"))):
+        if request_payload.get("request_update"):
+            st.warning(f"更新依頼は受付中です。request_mode={request_mode} requested_at={requested_at or '-'} requested_by={requested_by or '-'}")
+            pending_cols = st.columns(4)
+            pending_cols[0].button("0915を更新", disabled=True, key="request-0915-disabled", help="すでに依頼済みです")
+            pending_cols[1].button("1130を更新", disabled=True, key="request-1130-disabled", help="すでに依頼済みです")
+            pending_cols[2].button("1530を更新", disabled=True, key="request-1530-disabled", help="すでに依頼済みです")
+            pending_cols[3].button("nowを更新", disabled=True, key="request-now-disabled", help="すでに依頼済みです")
+            if st.button("更新依頼を取り消す", key="cancel-request", help="control-plane branch の更新依頼を取り消します"):
+                try:
+                    cancelled, updated_request = cancel_control_plane_update_request(token, settings)
+                    if cancelled:
+                        st.success(f"更新依頼を取り消しました。request_mode={updated_request.get('request_mode', '')}")
+                    else:
+                        st.info("取り消す更新依頼はありませんでした。")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"更新依頼の取り消しに失敗しました: {exc}")
+            return
+        action_cols = st.columns(4)
+        if action_cols[0].button("0915を更新", key="request-0915", help="control-plane branch に 0915 更新依頼を書き込みます"):
+            try:
+                submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="0915")
+                if submitted:
+                    st.success(f"0915 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
+                else:
+                    st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"0915 更新依頼の送信に失敗しました: {exc}")
+        if action_cols[1].button("1130を更新", key="request-1130", help="control-plane branch に 1130 更新依頼を書き込みます"):
+            try:
+                submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="1130")
+                if submitted:
+                    st.success(f"1130 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
+                else:
+                    st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"1130 更新依頼の送信に失敗しました: {exc}")
+        if action_cols[2].button("1530を更新", key="request-1530", help="control-plane branch に 1530 更新依頼を書き込みます"):
+            try:
+                submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="1530")
+                if submitted:
+                    st.success(f"1530 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
+                else:
+                    st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"1530 更新依頼の送信に失敗しました: {exc}")
+        if action_cols[3].button("nowを更新", key="request-now", help="control-plane branch に now 更新依頼を書き込みます"):
+            try:
+                submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="now")
+                if submitted:
+                    st.success(f"now 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
+                else:
+                    st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"now 更新依頼の送信に失敗しました: {exc}")
 
 
 def _render_viewer_only_app(settings: dict[str, Any]) -> None:
     st.caption("Cloud viewer-only モードです。保存済み snapshot の表示と更新依頼のみ行います。")
     _enable_viewer_auto_refresh(settings)
-    _render_control_plane_status(settings)
+    st.header("現在の表示")
+    st.caption("表示対象: latest_0915.json / latest_1130.json / latest_1530.json / latest_now.json")
     available_modes = _available_viewer_snapshot_modes(settings)
     if not available_modes:
         st.warning("まだ snapshot がありません")
-        st.caption("表示対象: latest_0915.json / latest_1130.json / latest_1530.json / latest_now.json")
-        return
-    if len(available_modes) == 1:
+    elif len(available_modes) == 1:
         mode = available_modes[0]
         bundle = load_saved_snapshot(mode, settings)
         _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
-        return
-    tabs = st.tabs([f"{mode}" for mode in available_modes])
-    for tab, mode in zip(tabs, available_modes):
-        with tab:
-            bundle = load_saved_snapshot(mode, settings)
-            _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
+    else:
+        tabs = st.tabs([f"{mode}" for mode in available_modes])
+        for tab, mode in zip(tabs, available_modes):
+            with tab:
+                bundle = load_saved_snapshot(mode, settings)
+                _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
+    st.divider()
+    _render_control_plane_status(settings)
 
 
 def render_app() -> None:
