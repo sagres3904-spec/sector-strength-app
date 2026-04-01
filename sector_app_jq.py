@@ -1101,25 +1101,59 @@ def _build_topix_return_map(topix_history: pd.DataFrame, trading_dates: list[str
     return result
 
 
-def get_earnings_buffer_frame(trading_dates: list[str], *, api_key: str | None = None) -> pd.DataFrame:
+def get_earnings_buffer_frame(trading_dates: list[str], *, api_key: str | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+    meta: dict[str, Any] = {
+        "status": "empty_dataset",
+        "rows_raw": 0,
+        "rows_future_window": 0,
+        "valid_code4_count": 0,
+        "date_col": "",
+        "code_col": "",
+        "min_event_date": "",
+        "max_event_date": "",
+    }
     if not trading_dates:
-        return pd.DataFrame(columns=["code", "earnings_buffer_days"])
+        meta["status"] = "no_trading_dates"
+        return pd.DataFrame(columns=["code", "earnings_buffer_days"]), meta
     latest_date = pd.Timestamp(trading_dates[-1])
     path = "/equities/earnings-calendar"
     params = {"from": latest_date.strftime("%Y-%m-%d"), "to": (latest_date + timedelta(days=90)).strftime("%Y-%m-%d")}
     df = _get_optional_dataset(path, params, dataset_name="earnings_calendar", api_key=api_key)
+    meta["rows_raw"] = int(len(df))
     if not df.empty:
         code_col = pick_optional_existing(df, ["Code", "LocalCode", "code"])
         event_col = pick_optional_existing(df, ["AnnouncementDate", "DisclosedDate", "ExpectedDate", "ScheduledDate", "Date", "date"])
+        meta["date_col"] = str(event_col or "")
+        meta["code_col"] = str(code_col or "")
         if code_col and event_col:
-            out = pd.DataFrame({"code": df[code_col].map(_normalize_code4), "event_date": pd.to_datetime(df[event_col], errors="coerce")})
+            normalized_codes = df[code_col].map(_normalize_code4)
+            event_dates = pd.to_datetime(df[event_col], errors="coerce")
+            valid_dates = event_dates.dropna()
+            if not valid_dates.empty:
+                meta["min_event_date"] = valid_dates.min().strftime("%Y-%m-%d")
+                meta["max_event_date"] = valid_dates.max().strftime("%Y-%m-%d")
+            meta["valid_code4_count"] = int(normalized_codes.map(_is_code4).sum())
+            meta["rows_future_window"] = int(((event_dates >= latest_date) & (event_dates <= latest_date + timedelta(days=90))).fillna(False).sum())
+            out = pd.DataFrame({"code": normalized_codes, "event_date": event_dates})
             out = out[out["code"].map(_is_code4)].dropna(subset=["event_date"])
             out = out[(out["event_date"] >= latest_date) & (out["event_date"] <= latest_date + timedelta(days=90))].copy()
             logger.info("earnings calendar endpoint used path=%s rows_raw=%s rows_filtered=%s", path, len(df), len(out))
             if not out.empty:
                 out["earnings_buffer_days"] = (out["event_date"] - latest_date).dt.days
-                return out.sort_values(["code", "event_date"]).drop_duplicates("code")[["code", "earnings_buffer_days"]].reset_index(drop=True)
-    return pd.DataFrame(columns=["code", "earnings_buffer_days"])
+                meta["status"] = "ok"
+                return out.sort_values(["code", "event_date"]).drop_duplicates("code")[["code", "earnings_buffer_days"]].reset_index(drop=True), meta
+            meta["status"] = "no_forward_events_in_dataset" if meta["rows_future_window"] == 0 else "no_usable_rows_after_filter"
+            logger.warning(
+                "earnings calendar unavailable for forward buffer latest_date=%s rows_raw=%s min_event_date=%s max_event_date=%s future_window_rows=%s",
+                latest_date.strftime("%Y-%m-%d"),
+                meta["rows_raw"],
+                meta["min_event_date"],
+                meta["max_event_date"],
+                meta["rows_future_window"],
+            )
+            return pd.DataFrame(columns=["code", "earnings_buffer_days"]), meta
+        meta["status"] = "missing_required_columns"
+    return pd.DataFrame(columns=["code", "earnings_buffer_days"]), meta
 
 
 def get_finance_health_frame(trading_dates: list[str], *, api_key: str | None = None) -> pd.DataFrame:
@@ -1229,7 +1263,7 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
     base["rel_3m"] = base["ret_3m"] - base["sector_rs_vs_topix_3m"]
     sector_counts = base.groupby("sector_name", dropna=False)["code"].nunique().reset_index(name="sector_constituent_count")
     base = base.merge(sector_counts, on="sector_name", how="left")
-    earnings_frame = get_earnings_buffer_frame(trading_dates, api_key=api_key)
+    earnings_frame, earnings_meta = get_earnings_buffer_frame(trading_dates, api_key=api_key)
     finance_frame = get_finance_health_frame(trading_dates, api_key=api_key)
     base = base.merge(earnings_frame, on="code", how="left")
     base = base.merge(finance_frame, on="code", how="left")
@@ -1252,6 +1286,11 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
         "fast_check": fast_check,
         "topix_source_rows": int(len(topix_history)),
         "earnings_coverage_count": int(base["earnings_buffer_days"].notna().sum()) if "earnings_buffer_days" in base.columns else 0,
+        "earnings_dataset_status": str(earnings_meta.get("status", "")),
+        "earnings_rows_raw": int(earnings_meta.get("rows_raw", 0) or 0),
+        "earnings_rows_future_window": int(earnings_meta.get("rows_future_window", 0) or 0),
+        "earnings_min_event_date": str(earnings_meta.get("min_event_date", "") or ""),
+        "earnings_max_event_date": str(earnings_meta.get("max_event_date", "") or ""),
         "finance_coverage_count": int(base["finance_health_score"].notna().sum()) if "finance_health_score" in base.columns else 0,
     }
 
@@ -2379,6 +2418,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
     working = merged.copy()
     earnings_days_raw = _coerce_numeric(working.get("earnings_buffer_days", pd.Series([pd.NA] * len(working))))
     earnings_days = earnings_days_raw.fillna(999)
+    earnings_data_available = bool(earnings_days_raw.notna().any())
     finance_score_raw = _coerce_numeric(working.get("finance_health_score", pd.Series([pd.NA] * len(working))))
     finance_score = finance_score_raw.fillna(0.0)
     working["earnings_proximity_flag"] = earnings_days_raw.lt(7).fillna(False)
@@ -2399,7 +2439,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
     working["liquidity_pass"] = working["liquidity_ok"]
     working["extension_flag"] = _coerce_numeric(working["price_vs_ma20_pct"]).abs().gt(12.0).fillna(False)
     working["ma20_band_pass"] = _coerce_numeric(working["price_vs_ma20_pct"]).between(-8.0, 15.0, inclusive="both") | _coerce_numeric(working["price_vs_ma20_pct"]).isna()
-    working["earnings_unknown_flag"] = earnings_days_raw.isna()
+    working["earnings_unknown_flag"] = earnings_days_raw.isna() & earnings_data_available
     working["earnings_risk_flag"] = earnings_days_raw.lt(7).fillna(False)
     working["finance_risk_flag"] = finance_score_raw.lt(-1.0).fillna(False)
     working["finance_health_guard"] = ~working["finance_risk_flag"]
@@ -2538,7 +2578,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
     working.loc[working["liquidity_ok"], "candidate_quality_score_1m"] += 0.5
     working.loc[~working["finance_risk_flag"], "candidate_quality_score_1m"] += 0.5
     working.loc[working["earnings_unknown_flag"], "candidate_quality_score_1m"] -= 0.25
-    working.loc[working["finance_health_flag"].eq("不明"), "candidate_quality_score_1m"] -= 0.25
+    working.loc[working["finance_health_flag"].eq("不明"), "candidate_quality_score_1m"] -= 0.15
     working.loc[working["earnings_risk_flag"], "candidate_quality_score_1m"] -= 1.0
     working.loc[working["extension_flag"], "candidate_quality_score_1m"] -= 0.75
     working.loc[working["finance_risk_flag"], "candidate_quality_score_1m"] -= 1.0
