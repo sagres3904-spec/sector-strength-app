@@ -264,13 +264,19 @@ INTRADAY_BLOCK_COMPONENT_WEIGHTS = {
         "breadth_active_coverage": 0.3,
     },
 }
-INTRADAY_BLOCK_MODE_WEIGHTS = {
+INTRADAY_BLOCK_MODE_WEIGHTS_BASELINE = {
     "0915": {"price": 0.50, "flow": 0.30, "participation": 0.20},
     "1130": {"price": 0.48, "flow": 0.32, "participation": 0.20},
     "1530": {"price": 0.44, "flow": 0.34, "participation": 0.22},
     "now": {"price": 0.47, "flow": 0.32, "participation": 0.21},
 }
-INTRADAY_BREADTH_SLOT_SETTINGS = {
+INTRADAY_BLOCK_MODE_WEIGHTS = {
+    "0915": {"price": 0.49, "flow": 0.29, "participation": 0.22},
+    "1130": {"price": 0.46, "flow": 0.30, "participation": 0.24},
+    "1530": {"price": 0.42, "flow": 0.31, "participation": 0.27},
+    "now": {"price": 0.45, "flow": 0.30, "participation": 0.25},
+}
+INTRADAY_BREADTH_SLOT_SETTINGS_BASELINE = {
     "0915": {
         "reliability_k": 3.0,
         "warn_up_rate": 0.40,
@@ -316,12 +322,101 @@ INTRADAY_BREADTH_SLOT_SETTINGS = {
         "heavy_penalty": 0.16,
     },
 }
-REPRESENTATIVE_STOCK_SCORE_WEIGHTS = {
+INTRADAY_BREADTH_SLOT_SETTINGS = {
+    "0915": {
+        "reliability_k": 3.0,
+        "warn_up_rate": 0.42,
+        "warn_balance": 0.00,
+        "warn_sample": 3.0,
+        "penalty_up_rate": 0.34,
+        "penalty_balance": -0.08,
+        "penalty_sample": 2.0,
+        "light_penalty": 0.08,
+        "heavy_penalty": 0.16,
+    },
+    "1130": {
+        "reliability_k": 5.0,
+        "warn_up_rate": 0.45,
+        "warn_balance": 0.03,
+        "warn_sample": 4.0,
+        "penalty_up_rate": 0.38,
+        "penalty_balance": 0.00,
+        "penalty_sample": 4.0,
+        "light_penalty": 0.12,
+        "heavy_penalty": 0.24,
+    },
+    "1530": {
+        "reliability_k": 7.0,
+        "warn_up_rate": 0.50,
+        "warn_balance": 0.08,
+        "warn_sample": 6.0,
+        "penalty_up_rate": 0.42,
+        "penalty_balance": 0.02,
+        "penalty_sample": 5.0,
+        "light_penalty": 0.18,
+        "heavy_penalty": 0.34,
+    },
+    "now": {
+        "reliability_k": 5.0,
+        "warn_up_rate": 0.45,
+        "warn_balance": 0.03,
+        "warn_sample": 4.0,
+        "penalty_up_rate": 0.38,
+        "penalty_balance": 0.00,
+        "penalty_sample": 4.0,
+        "light_penalty": 0.12,
+        "heavy_penalty": 0.24,
+    },
+}
+INTRADAY_CONCENTRATION_PENALTY_SETTINGS_BASELINE = {
+    "0915": {"warn_share": 1.0, "light_share": 1.0, "heavy_share": 1.0, "light_penalty": 0.0, "heavy_penalty": 0.0, "micro_sample_penalty": 0.0},
+    "1130": {"warn_share": 1.0, "light_share": 1.0, "heavy_share": 1.0, "light_penalty": 0.0, "heavy_penalty": 0.0, "micro_sample_penalty": 0.0},
+    "1530": {"warn_share": 1.0, "light_share": 1.0, "heavy_share": 1.0, "light_penalty": 0.0, "heavy_penalty": 0.0, "micro_sample_penalty": 0.0},
+    "now": {"warn_share": 1.0, "light_share": 1.0, "heavy_share": 1.0, "light_penalty": 0.0, "heavy_penalty": 0.0, "micro_sample_penalty": 0.0},
+}
+INTRADAY_CONCENTRATION_PENALTY_SETTINGS = {
+    "0915": {"warn_share": 0.55, "light_share": 0.65, "heavy_share": 0.80, "light_penalty": 0.04, "heavy_penalty": 0.10, "micro_sample_penalty": 0.02},
+    "1130": {"warn_share": 0.52, "light_share": 0.62, "heavy_share": 0.78, "light_penalty": 0.05, "heavy_penalty": 0.12, "micro_sample_penalty": 0.03},
+    "1530": {"warn_share": 0.50, "light_share": 0.60, "heavy_share": 0.75, "light_penalty": 0.08, "heavy_penalty": 0.18, "micro_sample_penalty": 0.05},
+    "now": {"warn_share": 0.52, "light_share": 0.62, "heavy_share": 0.78, "light_penalty": 0.05, "heavy_penalty": 0.12, "micro_sample_penalty": 0.03},
+}
+REPRESENTATIVE_STOCK_SCORE_WEIGHTS_BASELINE = {
     "live_turnover": 1.2,
     "live_turnover_ratio_20d": 1.15,
     "live_volume_ratio_20d": 0.95,
     "live_ret_vs_prev_close": 0.9,
     "avg_turnover_20d": 0.75,
+}
+REPRESENTATIVE_STOCK_SCORE_WEIGHTS = {
+    "live_turnover": 1.35,
+    "live_turnover_ratio_20d": 0.85,
+    "live_volume_ratio_20d": 0.60,
+    "live_ret_vs_prev_close": 0.35,
+    "avg_turnover_20d": 1.25,
+    "TradingValue_latest": 1.10,
+}
+REPRESENTATIVE_SORT_COLUMNS_BASELINE = ["sector_name", "representative_score", "stock_turnover_share_of_sector", "live_turnover", "live_ret_vs_prev_close"]
+REPRESENTATIVE_SORT_ASCENDING_BASELINE = [True, False, False, False, False]
+REPRESENTATIVE_SORT_COLUMNS = ["sector_name", "stock_turnover_share_of_sector", "representative_score", "avg_turnover_20d", "live_turnover", "live_ret_vs_prev_close"]
+REPRESENTATIVE_SORT_ASCENDING = [True, False, False, False, False, False]
+SECTOR_CONFIDENCE_PRIORITY = {"高": 2, "中": 1, "低": 0}
+SWING_SELECTION_CONFIG_BASELINE = {
+    "extension_threshold_1w": 12.0,
+    "extension_threshold_1m": 12.0,
+    "candidate_ma20_weight_1m": 0.35,
+    "sector_confidence_bonus_high_1w": 0.0,
+    "sector_confidence_bonus_mid_1w": 0.0,
+    "sector_confidence_bonus_high_1m": 0.0,
+    "sector_confidence_bonus_mid_1m": 0.0,
+}
+SWING_SELECTION_CONFIG = {
+    "extension_threshold_1w": 10.0,
+    "extension_threshold_1m": 10.0,
+    "candidate_ma20_weight_1m": 0.55,
+    "sector_confidence_bonus_high_1w": 0.35,
+    "sector_confidence_bonus_mid_1w": 0.15,
+    "sector_confidence_bonus_high_1m": 0.30,
+    "sector_confidence_bonus_mid_1m": 0.12,
 }
 VIEWER_ONLY_SNAPSHOT_MODES = ("1130", "1530", "now")
 DEFAULT_GITHUB_REPOSITORY = "sagres3904-spec/sector-strength-app"
@@ -2211,6 +2306,8 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
             "participation_block_score_raw",
             "intraday_sector_score_raw",
             "breadth_penalty",
+            "concentration_penalty",
+            "intraday_penalty_total",
             "intraday_sector_score",
             "today_sector_score",
         ]
@@ -2233,11 +2330,25 @@ def _empty_persistence_table() -> pd.DataFrame:
     )
 
 
-def _build_intraday_sector_leaderboard(mode: str, ranking_df: pd.DataFrame, industry_df: pd.DataFrame, merged: pd.DataFrame, base_df: pd.DataFrame) -> pd.DataFrame:
+def _build_intraday_sector_leaderboard(
+    mode: str,
+    ranking_df: pd.DataFrame,
+    industry_df: pd.DataFrame,
+    merged: pd.DataFrame,
+    base_df: pd.DataFrame,
+    *,
+    block_weights: dict[str, dict[str, float]] | None = None,
+    breadth_settings_map: dict[str, dict[str, float]] | None = None,
+    concentration_settings_map: dict[str, dict[str, float]] | None = None,
+) -> pd.DataFrame:
     ranking_df = _ensure_scan_source_type(ranking_df)
     if ranking_df.empty or merged.empty:
         return _empty_sector_leaderboard()
-    breadth_settings = INTRADAY_BREADTH_SLOT_SETTINGS.get(str(mode), INTRADAY_BREADTH_SLOT_SETTINGS["now"])
+    block_weights = block_weights or INTRADAY_BLOCK_MODE_WEIGHTS
+    breadth_settings_map = breadth_settings_map or INTRADAY_BREADTH_SLOT_SETTINGS
+    concentration_settings_map = concentration_settings_map or INTRADAY_CONCENTRATION_PENALTY_SETTINGS
+    breadth_settings = breadth_settings_map.get(str(mode), breadth_settings_map["now"])
+    concentration_settings = concentration_settings_map.get(str(mode), concentration_settings_map["now"])
     scan = ranking_df.merge(
         base_df[["code", "name", "sector_name", "sector_constituent_count"]],
         on="code",
@@ -2353,11 +2464,11 @@ def _build_intraday_sector_leaderboard(mode: str, ranking_df: pd.DataFrame, indu
         sector_base["breadth_core_score"] += _coerce_numeric(sector_base[column]).fillna(0.0) * weight
     sector_base["participation_block_score_raw"] = sector_base["breadth_core_score"]
     sector_base["participation_block_score"] = sector_base["participation_block_score_raw"] * sector_base["breadth_reliability"]
-    block_weights = INTRADAY_BLOCK_MODE_WEIGHTS.get(str(mode), INTRADAY_BLOCK_MODE_WEIGHTS["now"])
+    mode_block_weights = block_weights.get(str(mode), block_weights["now"])
     sector_base["intraday_sector_score_raw"] = (
-        sector_base["price_block_score"] * block_weights["price"]
-        + sector_base["flow_block_score"] * block_weights["flow"]
-        + sector_base["participation_block_score"] * block_weights["participation"]
+        sector_base["price_block_score"] * mode_block_weights["price"]
+        + sector_base["flow_block_score"] * mode_block_weights["flow"]
+        + sector_base["participation_block_score"] * mode_block_weights["participation"]
     )
     sector_base["intraday_total_score"] = sector_base["intraday_sector_score_raw"]
     weak_up = sector_base["breadth_up_rate"] < float(breadth_settings["penalty_up_rate"])
@@ -2373,7 +2484,15 @@ def _build_intraday_sector_leaderboard(mode: str, ranking_df: pd.DataFrame, indu
     sector_base["breadth_penalty"] = 0.0
     sector_base.loc[penalty_hits == 1, "breadth_penalty"] = float(breadth_settings["light_penalty"])
     sector_base.loc[penalty_hits >= 2, "breadth_penalty"] = float(breadth_settings["heavy_penalty"])
-    sector_base["intraday_sector_score"] = sector_base["intraday_sector_score_raw"] - sector_base["breadth_penalty"]
+    sector_base["concentration_penalty"] = 0.0
+    leader_share = _coerce_numeric(sector_base["leader_concentration_share"]).fillna(0.0)
+    scan_member_count = _coerce_numeric(sector_base["scan_member_count"]).fillna(0.0)
+    sector_base.loc[leader_share >= float(concentration_settings["light_share"]), "concentration_penalty"] = float(concentration_settings["light_penalty"])
+    sector_base.loc[leader_share >= float(concentration_settings["heavy_share"]), "concentration_penalty"] = float(concentration_settings["heavy_penalty"])
+    micro_sample_mask = (scan_member_count <= 2.0) & (leader_share >= float(concentration_settings["warn_share"]))
+    sector_base.loc[micro_sample_mask, "concentration_penalty"] = _coerce_numeric(sector_base.loc[micro_sample_mask, "concentration_penalty"]).fillna(0.0) + float(concentration_settings["micro_sample_penalty"])
+    sector_base["intraday_penalty_total"] = _coerce_numeric(sector_base["breadth_penalty"]).fillna(0.0) + _coerce_numeric(sector_base["concentration_penalty"]).fillna(0.0)
+    sector_base["intraday_sector_score"] = sector_base["intraday_sector_score_raw"] - sector_base["intraday_penalty_total"]
     sector_base["today_sector_score"] = sector_base["intraday_sector_score"]
     sector_base["sector_confidence_score"] = 0.0
     sector_base.loc[sector_base["scan_member_count"] >= 5, "sector_confidence_score"] += 1.0
@@ -2466,7 +2585,14 @@ def _build_sector_persistence_tables(base_df: pd.DataFrame, *, display_base_df: 
     return {"1w": _build("1w", "sector_rank_1w"), "1m": _build("1m", "sector_rank_1m"), "3m": _build("3m", "sector_rank_3m")}
 
 
-def _build_sector_representatives(merged: pd.DataFrame, today_sector_leaderboard: pd.DataFrame) -> pd.DataFrame:
+def _build_sector_representatives(
+    merged: pd.DataFrame,
+    today_sector_leaderboard: pd.DataFrame,
+    *,
+    representative_weights_override: dict[str, float] | None = None,
+    sort_columns: list[str] | None = None,
+    sort_ascending: list[bool] | None = None,
+) -> pd.DataFrame:
     if merged.empty or today_sector_leaderboard.empty:
         return pd.DataFrame(columns=["sector_name", "representative_rank", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "stock_turnover_share_of_sector", "representative_score", "nikkei_search", "material_link"])
     top_sector_names = today_sector_leaderboard.head(10)["sector_name"].astype(str).tolist()
@@ -2478,15 +2604,17 @@ def _build_sector_representatives(merged: pd.DataFrame, today_sector_leaderboard
     working["sector_live_turnover_total"] = working.groupby("sector_name")["live_turnover"].transform("sum")
     working["stock_turnover_share_of_sector"] = _safe_ratio(working["live_turnover"], working["sector_live_turnover_total"]).fillna(0.0)
     working["representative_score"] = 0.0
-    representative_weights = dict(REPRESENTATIVE_STOCK_SCORE_WEIGHTS)
+    representative_weights = dict(representative_weights_override or REPRESENTATIVE_STOCK_SCORE_WEIGHTS)
     representative_weights.update({
-        "stock_turnover_share_of_sector": 1.25,
-        "flow_block_score": 0.35,
-        "price_block_score": 0.25,
+        "stock_turnover_share_of_sector": 1.75 if representative_weights_override is None else representative_weights.get("stock_turnover_share_of_sector", 1.25),
+        "flow_block_score": 0.25 if representative_weights_override is None else representative_weights.get("flow_block_score", 0.35),
+        "price_block_score": 0.10 if representative_weights_override is None else representative_weights.get("price_block_score", 0.25),
     })
     for column, weight in representative_weights.items():
         working["representative_score"] += _score_percentile(working[column]) * weight
-    working = working.sort_values(["sector_name", "representative_score", "stock_turnover_share_of_sector", "live_turnover", "live_ret_vs_prev_close"], ascending=[True, False, False, False, False]).copy()
+    sort_columns = sort_columns or REPRESENTATIVE_SORT_COLUMNS
+    sort_ascending = sort_ascending or REPRESENTATIVE_SORT_ASCENDING
+    working = working.sort_values(sort_columns, ascending=sort_ascending).copy()
     working["representative_rank"] = working.groupby("sector_name").cumcount() + 1
     return working[working["representative_rank"] <= 3][["sector_name", "representative_rank", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "stock_turnover_share_of_sector", "representative_score", "nikkei_search", "material_link"]].reset_index(drop=True)
 
@@ -2543,6 +2671,77 @@ def _apply_sector_cap(frame: pd.DataFrame, *, sector_col: str, limit_per_sector:
     return capped.reset_index(drop=True)
 
 
+def _summarize_sector_rank_table(frame: pd.DataFrame, *, limit: int = 10) -> list[dict[str, Any]]:
+    if frame.empty:
+        return []
+    summary: list[dict[str, Any]] = []
+    for _, row in frame.head(limit).iterrows():
+        summary.append(
+            {
+                "today_rank": int(row.get("today_rank", 0) or 0),
+                "sector_name": str(row.get("sector_name", "") or ""),
+                "breadth": str(row.get("breadth", "") or ""),
+                "sector_confidence": str(row.get("sector_confidence", "") or ""),
+                "sector_caution": str(row.get("sector_caution", "") or ""),
+            }
+        )
+    return summary
+
+
+def _summarize_sector_rank_changes(before: pd.DataFrame, after: pd.DataFrame, *, limit: int = 10) -> list[dict[str, Any]]:
+    if before.empty or after.empty:
+        return []
+    before_map = {str(row.get("sector_name", "") or ""): int(row.get("today_rank", 0) or 0) for _, row in before.iterrows()}
+    changes: list[dict[str, Any]] = []
+    for _, row in after.head(limit).iterrows():
+        sector_name = str(row.get("sector_name", "") or "")
+        after_rank = int(row.get("today_rank", 0) or 0)
+        before_rank = before_map.get(sector_name)
+        if before_rank is None:
+            changes.append({"sector_name": sector_name, "before_rank": None, "after_rank": after_rank})
+        elif before_rank != after_rank:
+            changes.append({"sector_name": sector_name, "before_rank": before_rank, "after_rank": after_rank})
+    return changes
+
+
+def _summarize_representative_table(frame: pd.DataFrame, *, sector_names: list[str] | None = None, limit_sectors: int = 5) -> list[dict[str, Any]]:
+    if frame.empty:
+        return []
+    working = frame.copy()
+    if sector_names:
+        working = working[working["sector_name"].astype(str).isin([str(name) for name in sector_names])].copy()
+    if working.empty:
+        return []
+    summary: list[dict[str, Any]] = []
+    for sector_name, group in working.sort_values(["sector_name", "representative_rank"]).groupby("sector_name"):
+        summary.append(
+            {
+                "sector_name": str(sector_name or ""),
+                "leaders": " / ".join(group["name"].astype(str).head(3).tolist()),
+            }
+        )
+        if len(summary) >= limit_sectors:
+            break
+    return summary
+
+
+def _summarize_candidate_table(frame: pd.DataFrame, *, rank_col: str, limit: int = 5) -> list[dict[str, Any]]:
+    if frame.empty:
+        return []
+    summary: list[dict[str, Any]] = []
+    for _, row in frame.head(limit).iterrows():
+        summary.append(
+            {
+                rank_col: int(row.get(rank_col, 0) or 0),
+                "name": str(row.get("name", "") or ""),
+                "sector_name": str(row.get("sector_name", "") or ""),
+                "entry_fit": str(row.get("entry_fit", "") or ""),
+                "candidate_quality": str(row.get("candidate_quality", "") or ""),
+            }
+        )
+    return summary
+
+
 def _entry_fit_1w_label(*, candidate_quality: str, belongs_today_sector: bool, sector_confidence: str, flow_ok: bool, rs_ok: bool, liquidity_ok: bool, earnings_risk_flag: bool, extension_flag: bool) -> str:
     if str(candidate_quality) == "低":
         return "見送り"
@@ -2571,10 +2770,17 @@ def _entry_fit_1m_label(*, candidate_quality: str, belongs_persistence_sector: b
     return "監視候補"
 
 
-def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard: pd.DataFrame, persistence_tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+def _build_swing_candidate_tables(
+    merged: pd.DataFrame,
+    today_sector_leaderboard: pd.DataFrame,
+    persistence_tables: dict[str, pd.DataFrame],
+    *,
+    selection_config: dict[str, float] | None = None,
+) -> dict[str, pd.DataFrame]:
     if merged.empty:
         empty = pd.DataFrame()
         return {"1w": empty, "1m": empty}
+    selection_config = selection_config or SWING_SELECTION_CONFIG
     working = merged.copy()
     earnings_days_raw = _coerce_numeric(working.get("earnings_buffer_days", pd.Series([pd.NA] * len(working))))
     earnings_days = earnings_days_raw.fillna(999)
@@ -2595,9 +2801,16 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
     working["belongs_persistence_sector"] = working["sector_name"].astype(str).isin(top_1m_sectors | top_3m_sectors)
     working["sector_confidence_1w"] = working["sector_name"].map(today_sector_conf_map).fillna("")
     working["sector_confidence_1m"] = working["sector_name"].map(persistence_sector_conf_map).fillna("")
+    working["sector_confidence_priority_1w"] = working["sector_confidence_1w"].map(SECTOR_CONFIDENCE_PRIORITY).fillna(0).astype(int)
+    working["sector_confidence_priority_1m"] = working["sector_confidence_1m"].map(SECTOR_CONFIDENCE_PRIORITY).fillna(0).astype(int)
     working["liquidity_ok"] = (_coerce_numeric(working["avg_turnover_20d"]).fillna(0.0) >= turnover_floor) & (_coerce_numeric(working["avg_volume_20d"]).fillna(0.0) >= volume_floor)
     working["liquidity_pass"] = working["liquidity_ok"]
-    working["extension_flag"] = _coerce_numeric(working["price_vs_ma20_pct"]).abs().gt(12.0).fillna(False)
+    extension_threshold_1w = float(selection_config.get("extension_threshold_1w", 12.0) or 12.0)
+    extension_threshold_1m = float(selection_config.get("extension_threshold_1m", 12.0) or 12.0)
+    working["price_vs_ma20_abs"] = _coerce_numeric(working["price_vs_ma20_pct"]).abs()
+    working["extension_flag_1w"] = working["price_vs_ma20_abs"].gt(extension_threshold_1w).fillna(False)
+    working["extension_flag_1m"] = working["price_vs_ma20_abs"].gt(extension_threshold_1m).fillna(False)
+    working["extension_flag"] = working["extension_flag_1w"] | working["extension_flag_1m"]
     working["ma20_band_pass"] = _coerce_numeric(working["price_vs_ma20_pct"]).between(-8.0, 15.0, inclusive="both") | _coerce_numeric(working["price_vs_ma20_pct"]).isna()
     working["earnings_unknown_flag"] = earnings_days_raw.isna() & earnings_data_available
     working["earnings_risk_flag"] = earnings_days_raw.lt(7).fillna(False)
@@ -2612,7 +2825,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
         & working["flow_ok"]
         & working["rs_ok"]
         & ~working["earnings_risk_flag"]
-        & ~working["extension_flag"]
+        & ~working["extension_flag_1w"]
     )
     working["candidate_sector_component_1w"] = working["belongs_today_sector"].astype(float) * 1.0
     working["candidate_turnover_component_1w"] = _score_percentile(working["live_turnover"]) * 1.0
@@ -2633,19 +2846,21 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
         + working["candidate_liquidity_component_1w"]
         + working["candidate_earnings_component_1w"]
     )
+    working.loc[working["sector_confidence_1w"].eq("高"), "swing_score_1w"] += float(selection_config.get("sector_confidence_bonus_high_1w", 0.0) or 0.0)
+    working.loc[working["sector_confidence_1w"].eq("中"), "swing_score_1w"] += float(selection_config.get("sector_confidence_bonus_mid_1w", 0.0) or 0.0)
     working["medium_term_rs_ok"] = (_coerce_numeric(working["rs_vs_topix_1m"]).gt(0.0) & _coerce_numeric(working["rs_vs_topix_3m"]).gt(0.0)).fillna(False)
     working["swing_pass_1m"] = (
         working["belongs_persistence_sector"]
         & working["medium_term_rs_ok"]
         & working["liquidity_ok"]
         & ~working["earnings_risk_flag"]
-        & ~working["extension_flag"]
+        & ~working["extension_flag_1m"]
         & ~working["finance_risk_flag"]
     )
     working["candidate_sector_component_1m"] = working["belongs_persistence_sector"].astype(float) * 1.0
     working["candidate_rs_component_1m"] = _score_percentile(working["rs_vs_topix_1m"]) * 1.0
     working["candidate_rs_component_3m"] = _score_percentile(working["rs_vs_topix_3m"]) * 0.9
-    working["candidate_ma20_component_1m"] = (1.0 - _score_percentile(_coerce_numeric(working["price_vs_ma20_pct"]).abs())) * 0.35
+    working["candidate_ma20_component_1m"] = (1.0 - _score_percentile(working["price_vs_ma20_abs"])) * float(selection_config.get("candidate_ma20_weight_1m", 0.35) or 0.35)
     working["candidate_liquidity_component_1m"] = _score_percentile(working["avg_turnover_20d"]) * 0.7
     working["candidate_sector_rank_component_1m"] = _score_rank_ascending(working["sector_rank_1m"]) * 0.8
     working["candidate_sector_rank_component_3m"] = _score_rank_ascending(working["sector_rank_3m"]) * 0.8
@@ -2667,6 +2882,8 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
         + working["candidate_earnings_component_1m"]
         + working["candidate_finance_component_1m"]
     )
+    working.loc[working["sector_confidence_1m"].eq("高"), "swing_score_1m"] += float(selection_config.get("sector_confidence_bonus_high_1m", 0.0) or 0.0)
+    working.loc[working["sector_confidence_1m"].eq("中"), "swing_score_1m"] += float(selection_config.get("sector_confidence_bonus_mid_1m", 0.0) or 0.0)
     working["selection_reason_1w"] = working.apply(
         lambda row: _join_candidate_tags(
             [
@@ -2683,7 +2900,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
             [
                 "決算近い" if bool(row.get("earnings_risk_flag")) else "",
                 "決算不明" if bool(row.get("earnings_unknown_flag")) else "",
-                "伸び過ぎ" if bool(row.get("extension_flag")) else "",
+                "伸び過ぎ" if bool(row.get("extension_flag_1w")) else "",
                 "流動性弱い" if not bool(row.get("liquidity_ok")) else "",
             ]
         ),
@@ -2710,7 +2927,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
             [
                 "決算近い" if bool(row.get("earnings_risk_flag")) else "",
                 "決算不明" if bool(row.get("earnings_unknown_flag")) else "",
-                "20日線乖離大" if bool(row.get("extension_flag")) else "",
+                "20日線乖離大" if bool(row.get("extension_flag_1m")) else "",
                 "財務不安" if bool(row.get("finance_risk_flag")) else "",
                 "流動性弱い" if not bool(row.get("liquidity_ok")) else "",
             ]
@@ -2726,9 +2943,11 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
     working.loc[working["flow_ok"], "candidate_quality_score_1w"] += 1.0
     working.loc[working["rs_ok"], "candidate_quality_score_1w"] += 1.0
     working.loc[working["liquidity_ok"], "candidate_quality_score_1w"] += 0.5
+    working.loc[working["sector_confidence_1w"].eq("高"), "candidate_quality_score_1w"] += float(selection_config.get("sector_confidence_bonus_high_1w", 0.0) or 0.0)
+    working.loc[working["sector_confidence_1w"].eq("中"), "candidate_quality_score_1w"] += float(selection_config.get("sector_confidence_bonus_mid_1w", 0.0) or 0.0)
     working.loc[working["earnings_unknown_flag"], "candidate_quality_score_1w"] -= 0.25
     working.loc[working["earnings_risk_flag"], "candidate_quality_score_1w"] -= 1.0
-    working.loc[working["extension_flag"], "candidate_quality_score_1w"] -= 0.75
+    working.loc[working["extension_flag_1w"], "candidate_quality_score_1w"] -= 0.75
     working["candidate_quality_1w"] = "低"
     working.loc[working["candidate_quality_score_1w"] >= 4.0, "candidate_quality_1w"] = "高"
     working.loc[(working["candidate_quality_score_1w"] >= 2.5) & (working["candidate_quality_score_1w"] < 4.0), "candidate_quality_1w"] = "中"
@@ -2737,10 +2956,12 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
     working.loc[working["medium_term_rs_ok"], "candidate_quality_score_1m"] += 1.0
     working.loc[working["liquidity_ok"], "candidate_quality_score_1m"] += 0.5
     working.loc[~working["finance_risk_flag"], "candidate_quality_score_1m"] += 0.5
+    working.loc[working["sector_confidence_1m"].eq("高"), "candidate_quality_score_1m"] += float(selection_config.get("sector_confidence_bonus_high_1m", 0.0) or 0.0)
+    working.loc[working["sector_confidence_1m"].eq("中"), "candidate_quality_score_1m"] += float(selection_config.get("sector_confidence_bonus_mid_1m", 0.0) or 0.0)
     working.loc[working["earnings_unknown_flag"], "candidate_quality_score_1m"] -= 0.25
     working.loc[working["finance_health_flag"].eq("不明"), "candidate_quality_score_1m"] -= 0.15
     working.loc[working["earnings_risk_flag"], "candidate_quality_score_1m"] -= 1.0
-    working.loc[working["extension_flag"], "candidate_quality_score_1m"] -= 0.75
+    working.loc[working["extension_flag_1m"], "candidate_quality_score_1m"] -= 0.75
     working.loc[working["finance_risk_flag"], "candidate_quality_score_1m"] -= 1.0
     working["candidate_quality_1m"] = "低"
     working.loc[working["candidate_quality_score_1m"] >= 4.0, "candidate_quality_1m"] = "高"
@@ -2754,7 +2975,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
             rs_ok=bool(row.get("rs_ok")),
             liquidity_ok=bool(row.get("liquidity_ok")),
             earnings_risk_flag=bool(row.get("earnings_risk_flag")),
-            extension_flag=bool(row.get("extension_flag")),
+            extension_flag=bool(row.get("extension_flag_1w")),
         ),
         axis=1,
     )
@@ -2766,7 +2987,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
             medium_term_rs_ok=bool(row.get("medium_term_rs_ok")),
             liquidity_ok=bool(row.get("liquidity_ok")),
             earnings_risk_flag=bool(row.get("earnings_risk_flag")),
-            extension_flag=bool(row.get("extension_flag")),
+            extension_flag=bool(row.get("extension_flag_1m")),
             finance_risk_flag=bool(row.get("finance_risk_flag")),
         ),
         axis=1,
@@ -2774,7 +2995,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
     working["candidate_commentary_1w"] = working.apply(
         lambda row: (
             "決算近く様子見" if bool(row.get("earnings_risk_flag")) else
-            "強いが伸び過ぎ" if bool(row.get("extension_flag")) else
+            "強いが伸び過ぎ" if bool(row.get("extension_flag_1w")) else
             "強セクター・資金流入継続" if str(row.get("entry_fit_1w", "")) == "買い候補" else
             "強いが待ち伏せ" if str(row.get("entry_fit_1w", "")) == "監視候補" else
             _build_candidate_commentary(row.get("selection_reason_1w", ""), row.get("risk_note_1w", ""))
@@ -2785,7 +3006,7 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
         lambda row: (
             "決算近く様子見" if bool(row.get("earnings_risk_flag")) else
             "財務懸念で様子見" if bool(row.get("finance_risk_flag")) else
-            "中期強いが乖離大" if bool(row.get("extension_flag")) else
+            "中期強いが乖離大" if bool(row.get("extension_flag_1m")) else
             "中期上昇継続" if str(row.get("entry_fit_1m", "")) == "買い候補" else
             "強いが押し目待ち" if str(row.get("entry_fit_1m", "")) == "監視候補" else
             _build_candidate_commentary(row.get("selection_reason_1m", ""), row.get("risk_note_1m", ""))
@@ -2800,8 +3021,8 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
             & working["entry_fit_1w"].isin(["買い候補", "監視候補"])
         ]
         .sort_values(
-            ["entry_fit_priority_1w", "candidate_quality_score_1w", "swing_score_1w", "rs_vs_topix_1w", "live_turnover", "live_ret_vs_prev_close"],
-            ascending=[True, False, False, False, False, False],
+            ["entry_fit_priority_1w", "sector_confidence_priority_1w", "candidate_quality_score_1w", "price_vs_ma20_abs", "swing_score_1w", "rs_vs_topix_1w", "live_turnover", "live_ret_vs_prev_close"],
+            ascending=[True, False, False, True, False, False, False, False],
         )[
             [
                 "code",
@@ -2839,8 +3060,8 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
             & working["entry_fit_1m"].isin(["買い候補", "監視候補"])
         ]
         .sort_values(
-            ["entry_fit_priority_1m", "candidate_quality_score_1m", "swing_score_1m", "rs_vs_topix_1m", "rs_vs_topix_3m", "TradingValue_latest"],
-            ascending=[True, False, False, False, False, False],
+            ["entry_fit_priority_1m", "sector_confidence_priority_1m", "candidate_quality_score_1m", "price_vs_ma20_abs", "swing_score_1m", "rs_vs_topix_1m", "rs_vs_topix_3m", "TradingValue_latest"],
+            ascending=[True, False, False, True, False, False, False, False],
         )[
             [
                 "code",
@@ -3054,7 +3275,24 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
     filtered_ranking_df = _exclude_non_corporate_products(ranking_df, product_filter_diag, context="today_market_scan")
     stock_base_df = _exclude_non_corporate_products(base_df, product_filter_diag, context="display_stock_base")
     stock_merged = _exclude_non_corporate_products(merged, product_filter_diag, context="live_stock_pool")
+    baseline_today_sector_leaderboard = _build_intraday_sector_leaderboard(
+        mode,
+        filtered_ranking_df,
+        industry_df,
+        stock_merged,
+        stock_base_df,
+        block_weights=INTRADAY_BLOCK_MODE_WEIGHTS_BASELINE,
+        breadth_settings_map=INTRADAY_BREADTH_SLOT_SETTINGS_BASELINE,
+        concentration_settings_map=INTRADAY_CONCENTRATION_PENALTY_SETTINGS_BASELINE,
+    )
     today_sector_leaderboard = _build_intraday_sector_leaderboard(mode, filtered_ranking_df, industry_df, stock_merged, stock_base_df)
+    baseline_sector_representatives = _build_sector_representatives(
+        stock_merged,
+        baseline_today_sector_leaderboard,
+        representative_weights_override=REPRESENTATIVE_STOCK_SCORE_WEIGHTS_BASELINE,
+        sort_columns=REPRESENTATIVE_SORT_COLUMNS_BASELINE,
+        sort_ascending=REPRESENTATIVE_SORT_ASCENDING_BASELINE,
+    )
     sector_representatives = _build_sector_representatives(stock_merged, today_sector_leaderboard)
     rep_top1 = sector_representatives[sector_representatives.get("representative_rank", pd.Series(dtype=int)).eq(1)].copy() if not sector_representatives.empty else pd.DataFrame()
     rep_map = rep_top1.set_index("sector_name")["name"] if not rep_top1.empty else pd.Series(dtype=str)
@@ -3068,6 +3306,7 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
         today_sector_leaderboard = today_sector_leaderboard.copy()
         today_sector_leaderboard["representative_stock"] = today_sector_leaderboard["sector_name"].map(rep_map).fillna("")
         today_sector_leaderboard["leaders"] = today_sector_leaderboard["sector_name"].map(leaders_map).fillna(today_sector_leaderboard["representative_stock"])
+    baseline_persistence_tables = _build_sector_persistence_tables(base_df, display_base_df=stock_base_df)
     persistence_tables = _build_sector_persistence_tables(base_df, display_base_df=stock_base_df)
     for key in ["1w", "1m", "3m"]:
         if not persistence_tables[key].empty:
@@ -3075,6 +3314,12 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
             current_representative = persistence_tables[key]["representative_stock"] if "representative_stock" in persistence_tables[key].columns else pd.Series([""] * len(persistence_tables[key]), index=persistence_tables[key].index)
             persistence_tables[key]["representative_stock"] = current_representative.where(current_representative.astype(str).str.strip() != "", persistence_tables[key]["sector_name"].map(rep_map).fillna(""))
             persistence_tables[key]["leaders"] = persistence_tables[key]["sector_name"].map(leaders_map).fillna("")
+    baseline_swing_candidates = _build_swing_candidate_tables(
+        stock_merged,
+        baseline_today_sector_leaderboard,
+        baseline_persistence_tables,
+        selection_config=SWING_SELECTION_CONFIG_BASELINE,
+    )
     swing_candidates = _build_swing_candidate_tables(stock_merged, today_sector_leaderboard, persistence_tables)
     empty_state = {
         "today_sector_leaderboard": "" if not today_sector_leaderboard.empty else "intraday 条件を満たす本命セクターがありません。",
@@ -3090,6 +3335,18 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
         "sector_representatives": "" if not sector_representatives.empty else "今日の本命セクターに紐づく代表銘柄を抽出できませんでした。",
     }
     meta = build_snapshot_meta(mode=mode, generated_at=now_ts, source_profile="local_kabu_jq_yanoshin", includes_kabu=True)
+    tuned_top_sector_names = today_sector_leaderboard.head(5)["sector_name"].astype(str).tolist() if not today_sector_leaderboard.empty else []
+    tuning_compare = {
+        "sectors_before": _summarize_sector_rank_table(baseline_today_sector_leaderboard, limit=10),
+        "sectors_after": _summarize_sector_rank_table(today_sector_leaderboard, limit=10),
+        "sector_rank_changes": _summarize_sector_rank_changes(baseline_today_sector_leaderboard, today_sector_leaderboard, limit=10),
+        "representatives_before": _summarize_representative_table(baseline_sector_representatives, sector_names=tuned_top_sector_names, limit_sectors=5),
+        "representatives_after": _summarize_representative_table(sector_representatives, sector_names=tuned_top_sector_names, limit_sectors=5),
+        "swing_1w_before": _summarize_candidate_table(baseline_swing_candidates["1w"], rank_col="candidate_rank_1w", limit=5),
+        "swing_1w_after": _summarize_candidate_table(swing_candidates["1w"], rank_col="candidate_rank_1w", limit=5),
+        "swing_1m_before": _summarize_candidate_table(baseline_swing_candidates["1m"], rank_col="candidate_rank_1m", limit=5),
+        "swing_1m_after": _summarize_candidate_table(swing_candidates["1m"], rank_col="candidate_rank_1m", limit=5),
+    }
     return {
         "meta": meta,
         "sector_summary": today_sector_leaderboard,
@@ -3124,6 +3381,7 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
             "breadth_scope": "focus_stocks_positive_vs_negative_within_market_scan",
             "includes_kabu": True,
             "non_corporate_products": product_filter_diag["non_corporate_products"],
+            "tuning_compare": tuning_compare,
         },
     }
 
