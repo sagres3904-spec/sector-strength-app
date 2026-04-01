@@ -5,6 +5,7 @@ import math
 import os
 import re
 import time
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -333,6 +334,35 @@ DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH = "data/snapshots/latest_1130.md"
 GITHUB_CONTROL_TOKEN_SECRET_NAME = "GITHUB_CONTROL_TOKEN"
 DEFAULT_VIEWER_AUTO_REFRESH_SECONDS = 60
 SNAPSHOT_VIEWER_CACHE_TTL_SECONDS = 120
+MASTER_PRODUCT_ATTRIBUTE_SOURCES = {
+    "security_type": ["SecurityType", "TypeOfInstrument", "SecurityTypeName", "IssueType"],
+    "instrument_type": ["InstrumentType", "InstrumentCategory", "InstrumentTypeName"],
+    "product_category": ["ProductCategory", "ProductCategoryName", "FundType", "FundTypeName"],
+    "listing_category": ["ListingCategory", "ListingCategoryName", "MarketType", "MarketTypeName"],
+    "underlying_index": ["UnderlyingIndex", "UnderlyingIndexName", "BenchmarkName", "ReferenceIndex", "IndexName"],
+    "market_code": ["MarketCode", "MktCode"],
+}
+NON_CORPORATE_PRODUCT_ATTRIBUTE_COLUMNS = tuple(MASTER_PRODUCT_ATTRIBUTE_SOURCES.keys()) + ("exchange_name",)
+NON_CORPORATE_PRODUCT_DIRECT_PATTERNS = [
+    ("etf", re.compile(r"\bETF\b", re.IGNORECASE)),
+    ("etn", re.compile(r"\bETN\b", re.IGNORECASE)),
+    ("listed_fund", re.compile(r"上場投信|上場インデックスファンド|投資信託", re.IGNORECASE)),
+    ("index_linked", re.compile(r"(指数|インデックス).{0,8}連動|連動型上場投信|連動型ETF|連動型ETN", re.IGNORECASE)),
+    ("leverage", re.compile(r"レバレッジ|ブル\s*\d*倍", re.IGNORECASE)),
+    ("inverse", re.compile(r"ダブルインバース|インバース|ベア\s*\d*倍", re.IGNORECASE)),
+]
+NON_CORPORATE_PRODUCT_INDEX_PATTERN = re.compile(
+    r"S&P\s*500|NASDAQ\s*-?\s*100|日経\s*平均|TOPIX|JPX\s*日経\s*400|東証\s*REIT|REIT\s*CORE|MSCI|FTSE|ダウ",
+    re.IGNORECASE,
+)
+NON_CORPORATE_PRODUCT_INDEX_LINK_PATTERN = re.compile(
+    r"指数|インデックス|連動|上場投信|ETF|ETN|レバレッジ|インバース",
+    re.IGNORECASE,
+)
+NON_CORPORATE_PRODUCT_BRAND_PATTERN = re.compile(
+    r"NEXT\s*FUNDS|NEXT\s*NOTES|MAXIS|I\s*シェアーズ|ISHARES|GLOBAL\s*X|NZAM\s*上場投信|ONE\s*ETF|SPDR|WISDOMTREE|IFREEETF",
+    re.IGNORECASE,
+)
 
 logger = logging.getLogger("sector_app_jq")
 if not logger.handlers:
@@ -882,6 +912,108 @@ def pick_optional_existing(df: pd.DataFrame, candidates: list[str]) -> str | Non
     return None
 
 
+def _normalize_security_text(value: Any) -> str:
+    if value is None or value is pd.NA:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    text = unicodedata.normalize("NFKC", str(value)).strip()
+    if not text or text.lower() == "nan":
+        return ""
+    return re.sub(r"\s+", " ", text).upper()
+
+
+def _pick_first_non_empty_text(*values: Any) -> str:
+    for value in values:
+        text = _normalize_security_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _pick_first_non_empty_label(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() != "nan":
+            return text
+    return ""
+
+
+def _match_non_corporate_product_reason(text: Any) -> str:
+    normalized = _normalize_security_text(text)
+    if not normalized:
+        return ""
+    for reason, pattern in NON_CORPORATE_PRODUCT_DIRECT_PATTERNS:
+        if pattern.search(normalized):
+            return reason
+    if NON_CORPORATE_PRODUCT_INDEX_PATTERN.search(normalized) and NON_CORPORATE_PRODUCT_INDEX_LINK_PATTERN.search(normalized):
+        return "index_product"
+    if NON_CORPORATE_PRODUCT_BRAND_PATTERN.search(normalized) and (
+        NON_CORPORATE_PRODUCT_INDEX_PATTERN.search(normalized) or NON_CORPORATE_PRODUCT_INDEX_LINK_PATTERN.search(normalized)
+    ):
+        return "listed_product_brand"
+    return ""
+
+
+def _classify_non_corporate_product_row(row: pd.Series) -> str:
+    for column in NON_CORPORATE_PRODUCT_ATTRIBUTE_COLUMNS:
+        reason = _match_non_corporate_product_reason(row.get(column, ""))
+        if reason:
+            return f"attr:{column}:{reason}"
+    name_reason = _match_non_corporate_product_reason(
+        _pick_first_non_empty_text(
+            row.get("name", ""),
+            row.get("ranking_name", ""),
+            row.get("Name", ""),
+        )
+    )
+    return f"name:{name_reason}" if name_reason else ""
+
+
+def _annotate_non_corporate_products(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None:
+        return pd.DataFrame(columns=["is_non_corporate_product", "non_corporate_product_reason"])
+    out = frame.copy()
+    if out.empty:
+        out["is_non_corporate_product"] = pd.Series(dtype=bool)
+        out["non_corporate_product_reason"] = pd.Series(dtype=str)
+        return out
+    reasons = out.apply(_classify_non_corporate_product_row, axis=1)
+    out["non_corporate_product_reason"] = reasons.fillna("").astype(str)
+    out["is_non_corporate_product"] = out["non_corporate_product_reason"].str.strip().ne("")
+    return out
+
+
+def _record_non_corporate_product_diagnostics(diagnostics: dict[str, Any] | None, frame: pd.DataFrame, *, context: str) -> None:
+    if diagnostics is None:
+        return
+    excluded = frame[frame.get("is_non_corporate_product", pd.Series(False, index=frame.index)).fillna(False)].copy() if not frame.empty else frame.copy()
+    sample_names: list[str] = []
+    if not excluded.empty:
+        for _, row in excluded.head(8).iterrows():
+            sample_name = _pick_first_non_empty_label(row.get("name", ""), row.get("ranking_name", ""), row.get("code", ""))
+            if sample_name and sample_name not in sample_names:
+                sample_names.append(sample_name)
+            if len(sample_names) >= 5:
+                break
+    diagnostics.setdefault("non_corporate_products", {})[context] = {
+        "excluded_count": int(len(excluded)),
+        "sample_names": sample_names,
+    }
+    if len(excluded):
+        logger.info("excluded non-corporate products context=%s count=%s sample=%s", context, len(excluded), sample_names)
+
+
+def _exclude_non_corporate_products(frame: pd.DataFrame, diagnostics: dict[str, Any] | None = None, *, context: str) -> pd.DataFrame:
+    annotated = _annotate_non_corporate_products(frame)
+    _record_non_corporate_product_diagnostics(diagnostics, annotated, context=context)
+    if annotated.empty:
+        return annotated
+    return annotated[~annotated["is_non_corporate_product"].fillna(False)].copy()
+
+
 def _request_json(
     method: str,
     url: str,
@@ -967,6 +1099,9 @@ def get_master_df(date_str: str, *, api_key: str | None = None) -> pd.DataFrame:
             "exchange_name": df.get("MktNm", "").astype(str),
         }
     )
+    for output_col, candidate_cols in MASTER_PRODUCT_ATTRIBUTE_SOURCES.items():
+        source_col = pick_optional_existing(df, candidate_cols)
+        out[output_col] = df[source_col].astype(str) if source_col else pd.Series([""] * len(df), index=df.index, dtype=str)
     return out.drop_duplicates(subset=["code"]).reset_index(drop=True)
 
 
@@ -1279,6 +1414,7 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
     base["material_link"] = ""
     base["material_score"] = 0.0
     base["latest_date"] = pd.to_datetime(base["latest_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    base = _annotate_non_corporate_products(base)
     logger.info("build_daily_base_data end rows=%s", len(base))
     return base, {
         "latest_date": max(trading_dates),
@@ -1293,6 +1429,8 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
         "earnings_min_event_date": str(earnings_meta.get("min_event_date", "") or ""),
         "earnings_max_event_date": str(earnings_meta.get("max_event_date", "") or ""),
         "finance_coverage_count": int(base["finance_health_score"].notna().sum()) if "finance_health_score" in base.columns else 0,
+        "non_corporate_product_count": int(base["is_non_corporate_product"].fillna(False).sum()) if "is_non_corporate_product" in base.columns else 0,
+        "non_corporate_product_samples": base.loc[base["is_non_corporate_product"].fillna(False), "name"].astype(str).drop_duplicates().head(5).tolist() if "is_non_corporate_product" in base.columns else [],
     }
 
 
@@ -1379,7 +1517,7 @@ def build_market_scan_universe(base_df: pd.DataFrame, settings: dict[str, Any], 
     """Build a market-wide rough scan from kabu ranking endpoints."""
     logger.info("build_market_scan_universe start")
     ranking_frames: list[pd.DataFrame] = []
-    diagnostics: dict[str, Any] = {"ranking_counts": {}}
+    diagnostics: dict[str, Any] = {"ranking_counts": {}, "non_corporate_products": {}}
     for source_type in ["price_up", "turnover", "volume_surge", "turnover_surge"]:
         frame = fetch_kabu_ranking(settings, token, source_type)
         diagnostics["ranking_counts"][source_type] = int(len(frame))
@@ -1400,31 +1538,33 @@ def build_market_scan_universe(base_df: pd.DataFrame, settings: dict[str, Any], 
         .sort_values("ranking_combo_score", ascending=False)
         .reset_index(drop=True)
     )
+    base_merge_columns = [
+        "code",
+        "name",
+        "sector_name",
+        "sector_rank_1w",
+        "sector_rank_1m",
+        "sector_rank_3m",
+        "ret_1w",
+        "ret_1m",
+        "ret_3m",
+        "TradingValue_latest",
+        "avg_volume_20d",
+        "avg_turnover_20d",
+        "close_ma_20d",
+        "exchange_name",
+        "is_non_corporate_product",
+        "non_corporate_product_reason",
+    ] + [column for column in NON_CORPORATE_PRODUCT_ATTRIBUTE_COLUMNS if column in base_df.columns and column not in {"exchange_name"}]
     ranking_combo = ranking_combo.merge(
-        base_df[
-            [
-                "code",
-                "name",
-                "sector_name",
-                "sector_rank_1w",
-                "sector_rank_1m",
-                "sector_rank_3m",
-                "ret_1w",
-                "ret_1m",
-                "ret_3m",
-                "TradingValue_latest",
-                "avg_volume_20d",
-                "avg_turnover_20d",
-                "close_ma_20d",
-                "exchange_name",
-            ]
-        ],
+        base_df[base_merge_columns],
         on="code",
         how="left",
         suffixes=("", "_base"),
     )
     ranking_combo["name"] = ranking_combo["name"].fillna(ranking_combo["ranking_name"]).fillna("")
     ranking_combo["sector_name"] = ranking_combo["sector_name"].fillna(ranking_combo["ranking_sector_name"]).fillna("")
+    ranking_combo = _exclude_non_corporate_products(ranking_combo, diagnostics, context="market_scan")
     industry_df = fetch_kabu_ranking(settings, token, "industry_up")
     diagnostics["ranking_counts"]["industry_up"] = int(len(industry_df))
     logger.info("build_market_scan_universe end candidates=%s industries=%s", len(ranking_combo), len(industry_df))
@@ -1748,7 +1888,9 @@ def select_deep_watch_universe(market_scan_df: pd.DataFrame, base_df: pd.DataFra
     """Select the 50-name deep-watch universe for board enrichment."""
     logger.info("select_deep_watch_universe start mode=%s", mode)
     register_limit = int(settings.get("KABU_REGISTER_LIMIT", 50))
-    deep_candidates = base_df.copy()
+    diagnostics: dict[str, Any] = {"non_corporate_products": {}}
+    market_scan_df = _exclude_non_corporate_products(market_scan_df, diagnostics, context="deep_watch_market_scan")
+    deep_candidates = _exclude_non_corporate_products(base_df, diagnostics, context="deep_watch_base")
     deep_candidates["candidate_seed_score"] = 0.0
     deep_candidates.loc[deep_candidates["rel_1w"].rank(ascending=False, method="min") <= 80, "candidate_seed_score"] += 1.0
     deep_candidates.loc[deep_candidates["ret_1w"].rank(ascending=False, method="min") <= 80, "candidate_seed_score"] += 1.0
@@ -1768,7 +1910,14 @@ def select_deep_watch_universe(market_scan_df: pd.DataFrame, base_df: pd.DataFra
     selected = combined.head(register_limit).copy()
     logger.debug("deep-watch candidate_count=%s selected=%s excluded_duplicate=%s excluded_invalid=%s excluded_market_unknown=%s", pre_count, len(selected), duplicate_count, invalid_code_count, 0)
     logger.info("select_deep_watch_universe end selected=%s", len(selected))
-    return selected, {"candidate_count": pre_count, "selected_count": int(len(selected)), "excluded_invalid_code": invalid_code_count, "excluded_duplicate": duplicate_count, "excluded_market_unknown": 0}
+    return selected, {
+        "candidate_count": pre_count,
+        "selected_count": int(len(selected)),
+        "excluded_invalid_code": invalid_code_count,
+        "excluded_duplicate": duplicate_count,
+        "excluded_market_unknown": 0,
+        "non_corporate_products": diagnostics["non_corporate_products"],
+    }
 
 
 def enrich_with_board_snapshot(quotes_df: pd.DataFrame, base_df: pd.DataFrame, settings: dict[str, Any], token: str, *, mode: str = "") -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -2256,10 +2405,11 @@ def _build_intraday_sector_leaderboard(mode: str, ranking_df: pd.DataFrame, indu
     return sector_base
 
 
-def _build_sector_persistence_tables(base_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+def _build_sector_persistence_tables(base_df: pd.DataFrame, *, display_base_df: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
     if base_df.empty:
         empty = _empty_persistence_table()
         return {"1w": empty, "1m": empty, "3m": empty}
+    display_base_df = display_base_df if display_base_df is not None and not display_base_df.empty else base_df
     liquidity_by_sector = (
         base_df.groupby("sector_name", as_index=False)
         .agg(
@@ -2268,7 +2418,7 @@ def _build_sector_persistence_tables(base_df: pd.DataFrame) -> dict[str, pd.Data
         )
     )
     representative = (
-        base_df.sort_values(["sector_name", "TradingValue_latest"], ascending=[True, False])
+        display_base_df.sort_values(["sector_name", "TradingValue_latest"], ascending=[True, False])
         .groupby("sector_name")
         .first()
         .reset_index()[["sector_name", "name"]]
@@ -2876,6 +3026,7 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
 
 def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.DataFrame, board_df: pd.DataFrame, base_df: pd.DataFrame, now_ts: datetime) -> dict[str, Any]:
     merged = base_df.merge(board_df, on="code", how="inner")
+    merged = _annotate_non_corporate_products(merged)
     merged["live_price"] = _coerce_numeric(merged["CurrentPrice"])
     merged["prev_close"] = _coerce_numeric(merged["PrevClose"])
     merged["open_price"] = _coerce_numeric(merged["Open"])
@@ -2899,8 +3050,12 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
     merged["focus_reason"] = merged.apply(lambda row: ", ".join(filter(None, [f"sector:{row.get('sector_name', '')}" if pd.notna(row.get("sector_name")) else "", "turnover_breakout" if float(row.get("live_turnover_ratio_20d", 0) or 0) >= 1.5 else "", "volume_breakout" if float(row.get("live_volume_ratio_20d", 0) or 0) >= 1.5 else "", "near_20d_high" if bool(row.get("is_near_52w_high")) else ""])) or "live_strength", axis=1)
     merged["nikkei_search"] = merged.apply(lambda row: _make_nikkei_search_link(str(row.get("name", "")), str(row.get("code", ""))), axis=1)
     merged["52w_flag"] = merged.apply(lambda row: "new_20d_high" if bool(row.get("is_new_52w_high")) else ("near_20d_high" if bool(row.get("is_near_52w_high")) else ""), axis=1)
-    today_sector_leaderboard = _build_intraday_sector_leaderboard(mode, ranking_df, industry_df, merged, base_df)
-    sector_representatives = _build_sector_representatives(merged, today_sector_leaderboard)
+    product_filter_diag: dict[str, Any] = {"non_corporate_products": {}}
+    filtered_ranking_df = _exclude_non_corporate_products(ranking_df, product_filter_diag, context="today_market_scan")
+    stock_base_df = _exclude_non_corporate_products(base_df, product_filter_diag, context="display_stock_base")
+    stock_merged = _exclude_non_corporate_products(merged, product_filter_diag, context="live_stock_pool")
+    today_sector_leaderboard = _build_intraday_sector_leaderboard(mode, filtered_ranking_df, industry_df, stock_merged, stock_base_df)
+    sector_representatives = _build_sector_representatives(stock_merged, today_sector_leaderboard)
     rep_top1 = sector_representatives[sector_representatives.get("representative_rank", pd.Series(dtype=int)).eq(1)].copy() if not sector_representatives.empty else pd.DataFrame()
     rep_map = rep_top1.set_index("sector_name")["name"] if not rep_top1.empty else pd.Series(dtype=str)
     leaders_map = (
@@ -2913,14 +3068,14 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
         today_sector_leaderboard = today_sector_leaderboard.copy()
         today_sector_leaderboard["representative_stock"] = today_sector_leaderboard["sector_name"].map(rep_map).fillna("")
         today_sector_leaderboard["leaders"] = today_sector_leaderboard["sector_name"].map(leaders_map).fillna(today_sector_leaderboard["representative_stock"])
-    persistence_tables = _build_sector_persistence_tables(base_df)
+    persistence_tables = _build_sector_persistence_tables(base_df, display_base_df=stock_base_df)
     for key in ["1w", "1m", "3m"]:
         if not persistence_tables[key].empty:
             persistence_tables[key] = persistence_tables[key].copy()
             current_representative = persistence_tables[key]["representative_stock"] if "representative_stock" in persistence_tables[key].columns else pd.Series([""] * len(persistence_tables[key]), index=persistence_tables[key].index)
             persistence_tables[key]["representative_stock"] = current_representative.where(current_representative.astype(str).str.strip() != "", persistence_tables[key]["sector_name"].map(rep_map).fillna(""))
             persistence_tables[key]["leaders"] = persistence_tables[key]["sector_name"].map(leaders_map).fillna("")
-    swing_candidates = _build_swing_candidate_tables(merged, today_sector_leaderboard, persistence_tables)
+    swing_candidates = _build_swing_candidate_tables(stock_merged, today_sector_leaderboard, persistence_tables)
     empty_state = {
         "today_sector_leaderboard": "" if not today_sector_leaderboard.empty else "intraday 条件を満たす本命セクターがありません。",
         "sector_persistence_1w": "" if not persistence_tables["1w"].empty else "TOPIX 比 1週継続性を出せるセクターがありません。",
@@ -2964,10 +3119,11 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
             "watch_candidate_count": int(len(swing_candidates["1w"])),
             "buy_candidate_count": int(len(swing_candidates["1m"])),
             "center_stock_count": int(len(sector_representatives)),
-            "ranking_candidate_count": int(len(ranking_df)),
+            "ranking_candidate_count": int(len(filtered_ranking_df)),
             "sector_summary_scope": "intraday_market_scan_normalized_by_sector_constituents",
             "breadth_scope": "focus_stocks_positive_vs_negative_within_market_scan",
             "includes_kabu": True,
+            "non_corporate_products": product_filter_diag["non_corporate_products"],
         },
     }
 
