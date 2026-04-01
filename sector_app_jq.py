@@ -346,8 +346,60 @@ def _snapshot_json_path(mode: str, settings: dict[str, Any] | None = None) -> Pa
     return output_path / f"latest_{mode}.json"
 
 
+def _github_deploy_snapshot_json_path(mode: str, settings: dict[str, Any] | None = None) -> str:
+    config = get_github_control_config(settings)
+    base_path = str(config["deploy_snapshot_json_path"]).strip().replace("\\", "/")
+    parent_dir, _, _ = base_path.rpartition("/")
+    file_name = f"latest_{mode}.json"
+    return f"{parent_dir}/{file_name}" if parent_dir else file_name
+
+
+def _viewer_snapshot_github_token() -> str:
+    use_streamlit_secrets = _is_streamlit_cloud()
+    token = _github_control_token(use_streamlit_secrets=use_streamlit_secrets)
+    if token:
+        return token
+    if use_streamlit_secrets:
+        return _github_control_token(use_streamlit_secrets=False)
+    return ""
+
+
+def _read_github_deploy_snapshot_text(mode: str, settings: dict[str, Any] | None = None) -> tuple[str, str, str]:
+    settings = settings or get_settings()
+    config = get_github_control_config(settings)
+    path = _github_deploy_snapshot_json_path(mode, settings)
+    text, sha = github_read_text_file(
+        config["repository"],
+        config["deploy_branch"],
+        path,
+        _viewer_snapshot_github_token(),
+    )
+    source_path = f"{config['repository']}@{config['deploy_branch']}:{path}"
+    return text, sha, source_path
+
+
+def _load_saved_snapshot_payload_from_github(mode: str, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload_text, sha, source_path = _read_github_deploy_snapshot_text(mode, settings)
+    return {
+        "payload": json.loads(payload_text),
+        "paths": {"json_path": source_path, "json_sha": sha},
+        "source_label": f"{source_path} を読み込みました",
+        "backend_name": "github-deploy",
+        "warning_message": "",
+    }
+
+
 def _available_viewer_snapshot_modes(settings: dict[str, Any] | None = None) -> list[str]:
     settings = settings or get_settings()
+    if _is_streamlit_cloud():
+        available_modes: list[str] = []
+        for mode in VIEWER_ONLY_SNAPSHOT_MODES:
+            try:
+                _read_github_deploy_snapshot_text(mode, settings)
+                available_modes.append(mode)
+            except FileNotFoundError:
+                continue
+        return available_modes
     return [mode for mode in VIEWER_ONLY_SNAPSHOT_MODES if _snapshot_json_path(mode, settings).exists()]
 
 
@@ -480,13 +532,15 @@ def _enable_viewer_auto_refresh(settings: dict[str, Any] | None = None) -> None:
 
 
 def _github_api_headers(token: str) -> dict[str, str]:
-    return {
+    headers = {
         "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
         "X-GitHub-Api-Version": "2022-11-28",
         "Cache-Control": "no-cache, no-store, max-age=0",
         "Pragma": "no-cache",
     }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def _github_contents_url(repository: str, path: str) -> str:
@@ -2077,8 +2131,11 @@ def write_snapshot_bundle(bundle: dict[str, Any], settings: dict[str, Any], *, w
 
 def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> dict[str, Any]:
     settings = settings or get_settings()
-    snapshot_path = _snapshot_json_path(mode, settings)
-    cached_payload = _load_saved_snapshot_payload_cached(mode, str(snapshot_path), _snapshot_mtime_ns(snapshot_path))
+    if _is_streamlit_cloud():
+        cached_payload = _load_saved_snapshot_payload_from_github(mode, settings)
+    else:
+        snapshot_path = _snapshot_json_path(mode, settings)
+        cached_payload = _load_saved_snapshot_payload_cached(mode, str(snapshot_path), _snapshot_mtime_ns(snapshot_path))
     payload = cached_payload["payload"]
     loaded_snapshot_meta = dict(payload.get("meta", {}))
     loaded_snapshot_diagnostics = dict(payload.get("diagnostics", {}))
