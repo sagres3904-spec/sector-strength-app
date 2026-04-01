@@ -9470,14 +9470,5 @@
       }
     },
     "write_completed": true
-  },
-  "snapshot_source_label": "latest_now.json を更新しました",
-  "snapshot_backend_name": "local",
-  "snapshot_warning_message": "",
-  "paths": {
-    "json_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\latest_now.json",
-    "markdown_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\latest_now.md",
-    "dated_json_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-04-02_015343_now.json",
-    "dated_markdown_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-04-02_015343_now.md"
   }
 }
