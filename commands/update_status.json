@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-04-01T16:24:46.930435+00:00",
-  "status": "running",
-  "message": "Forced now snapshot refresh is running.",
+  "last_run_at": "2026-04-01T16:25:20.558231+00:00",
+  "status": "failed",
+  "message": "HTTP error status=429 url=https://api.jquants.com/v2/equities/bars/daily?date=2026-01-08 body={\"message\": \"Rate limit exceeded. Please try again later.\"}",
   "request_mode": "now"
 }
