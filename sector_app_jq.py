@@ -345,8 +345,9 @@ UI_COLUMN_LABELS = {
     "sector_constituent_count": "構成銘柄数",
     "today_rank": "今日順位",
     "persistence_rank": "継続順位",
-    "breadth": "注目銘柄breadth",
-    "median_ret": "中央値騰落率",
+    "breadth": "scan内当日上昇:下落",
+    "median_ret": "当日中央値騰落率",
+    "median_live_ret": "当日中央値騰落率",
     "turnover_ratio_median": "売買代金倍率",
     "industry_rank_live": "業種上昇率順位",
     "sector_rank_1w": "1週順位",
@@ -408,14 +409,14 @@ UI_COLUMN_LABELS = {
     "turnover_surge_share_of_market_scan": "市場scan内売買代金急増シェア",
     "volume_surge_share_of_sector": "出来高急増比率",
     "volume_surge_share_of_market_scan": "市場scan内出来高急増シェア",
-    "breadth_up_rate": "上昇比率",
-    "breadth_down_rate": "下落比率",
-    "breadth_balance": "広がりバランス",
-    "breadth_net_rate": "広がり純比率",
-    "breadth_sample_count": "breadth母数",
-    "breadth_active_coverage": "breadth有効比率",
-    "breadth_reliability": "breadth信頼度",
-    "breadth_core_score": "breadthコア",
+    "breadth_up_rate": "scan内当日上昇比率",
+    "breadth_down_rate": "scan内当日下落比率",
+    "breadth_balance": "scan内当日上昇-下落差",
+    "breadth_net_rate": "scan内当日純上昇比率",
+    "breadth_sample_count": "scan内breadth母数",
+    "breadth_active_coverage": "scan内breadth有効比率",
+    "breadth_reliability": "scan内breadth信頼度",
+    "breadth_core_score": "scan内breadthコア",
     "scan_coverage": "scanカバー率",
     "industry_up_rank_norm": "業種上昇率順位norm",
     "sector_positive_ratio": "セクター上昇比率",
@@ -2182,6 +2183,7 @@ def _build_intraday_sector_leaderboard(mode: str, ranking_df: pd.DataFrame, indu
         pd.Series([float(breadth_settings["reliability_k"])] * len(sector_base), index=sector_base.index),
     ).fillna(0.0).clip(lower=0.0, upper=1.0)
     sector_base["breadth"] = sector_base.apply(lambda row: f"{int(row.get('breadth_up', 0) or 0)}:{int(row.get('breadth_down', 0) or 0)}", axis=1)
+    sector_base["median_ret"] = _coerce_numeric(sector_base["median_live_ret"])
     sector_base["scan_member_share_of_market_scan"] = _safe_ratio(sector_base["scan_member_count"], pd.Series([market_scan_member_count] * len(sector_base), index=sector_base.index)).fillna(0.0)
     sector_base["industry_up_rank_norm"] = _score_rank_ascending(sector_base["industry_rank_live"])
     sector_base["leader_concentration_share"] = _safe_ratio(sector_base["leader_live_turnover"], sector_base["live_turnover_total"]).fillna(0.0)
