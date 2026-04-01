@@ -2358,6 +2358,14 @@ def _build_candidate_commentary(reason_tags: str, risk_tags: str) -> str:
     return ""
 
 
+def _entry_fit_sort_priority(label: Any) -> int:
+    return {
+        "買い候補": 0,
+        "監視候補": 1,
+        "見送り": 2,
+    }.get(str(label or "").strip(), 9)
+
+
 def _build_sector_confidence(score: float) -> str:
     if score >= 3.0:
         return "高"
@@ -2632,12 +2640,17 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
         ),
         axis=1,
     )
+    working["entry_fit_priority_1w"] = working["entry_fit_1w"].map(_entry_fit_sort_priority)
+    working["entry_fit_priority_1m"] = working["entry_fit_1m"].map(_entry_fit_sort_priority)
     swing_1w = (
         working[
             working["candidate_quality_1w"].isin(["高", "中"])
             & working["entry_fit_1w"].isin(["買い候補", "監視候補"])
         ]
-        .sort_values(["entry_fit_1w", "candidate_quality_score_1w", "swing_score_1w", "live_turnover"], ascending=[True, False, False, False])[
+        .sort_values(
+            ["entry_fit_priority_1w", "candidate_quality_score_1w", "swing_score_1w", "rs_vs_topix_1w", "live_turnover", "live_ret_vs_prev_close"],
+            ascending=[True, False, False, False, False, False],
+        )[
             [
                 "code",
                 "name",
@@ -2673,7 +2686,10 @@ def _build_swing_candidate_tables(merged: pd.DataFrame, today_sector_leaderboard
             working["candidate_quality_1m"].isin(["高", "中"])
             & working["entry_fit_1m"].isin(["買い候補", "監視候補"])
         ]
-        .sort_values(["entry_fit_1m", "candidate_quality_score_1m", "swing_score_1m", "TradingValue_latest"], ascending=[True, False, False, False])[
+        .sort_values(
+            ["entry_fit_priority_1m", "candidate_quality_score_1m", "swing_score_1m", "rs_vs_topix_1m", "rs_vs_topix_3m", "TradingValue_latest"],
+            ascending=[True, False, False, False, False, False],
+        )[
             [
                 "code",
                 "name",
@@ -2761,6 +2777,24 @@ def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str,
             "材料リンク": st.column_config.LinkColumn("材料リンク", display_text="リンクを開く"),
         }
     st.dataframe(frame.rename(columns=UI_COLUMN_LABELS), **kwargs)
+
+
+def _build_earnings_candidate_table_note(base_meta: dict[str, Any] | None) -> str:
+    base_meta = base_meta or {}
+    status = str(base_meta.get("earnings_dataset_status", "")).strip()
+    coverage = int(base_meta.get("earnings_coverage_count", 0) or 0)
+    rows_raw = int(base_meta.get("earnings_rows_raw", 0) or 0)
+    rows_future = int(base_meta.get("earnings_rows_future_window", 0) or 0)
+    min_date = str(base_meta.get("earnings_min_event_date", "") or "").strip()
+    max_date = str(base_meta.get("earnings_max_event_date", "") or "").strip()
+    if status == "no_forward_events_in_dataset":
+        date_part = f" event_date={min_date}" if min_date and min_date == max_date else (f" event_date={min_date}..{max_date}" if min_date or max_date else "")
+        return f"決算カレンダーは前方日付を返していません。空欄は全銘柄共通のデータ未提供です。rows_raw={rows_raw} future_window={rows_future}.{date_part}"
+    if status == "ok" and coverage > 0:
+        return "決算日数の空欄は個別銘柄の未取得です。"
+    if status in {"empty_dataset", "missing_required_columns", "bad_request", "network_or_timeout", "auth_or_permission_error", "endpoint_not_found", "unknown_error"}:
+        return f"決算カレンダー自体を取得できていません。空欄は全銘柄共通のデータ未提供です。status={status} rows_raw={rows_raw}"
+    return ""
 
 
 TODAY_SECTOR_DISPLAY_COLUMNS = [
@@ -3094,6 +3128,8 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     quarter_sector_view, quarter_sector_notes = _prepare_table_view(bundle.get("sector_persistence_3m", pd.DataFrame()), PERSISTENCE_DISPLAY_COLUMNS)
     swing_1w_view, swing_1w_notes = _prepare_table_view(bundle.get("swing_candidates_1w", pd.DataFrame()), SWING_1W_DISPLAY_COLUMNS)
     swing_1m_view, swing_1m_notes = _prepare_table_view(bundle.get("swing_candidates_1m", pd.DataFrame()), SWING_1M_DISPLAY_COLUMNS)
+    base_meta = bundle.get("diagnostics", {}).get("base_meta", {})
+    earnings_candidate_note = _build_earnings_candidate_table_note(base_meta)
     sector_compat_notes = sorted(set(today_sector_notes + weekly_sector_notes + monthly_sector_notes + quarter_sector_notes + swing_1w_notes + swing_1m_notes))
     if generated_at_jst or mode:
         with st.expander("運用状態", expanded=False):
@@ -3143,12 +3179,16 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         quarter_sector_view,
         reason=str(empty_reasons.get("sector_persistence_3m", "")),
     )
+    if earnings_candidate_note:
+        st.caption(earnings_candidate_note)
     _render_dataframe_or_reason(
         "1週間スイング候補銘柄",
         swing_1w_view,
         reason=str(empty_reasons.get("swing_candidates_1w", "")),
         link_columns=True,
     )
+    if earnings_candidate_note:
+        st.caption(earnings_candidate_note)
     _render_dataframe_or_reason(
         "1か月スイング候補銘柄",
         swing_1m_view,
