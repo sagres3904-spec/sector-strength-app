@@ -2394,6 +2394,10 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
             "today_sector_score",
             "industry_up_anchor_rank",
             "industry_anchor_rank",
+            "allowed_shift",
+            "upshift_blocked_reason",
+            "rank_constraint_applied",
+            "final_rank_delta",
             "score_rank",
             "rank_shift_limit",
             "tethered_rank",
@@ -2449,6 +2453,22 @@ def _is_rank_slot_assignment_feasible(frame: pd.DataFrame, available_slots: list
     return True
 
 
+def _build_upshift_blocked_reason(row: pd.Series) -> str:
+    reasons: list[str] = []
+    warning_level = str(row.get("scan_sample_warning_level", "") or "").strip()
+    if warning_level == "no_scan":
+        reasons.append("scan裏付けなし")
+    if warning_level == "critical":
+        reasons.append("scan母数極少")
+    if bool(row.get("source_bias_warning_flag")):
+        reasons.append("source偏りあり")
+    if bool(row.get("ranking_breadth_warning_flag")):
+        reasons.append("ランキング広がり弱い")
+    if str(row.get("sector_confidence", "") or "").strip() == "低":
+        reasons.append("信頼度=低")
+    return _build_sector_caution_tags(reasons)
+
+
 def _apply_true_rank_shift_limits(frame: pd.DataFrame) -> pd.DataFrame:
     if frame is None or frame.empty:
         return frame.copy() if isinstance(frame, pd.DataFrame) else _empty_sector_leaderboard()
@@ -2456,43 +2476,61 @@ def _apply_true_rank_shift_limits(frame: pd.DataFrame) -> pd.DataFrame:
     total_rows = len(working)
     fallback_anchor = pd.Series(range(1, total_rows + 1), index=working.index, dtype="float64")
     anchor_rank = _coerce_numeric(working["industry_anchor_rank"]).fillna(fallback_anchor)
-    shift_limit = _coerce_numeric(working["rank_shift_limit"]).fillna(0.0)
+    shift_limit = _coerce_numeric(working["rank_shift_limit"]).fillna(0.0).round().clip(lower=0.0)
+    working["allowed_shift"] = shift_limit.astype(int)
+    working["upshift_blocked_reason"] = working.apply(_build_upshift_blocked_reason, axis=1)
+    blocked_upshift = working["upshift_blocked_reason"].astype(str).str.strip() != ""
+    anchor_rank_int = anchor_rank.round().astype(int)
+    raw_preferred_rank = _coerce_numeric(working["score_rank"]).fillna(_coerce_numeric(working["tethered_rank"])).fillna(anchor_rank).clip(lower=1.0, upper=float(total_rows)).round().astype(int)
     rank_floor = (anchor_rank - shift_limit).clip(lower=1.0, upper=float(total_rows)).round().astype(int)
+    rank_floor = rank_floor.where(~blocked_upshift, anchor_rank_int)
     rank_ceiling = (anchor_rank + shift_limit).clip(lower=1.0, upper=float(total_rows)).round().astype(int)
-    preferred_slot = _coerce_numeric(working["tethered_rank"]).fillna(anchor_rank).clip(lower=1.0, upper=float(total_rows)).round().astype(int)
+    blocked_preferred_slot = raw_preferred_rank.where(raw_preferred_rank >= anchor_rank_int, anchor_rank_int)
+    preferred_slot = raw_preferred_rank.where(~blocked_upshift, blocked_preferred_slot)
     working["rank_floor_bound"] = rank_floor
     working["rank_ceiling_bound"] = rank_ceiling
     working["preferred_rank_slot"] = preferred_slot
+    working["_rank_row_id"] = working.index.astype(int)
     preferred_order = _sort_today_sector_leaderboard_rows(working)
     available_slots = list(range(1, total_rows + 1))
     assigned_slots: dict[int, int] = {}
-    for position, row in preferred_order.iterrows():
-        row_index = int(position)
+    for _, row in preferred_order.iterrows():
+        row_id = int(row.get("_rank_row_id", 0) or 0)
         floor_bound = int(row.get("rank_floor_bound", 1) or 1)
         ceiling_bound = int(row.get("rank_ceiling_bound", total_rows) or total_rows)
         preferred = int(row.get("preferred_rank_slot", floor_bound) or floor_bound)
         candidate_slots = [slot for slot in available_slots if floor_bound <= slot <= ceiling_bound]
         candidate_slots = sorted(candidate_slots, key=lambda slot: (abs(slot - preferred), slot))
-        remaining_index = [idx for idx in preferred_order.index.tolist() if idx not in assigned_slots and idx != row_index]
+        remaining_index = [idx for idx in working["_rank_row_id"].tolist() if idx not in assigned_slots and idx != row_id]
         chosen_slot = None
         for slot in candidate_slots:
             remaining_slots = [value for value in available_slots if value != slot]
-            if _is_rank_slot_assignment_feasible(working.loc[remaining_index], remaining_slots):
+            if _is_rank_slot_assignment_feasible(working[working["_rank_row_id"].isin(remaining_index)], remaining_slots):
                 chosen_slot = slot
                 break
         if chosen_slot is None:
             chosen_slot = candidate_slots[0] if candidate_slots else min(available_slots)
-        assigned_slots[row_index] = int(chosen_slot)
+        assigned_slots[row_id] = int(chosen_slot)
         available_slots.remove(chosen_slot)
-    working["tethered_rank"] = working.index.to_series().map(assigned_slots).astype("float64")
-    return working.drop(columns=["rank_floor_bound", "rank_ceiling_bound", "preferred_rank_slot"], errors="ignore")
+    working["tethered_rank"] = working["_rank_row_id"].map(assigned_slots).astype("float64")
+    working["rank_constraint_applied"] = (
+        _coerce_numeric(working["tethered_rank"]).fillna(anchor_rank).round().astype(int) != raw_preferred_rank
+    ) | blocked_upshift
+    working["final_rank_delta"] = _coerce_numeric(working["tethered_rank"]).fillna(anchor_rank) - anchor_rank
+    return working.drop(columns=["rank_floor_bound", "rank_ceiling_bound", "preferred_rank_slot", "_rank_row_id"], errors="ignore")
 
 
 def _sort_today_sector_leaderboard_for_display(frame: pd.DataFrame) -> pd.DataFrame:
     if frame is None or frame.empty:
         return frame.copy() if isinstance(frame, pd.DataFrame) else _empty_sector_leaderboard()
     working = _sort_today_sector_leaderboard_rows(frame)
-    working["today_rank"] = pd.Series(range(1, len(working) + 1), index=working.index, dtype="int64")
+    fallback_rank = pd.Series(range(1, len(working) + 1), index=working.index, dtype="int64")
+    if "tethered_rank" in working.columns:
+        working["today_rank"] = _coerce_numeric(working["tethered_rank"]).fillna(fallback_rank).round().clip(lower=1.0).astype("int64")
+    else:
+        working["today_rank"] = fallback_rank
+    if "industry_anchor_rank" in working.columns:
+        working["final_rank_delta"] = _coerce_numeric(working["today_rank"]).fillna(0.0) - _coerce_numeric(working["industry_anchor_rank"]).fillna(_coerce_numeric(working["today_rank"]).fillna(0.0))
     return working
 
 
@@ -3042,7 +3080,12 @@ def _summarize_industry_anchor_positions(industry_df: pd.DataFrame, today_sector
                 "rank_delta_vs_industry": (current_today_rank - int(anchor_rank)) if current_today_rank is not None else None,
                 "tethered_rank": float(current_row.get("tethered_rank", 0.0) or 0.0) if current_row is not None and pd.notna(current_row.get("tethered_rank")) else None,
                 "score_rank": int(current_row.get("score_rank", 0) or 0) if current_row is not None and pd.notna(current_row.get("score_rank")) else None,
+                "industry_anchor_rank": int(current_row.get("industry_anchor_rank", 0) or 0) if current_row is not None and pd.notna(current_row.get("industry_anchor_rank")) else int(anchor_rank),
+                "allowed_shift": int(current_row.get("allowed_shift", 0) or 0) if current_row is not None and pd.notna(current_row.get("allowed_shift")) else None,
                 "rank_shift_limit": int(current_row.get("rank_shift_limit", 0) or 0) if current_row is not None and pd.notna(current_row.get("rank_shift_limit")) else None,
+                "upshift_blocked_reason": str(current_row.get("upshift_blocked_reason", "") or "") if current_row is not None else "",
+                "rank_constraint_applied": bool(current_row.get("rank_constraint_applied", False)) if current_row is not None else False,
+                "final_rank_delta": float(current_row.get("final_rank_delta", 0.0) or 0.0) if current_row is not None and pd.notna(current_row.get("final_rank_delta")) else None,
                 "scan_member_count": int(current_row.get("scan_member_count", 0) or 0) if current_row is not None else 0,
                 "scan_sample_warning_level": str(current_row.get("scan_sample_warning_level", "") or "") if current_row is not None else "",
                 "scan_sample_warning_reason": str(current_row.get("scan_sample_warning_reason", "") or "") if current_row is not None else "",
@@ -3740,11 +3783,19 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
                 "scan_sector_count": int(filtered_ranking_df.get("sector_name", pd.Series(dtype=str)).astype(str).str.strip().replace("", pd.NA).dropna().map(_normalize_industry_name).nunique()) if not filtered_ranking_df.empty else 0,
                 "scan_zero_sector_count": int(_coerce_numeric(today_sector_leaderboard.get("scan_member_count", pd.Series(dtype="float64"))).fillna(0.0).eq(0.0).sum()) if not today_sector_leaderboard.empty else 0,
             },
+            "today_upshift_block_rules": [
+                "scan裏付けなし",
+                "scan母数極少",
+                "source偏りあり",
+                "ランキング広がり弱い",
+                "信頼度=低",
+            ],
             "breadth_scope": "scan_based_caution_live_data_only_for_representatives",
             "today_sector_primary_rank_column": "tethered_rank",
             "today_sector_display_rank_column": "today_rank",
             "today_top_sectors_basis": "today_sector_leaderboard_sorted_by_true_tethered_slot_then_industry_anchor_then_score_rank",
             "today_rank_rule": "today_rank_is_reassigned_as_dense_display_rank_after_final_sector_sort",
+            "today_rank_absolute_constraint": "abs(today_rank-industry_anchor_rank)<=allowed_shift and blocked_upshift_sectors_cannot_finish_above_industry_anchor_rank",
             "today_sector_removed_live_inputs": [
                 "median_live_ret_norm",
                 "turnover_ratio_median_norm",
