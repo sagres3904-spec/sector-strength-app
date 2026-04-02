@@ -2000,10 +2000,7 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
 
     prepared = df.copy()
     if "today_rank" not in prepared.columns and "sector_name" in prepared.columns and "price_block_score" in prepared.columns:
-        if "tethered_rank" in prepared.columns:
-            prepared["today_rank"] = _coerce_numeric(prepared["tethered_rank"])
-            compatibility_notes.append("today_rank<-tethered_rank")
-        elif "score_rank" in prepared.columns:
+        if "score_rank" in prepared.columns:
             prepared["today_rank"] = _coerce_numeric(prepared["score_rank"])
             compatibility_notes.append("today_rank<-score_rank")
         elif "rank" in prepared.columns:
@@ -2070,7 +2067,7 @@ def _prepare_today_sector_leaderboard_for_view(df: pd.DataFrame) -> pd.DataFrame
     prepared = df.copy()
     fallback_columns = ["leaders", "representative_stocks_text", "representative_stock"]
     industry_rank_fallback_columns = ["industry_rank_live", "industry_anchor_rank"]
-    today_rank_fallback_columns = ["today_rank", "tethered_rank", "score_rank", "rank"]
+    today_rank_fallback_columns = ["today_rank", "score_rank", "rank"]
 
     def _normalize_text(value: Any) -> str:
         if value is None:
@@ -2115,6 +2112,7 @@ def _prepare_today_sector_leaderboard_for_view(df: pd.DataFrame) -> pd.DataFrame
         lambda row: _pick_first_numeric_value(row, today_rank_fallback_columns),
         axis=1,
     )
+    prepared["today_rank"] = pd.Series(range(1, len(prepared) + 1), index=prepared.index, dtype="Int64")
     prepared["representative_stock"] = prepared.apply(
         _pick_representative_stocks,
         axis=1,
