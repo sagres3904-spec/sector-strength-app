@@ -2063,6 +2063,41 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
     return prepared.reindex(columns=columns), compatibility_notes
 
 
+def _prepare_today_sector_leaderboard_for_view(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df
+
+    prepared = df.copy()
+    fallback_columns = ["leaders", "representative_stocks_text", "representative_stock"]
+
+    def _normalize_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (list, tuple, set)):
+            parts = [str(item).strip() for item in value if str(item).strip() and str(item).strip().lower() != "nan"]
+            return " / ".join(parts)
+        try:
+            if pd.isna(value):
+                return ""
+        except TypeError:
+            pass
+        text = str(value).strip()
+        return "" if not text or text.lower() == "nan" else text
+
+    def _pick_representative_stocks(row: pd.Series) -> str:
+        for column in fallback_columns:
+            text = _normalize_text(row.get(column, ""))
+            if text:
+                return text
+        return ""
+
+    prepared["representative_stock"] = prepared.apply(
+        _pick_representative_stocks,
+        axis=1,
+    )
+    return prepared
+
+
 def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.DataFrame, board_df: pd.DataFrame, base_df: pd.DataFrame, now_ts: datetime) -> dict[str, Any]:
     merged = base_df.merge(board_df, on="code", how="inner")
     merged["live_price"] = _coerce_numeric(merged["CurrentPrice"])
@@ -2259,7 +2294,10 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     timepoint_meaning = _timepoint_meaning(mode)
     empty_reasons = bundle.get("empty_reasons", {})
     warning_text = saved_snapshot_timing_warning(meta) if is_saved_snapshot else ""
-    today_sector_view, today_sector_notes = _prepare_table_view(bundle.get("today_sector_leaderboard", bundle.get("today_sector_summary", bundle["sector_summary"])), TODAY_SECTOR_DISPLAY_COLUMNS)
+    today_sector_source = _prepare_today_sector_leaderboard_for_view(
+        bundle.get("today_sector_leaderboard", bundle.get("today_sector_summary", bundle["sector_summary"]))
+    )
+    today_sector_view, today_sector_notes = _prepare_table_view(today_sector_source, TODAY_SECTOR_DISPLAY_COLUMNS)
     weekly_sector_view, weekly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1w", bundle.get("weekly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
     monthly_sector_view, monthly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1m", bundle.get("monthly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
     quarter_sector_view, quarter_sector_notes = _prepare_table_view(bundle.get("sector_persistence_3m", pd.DataFrame()), PERSISTENCE_DISPLAY_COLUMNS)
