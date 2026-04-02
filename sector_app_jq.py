@@ -214,12 +214,13 @@ if not logger.handlers:
 
 
 UI_COLUMN_LABELS = {
+    "today_rank": "今日の順位",
     "sector_name": "セクター名",
     "n": "採用銘柄数",
     "breadth": "上昇 : 下落",
     "median_ret": "中央値騰落率",
     "turnover_ratio_median": "売買代金倍率",
-    "industry_rank_live": "業種上昇順位",
+    "industry_rank_live": "東証業種順位",
     "sector_rank_1w": "1週順位",
     "sector_rank_1m": "1か月順位",
     "sector_rank_3m": "3か月順位",
@@ -256,9 +257,11 @@ UI_COLUMN_LABELS = {
     "buyability_score": "買い候補スコア",
     "buyability_label": "買い候補判定",
     "today_sector_score": "本命セクタースコア",
-    "price_block_score": "価格ブロック",
-    "flow_block_score": "資金流入ブロック",
+    "price_block_score": "価格の強さ",
+    "flow_block_score": "資金流入の強さ",
     "participation_block_score": "参加・広がりブロック",
+    "signal_breadth_share": "ランキング広がり",
+    "scan_member_count": "scan銘柄数",
     "representative_stock": "代表銘柄",
     "sector_confidence": "信頼度",
     "sector_caution": "注意点",
@@ -1923,13 +1926,13 @@ TODAY_SECTOR_DISPLAY_COLUMNS = [
     "today_rank",
     "sector_name",
     "representative_stock",
-    "price_block_score",
-    "flow_block_score",
-    "participation_block_score",
     "sector_confidence",
     "sector_caution",
     "industry_rank_live",
-    "breadth",
+    "price_block_score",
+    "flow_block_score",
+    "signal_breadth_share",
+    "scan_member_count",
 ]
 PERSISTENCE_DISPLAY_COLUMNS = [
     "persistence_rank",
@@ -1997,8 +2000,18 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
 
     prepared = df.copy()
     if "today_rank" not in prepared.columns and "sector_name" in prepared.columns and "price_block_score" in prepared.columns:
-        prepared["today_rank"] = range(1, len(prepared) + 1)
-        compatibility_notes.append("today_rank")
+        if "tethered_rank" in prepared.columns:
+            prepared["today_rank"] = _coerce_numeric(prepared["tethered_rank"])
+            compatibility_notes.append("today_rank<-tethered_rank")
+        elif "score_rank" in prepared.columns:
+            prepared["today_rank"] = _coerce_numeric(prepared["score_rank"])
+            compatibility_notes.append("today_rank<-score_rank")
+        elif "rank" in prepared.columns:
+            prepared["today_rank"] = _coerce_numeric(prepared["rank"])
+            compatibility_notes.append("today_rank<-rank")
+        else:
+            prepared["today_rank"] = range(1, len(prepared) + 1)
+            compatibility_notes.append("today_rank")
     if "persistence_rank" not in prepared.columns and "sector_name" in prepared.columns and "sector_rs_vs_topix" in prepared.columns:
         prepared["persistence_rank"] = range(1, len(prepared) + 1)
         compatibility_notes.append("persistence_rank")
@@ -2011,6 +2024,9 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
     if "sector_caution" not in prepared.columns:
         prepared["sector_caution"] = ""
         compatibility_notes.append("sector_caution")
+    if "scan_member_count" not in prepared.columns and "n" in prepared.columns:
+        prepared["scan_member_count"] = _coerce_numeric(prepared["n"])
+        compatibility_notes.append("scan_member_count<-n")
     if "sector_rs_vs_topix" not in prepared.columns:
         if "sector_rs_vs_topix_1w" in prepared.columns:
             prepared["sector_rs_vs_topix"] = _coerce_numeric(prepared["sector_rs_vs_topix_1w"])
