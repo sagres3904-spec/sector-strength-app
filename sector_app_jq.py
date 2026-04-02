@@ -282,6 +282,13 @@ INTRADAY_INDUSTRY_RANK_TETHER = {
     "strong_shift": 2,
     "very_strong_shift": 3,
 }
+INTRADAY_SCAN_SAMPLE_WARNING_RULES = {
+    "critical_count": 4.0,
+    "warn_count": 7.0,
+    "warn_coverage": 0.16,
+    "thin_count": 10.0,
+    "thin_coverage": 0.10,
+}
 INTRADAY_BREADTH_SLOT_SETTINGS_BASELINE = {
     "0915": {
         "reliability_k": 3.0,
@@ -480,7 +487,11 @@ UI_COLUMN_LABELS = {
     "median_ret": "当日中央値騰落率",
     "median_live_ret": "当日中央値騰落率",
     "turnover_ratio_median": "売買代金倍率",
+    "industry_up": "東証業種順位/上昇率",
+    "industry_up_value": "東証業種上昇率",
+    "industry_up_rank": "東証業種順位",
     "industry_rank_live": "東証業種順位",
+    "industry_up_anchor_rank": "東証アンカー順位",
     "sector_rank_1w": "1週順位",
     "sector_rank_1m": "1か月順位",
     "sector_rank_3m": "3か月順位",
@@ -562,6 +573,8 @@ UI_COLUMN_LABELS = {
     "candidate_commentary": "コメント",
     "sector_confidence": "信頼度",
     "sector_caution": "注意点",
+    "scan_sample_warning_level": "scan母数警告レベル",
+    "scan_sample_warning_reason": "scan母数警告理由",
     "representative_stock": "代表銘柄",
     "representative_rank": "代表順位",
     "representative_score": "代表銘柄スコア",
@@ -1584,14 +1597,27 @@ def fetch_kabu_ranking(settings: dict[str, Any], token: str, source_type: str) -
     logger.info("ranking fetched type=%s source_type=%s count=%s", ranking_type, source_type, len(rows))
     if not rows:
         if source_type == "industry_up":
-            return pd.DataFrame(columns=["sector_name", "source_type", "ranking_type", "rank_position"])
+            return pd.DataFrame(columns=["sector_name", "industry_up_value", "source_type", "ranking_type", "rank_position"])
         return pd.DataFrame(columns=["code", "name", "sector_name", "exchange", "source_type", "ranking_type", "rank_position", "rank_score"])
     frame = pd.DataFrame(rows)
     if source_type == "industry_up":
         sector_col = pick_optional_existing(frame, ["CategoryName", "IndustryName", "SectorName", "Name", "symbol_name"]) or frame.columns[0]
+        value_col = pick_optional_existing(
+            frame,
+            [
+                "ChangeRate",
+                "ChangeRatio",
+                "ChangePercentage",
+                "ChangePercent",
+                "PercentChange",
+                "UpDownRate",
+                "Performance",
+            ],
+        )
         return pd.DataFrame(
             {
                 "sector_name": frame[sector_col].map(_normalize_industry_name),
+                "industry_up_value": _coerce_numeric(frame[value_col]) if value_col else pd.Series([pd.NA] * len(frame), index=frame.index),
                 "source_type": source_type,
                 "ranking_type": ranking_type,
                 "rank_position": range(1, len(frame) + 1),
@@ -2189,6 +2215,41 @@ def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     return _coerce_numeric(numerator) / _coerce_numeric(denominator).replace(0, pd.NA)
 
 
+def _rank_display_series(primary: pd.Series | None, *, fallback: pd.Series | None = None) -> pd.Series:
+    numeric = _coerce_numeric(primary) if primary is not None else pd.Series(dtype="float64")
+    if fallback is not None:
+        numeric = numeric.fillna(_coerce_numeric(fallback))
+    if numeric.empty:
+        return pd.Series(dtype="Int64")
+    return numeric.round().clip(lower=1.0).astype("Int64")
+
+
+def _scan_sample_warning_details(
+    scan_member_count: pd.Series,
+    scan_coverage: pd.Series,
+    rules: dict[str, float] | None = None,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    rules = rules or INTRADAY_SCAN_SAMPLE_WARNING_RULES
+    count = _coerce_numeric(scan_member_count).fillna(0.0)
+    coverage = _coerce_numeric(scan_coverage).fillna(0.0)
+    critical_mask = count < float(rules["critical_count"])
+    warn_mask = (~critical_mask) & (count < float(rules["warn_count"])) & (coverage < float(rules["warn_coverage"]))
+    thin_mask = (~critical_mask) & (~warn_mask) & (count < float(rules["thin_count"])) & (coverage < float(rules["thin_coverage"]))
+    level = pd.Series([""] * len(count), index=count.index, dtype="object")
+    level.loc[thin_mask] = "thin"
+    level.loc[warn_mask] = "warn"
+    level.loc[critical_mask] = "critical"
+    label = pd.Series([""] * len(count), index=count.index, dtype="object")
+    label.loc[thin_mask] = "scan母数薄い"
+    label.loc[warn_mask] = "scan母数少"
+    label.loc[critical_mask] = "scan母数極少"
+    reason = pd.Series([""] * len(count), index=count.index, dtype="object")
+    reason.loc[thin_mask] = count.loc[thin_mask].map(lambda value: f"scan_member_count={int(value)}") + coverage.loc[thin_mask].map(lambda value: f", scan_coverage={value:.3f}")
+    reason.loc[warn_mask] = count.loc[warn_mask].map(lambda value: f"scan_member_count={int(value)}") + coverage.loc[warn_mask].map(lambda value: f", scan_coverage={value:.3f}")
+    reason.loc[critical_mask] = count.loc[critical_mask].map(lambda value: f"scan_member_count={int(value)}") + coverage.loc[critical_mask].map(lambda value: f", scan_coverage={value:.3f}")
+    return level, label, reason
+
+
 def _sector_rank_from_returns(base_df: pd.DataFrame, return_col: str, sector_ret_col: str, rank_col: str) -> pd.DataFrame:
     sector_rank = (
         base_df.groupby("sector_name", dropna=False)[return_col]
@@ -2299,6 +2360,11 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
             "participation_block_score",
             "sector_confidence",
             "sector_caution",
+            "scan_sample_warning_level",
+            "scan_sample_warning_reason",
+            "industry_up",
+            "industry_up_value",
+            "industry_up_rank",
             "industry_rank_live",
             "signal_breadth_count",
             "signal_breadth_share",
@@ -2322,6 +2388,7 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
             "intraday_penalty_total",
             "intraday_sector_score",
             "today_sector_score",
+            "industry_up_anchor_rank",
             "industry_anchor_rank",
             "score_rank",
             "rank_shift_limit",
@@ -2349,7 +2416,11 @@ def _sort_today_sector_leaderboard_for_display(frame: pd.DataFrame) -> pd.DataFr
     sort_ascending = [ascending for column, ascending in sort_priority if column in working.columns]
     if sort_columns:
         working = working.sort_values(sort_columns, ascending=sort_ascending, kind="mergesort").reset_index(drop=True)
-    working["today_rank"] = range(1, len(working) + 1)
+    fallback_rank = pd.Series(range(1, len(working) + 1), index=working.index)
+    working["today_rank"] = _rank_display_series(
+        working["tethered_rank"] if "tethered_rank" in working.columns else None,
+        fallback=working["industry_anchor_rank"] if "industry_anchor_rank" in working.columns else fallback_rank,
+    ).fillna(fallback_rank).astype(int)
     return working
 
 
@@ -2464,12 +2535,15 @@ def _build_intraday_sector_leaderboard(
     sector_base = sector_base.merge(leader_turnover, on="sector_name", how="left")
     if not industry_df.empty and "sector_name" in industry_df.columns:
         sector_base = sector_base.merge(
-            industry_df[["sector_name", "rank_position"]].drop_duplicates("sector_name").rename(columns={"rank_position": "industry_rank_live"}),
+            industry_df[
+                [column for column in ["sector_name", "rank_position", "industry_up_value"] if column in industry_df.columns]
+            ].drop_duplicates("sector_name").rename(columns={"rank_position": "industry_rank_live"}),
             on="sector_name",
             how="left",
         )
     else:
         sector_base["industry_rank_live"] = pd.NA
+        sector_base["industry_up_value"] = pd.NA
     sector_base["sector_constituent_count"] = _coerce_numeric(sector_base["sector_constituent_count"]).fillna(sector_base["scan_member_count"]).clip(lower=1.0)
     sector_base["scan_member_count"] = _coerce_numeric(sector_base["scan_member_count"]).fillna(0.0)
     sector_base["scan_coverage"] = _safe_ratio(sector_base["scan_member_count"], sector_base["sector_constituent_count"]).fillna(0.0)
@@ -2580,10 +2654,13 @@ def _build_intraday_sector_leaderboard(
     sector_base.loc[strong_flow_signal, "sector_confidence_score"] += 0.5
     sector_base.loc[(sector_base["industry_up_rank_norm"] >= 0.7) & strong_participation_signal, "sector_confidence_score"] += 0.5
     sector_base["sector_confidence"] = sector_base["sector_confidence_score"].apply(_build_sector_confidence)
-    sector_base["scan_sample_warning_flag"] = (
-        (_coerce_numeric(sector_base["scan_member_count"]).fillna(0.0) < 4.0)
-        | (_coerce_numeric(sector_base["scan_coverage"]).fillna(0.0) < 0.25)
+    scan_sample_warning_level, scan_sample_warning_label, scan_sample_warning_reason = _scan_sample_warning_details(
+        sector_base["scan_member_count"],
+        sector_base["scan_coverage"],
     )
+    sector_base["scan_sample_warning_level"] = scan_sample_warning_level
+    sector_base["scan_sample_warning_flag"] = sector_base["scan_sample_warning_level"].astype(str).str.strip() != ""
+    sector_base["scan_sample_warning_reason"] = scan_sample_warning_reason
     sector_base["ranking_breadth_warning_flag"] = (
         (_coerce_numeric(sector_base["signal_breadth_count"]).fillna(0.0) <= 1.0)
         | (_coerce_numeric(sector_base["signal_breadth_share"]).fillna(0.0) < 0.50)
@@ -2598,7 +2675,7 @@ def _build_intraday_sector_leaderboard(
     sector_base["sector_caution"] = sector_base.apply(
         lambda row: _build_sector_caution_tags(
             [
-                "scan母数少" if bool(row.get("scan_sample_warning_flag")) else "",
+                str(scan_sample_warning_label.loc[row.name] or "") if row.name in scan_sample_warning_label.index else "",
                 "ランキング広がり弱い" if bool(row.get("ranking_breadth_warning_flag")) else "",
                 "source偏りあり" if bool(row.get("source_bias_warning_flag")) else "",
                 "業種順位先行" if float(row.get("industry_up_rank_norm", 0.0) or 0.0) >= 0.8 and float(row.get("rank_shift_limit", 0.0) or 0.0) <= float(INTRADAY_INDUSTRY_RANK_TETHER["base_shift"]) else "",
@@ -2613,11 +2690,14 @@ def _build_intraday_sector_leaderboard(
     ).reset_index(drop=True)
     sector_base["score_rank"] = range(1, len(sector_base) + 1)
     sector_base["industry_anchor_rank"] = _coerce_numeric(sector_base["industry_rank_live"]).fillna(sector_base["score_rank"])
+    sector_base["industry_up_rank"] = _rank_display_series(sector_base["industry_rank_live"], fallback=sector_base["score_rank"])
     rank_floor = sector_base["industry_anchor_rank"] - _coerce_numeric(sector_base["rank_shift_limit"]).fillna(0.0)
     rank_ceiling = sector_base["industry_anchor_rank"] + _coerce_numeric(sector_base["rank_shift_limit"]).fillna(0.0)
     sector_base["tethered_rank"] = _coerce_numeric(sector_base["score_rank"]).fillna(0.0)
     sector_base["tethered_rank"] = sector_base["tethered_rank"].where(sector_base["tethered_rank"] >= rank_floor, rank_floor)
     sector_base["tethered_rank"] = sector_base["tethered_rank"].where(sector_base["tethered_rank"] <= rank_ceiling, rank_ceiling)
+    sector_base["industry_up_anchor_rank"] = _rank_display_series(sector_base["industry_anchor_rank"], fallback=sector_base["industry_up_rank"])
+    sector_base["industry_up"] = _coerce_numeric(sector_base["industry_up_value"]).fillna(_coerce_numeric(sector_base["industry_up_rank"]))
     return _sort_today_sector_leaderboard_for_display(sector_base)
 
 
@@ -3294,6 +3374,7 @@ TODAY_SECTOR_DISPLAY_COLUMNS = [
     "leaders",
     "sector_confidence",
     "sector_caution",
+    "industry_up_anchor_rank",
     "industry_rank_live",
     "price_block_score",
     "flow_block_score",
@@ -3497,7 +3578,9 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
             "sector_summary_scope": "industry_up_anchor_plus_scan_price_flow_participation",
             "breadth_scope": "scan_based_caution_live_data_only_for_representatives",
             "today_sector_primary_rank_column": "tethered_rank",
+            "today_sector_display_rank_column": "today_rank",
             "today_top_sectors_basis": "today_sector_leaderboard_sorted_by_tethered_rank_then_industry_anchor_then_score_rank",
+            "today_rank_rule": "today_rank_uses_tethered_rank_with_industry_anchor_fallback",
             "today_sector_removed_live_inputs": [
                 "median_live_ret_norm",
                 "turnover_ratio_median_norm",
@@ -3514,6 +3597,24 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
                 "scan_member_count",
                 "scan_member_share_of_market_scan",
             ],
+            "scan_sample_warning_rules": {
+                "items": ["scan_member_count", "scan_coverage"],
+                "critical": {
+                    "scan_member_count_lt": int(INTRADAY_SCAN_SAMPLE_WARNING_RULES["critical_count"]),
+                    "label": "scan母数極少",
+                },
+                "warn": {
+                    "scan_member_count_lt": int(INTRADAY_SCAN_SAMPLE_WARNING_RULES["warn_count"]),
+                    "scan_coverage_lt": float(INTRADAY_SCAN_SAMPLE_WARNING_RULES["warn_coverage"]),
+                    "label": "scan母数少",
+                },
+                "thin": {
+                    "scan_member_count_lt": int(INTRADAY_SCAN_SAMPLE_WARNING_RULES["thin_count"]),
+                    "scan_coverage_lt": float(INTRADAY_SCAN_SAMPLE_WARNING_RULES["thin_coverage"]),
+                    "label": "scan母数薄い",
+                },
+                "note": "scan_member_count>=10 sectors are not flagged by this rule",
+            },
             "today_sector_rank_tether": {
                 "anchor": "industry_up",
                 "base_shift": int(INTRADAY_INDUSTRY_RANK_TETHER["base_shift"]),
