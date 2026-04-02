@@ -2069,6 +2069,8 @@ def _prepare_today_sector_leaderboard_for_view(df: pd.DataFrame) -> pd.DataFrame
 
     prepared = df.copy()
     fallback_columns = ["leaders", "representative_stocks_text", "representative_stock"]
+    industry_rank_fallback_columns = ["industry_rank_live", "industry_anchor_rank"]
+    today_rank_fallback_columns = ["today_rank", "tethered_rank", "score_rank", "rank"]
 
     def _normalize_text(value: Any) -> str:
         if value is None:
@@ -2084,6 +2086,20 @@ def _prepare_today_sector_leaderboard_for_view(df: pd.DataFrame) -> pd.DataFrame
         text = str(value).strip()
         return "" if not text or text.lower() == "nan" else text
 
+    def _pick_first_numeric_value(row: pd.Series, columns: list[str]) -> Any:
+        for column in columns:
+            value = row.get(column, pd.NA)
+            try:
+                if pd.isna(value):
+                    continue
+            except TypeError:
+                pass
+            text = str(value).strip()
+            if not text or text.lower() == "nan":
+                continue
+            return value
+        return pd.NA
+
     def _pick_representative_stocks(row: pd.Series) -> str:
         for column in fallback_columns:
             text = _normalize_text(row.get(column, ""))
@@ -2091,6 +2107,14 @@ def _prepare_today_sector_leaderboard_for_view(df: pd.DataFrame) -> pd.DataFrame
                 return text
         return ""
 
+    prepared["industry_rank_live"] = prepared.apply(
+        lambda row: _pick_first_numeric_value(row, industry_rank_fallback_columns),
+        axis=1,
+    )
+    prepared["today_rank"] = prepared.apply(
+        lambda row: _pick_first_numeric_value(row, today_rank_fallback_columns),
+        axis=1,
+    )
     prepared["representative_stock"] = prepared.apply(
         _pick_representative_stocks,
         axis=1,
