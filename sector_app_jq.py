@@ -259,9 +259,10 @@ INTRADAY_BLOCK_COMPONENT_WEIGHTS = {
         "turnover_surge_share_of_market_scan": 0.65,
     },
     "participation": {
-        "breadth_up_rate": 0.95,
-        "breadth_balance": 1.1,
-        "breadth_active_coverage": 0.3,
+        "signal_breadth_share": 1.05,
+        "scan_coverage": 0.8,
+        "scan_member_count_norm": 0.6,
+        "scan_member_share_of_market_scan": 0.45,
     },
 }
 INTRADAY_BLOCK_MODE_WEIGHTS_BASELINE = {
@@ -275,6 +276,11 @@ INTRADAY_BLOCK_MODE_WEIGHTS = {
     "1130": {"price": 0.46, "flow": 0.30, "participation": 0.24},
     "1530": {"price": 0.42, "flow": 0.31, "participation": 0.27},
     "now": {"price": 0.45, "flow": 0.30, "participation": 0.25},
+}
+INTRADAY_INDUSTRY_RANK_TETHER = {
+    "base_shift": 1,
+    "strong_shift": 2,
+    "very_strong_shift": 3,
 }
 INTRADAY_BREADTH_SLOT_SETTINGS_BASELINE = {
     "0915": {
@@ -468,17 +474,17 @@ UI_COLUMN_LABELS = {
     "sector_name": "セクター名",
     "n": "注目銘柄数",
     "sector_constituent_count": "構成銘柄数",
-    "today_rank": "今日順位",
+    "today_rank": "今日の順位",
     "persistence_rank": "継続順位",
     "breadth": "scan内当日上昇:下落",
     "median_ret": "当日中央値騰落率",
     "median_live_ret": "当日中央値騰落率",
     "turnover_ratio_median": "売買代金倍率",
-    "industry_rank_live": "業種上昇率順位",
+    "industry_rank_live": "東証業種順位",
     "sector_rank_1w": "1週順位",
     "sector_rank_1m": "1か月順位",
     "sector_rank_3m": "3か月順位",
-    "leaders": "代表銘柄3つ",
+    "leaders": "代表銘柄",
     "leader_contribution_pct": "上位1銘柄寄与率(%)",
     "price_up_count": "price_up件数",
     "turnover_count": "turnover件数",
@@ -516,11 +522,11 @@ UI_COLUMN_LABELS = {
     "earnings_buffer_days": "決算まで日数",
     "finance_health_score": "財務健全度",
     "finance_health_flag": "財務健全フラグ",
-    "price_block_score": "価格ブロック",
-    "flow_block_score": "資金流入ブロック",
-    "participation_block_score": "参加・広がりブロック",
+    "price_block_score": "価格の強さ",
+    "flow_block_score": "資金流入の強さ",
+    "participation_block_score": "ランキング広がり",
     "intraday_total_score": "intraday総合",
-    "scan_member_count": "scan対象数",
+    "scan_member_count": "scan銘柄数",
     "scan_participation_rate": "scan参加率",
     "price_up_rate": "上昇銘柄比率",
     "turnover_count_rate": "売買代金流入比率",
@@ -543,6 +549,8 @@ UI_COLUMN_LABELS = {
     "breadth_reliability": "scan内breadth信頼度",
     "breadth_core_score": "scan内breadthコア",
     "scan_coverage": "scanカバー率",
+    "signal_breadth_count": "ランキング種類数",
+    "signal_breadth_share": "ランキング広がり率",
     "industry_up_rank_norm": "業種上昇率順位norm",
     "sector_positive_ratio": "セクター上昇比率",
     "candidate_rank_1w": "順位",
@@ -2291,11 +2299,14 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
             "sector_confidence",
             "sector_caution",
             "industry_rank_live",
+            "signal_breadth_count",
+            "signal_breadth_share",
             "price_up_share_of_sector",
             "turnover_share_of_sector",
             "breadth",
             "sector_constituent_count",
             "scan_member_count",
+            "scan_member_count_norm",
             "price_up_count",
             "turnover_count",
             "volume_surge_count",
@@ -2310,6 +2321,10 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
             "intraday_penalty_total",
             "intraday_sector_score",
             "today_sector_score",
+            "industry_anchor_rank",
+            "score_rank",
+            "rank_shift_limit",
+            "tethered_rank",
         ]
     )
 
@@ -2400,6 +2415,15 @@ def _build_intraday_sector_leaderboard(
             "turnover_surge": "turnover_surge_count",
         }
     )
+    scan_source_columns = ["price_up_count", "turnover_count", "volume_surge_count", "turnover_surge_count"]
+    market_scan_source_count = float(sum(1 for source_type in ["price_up", "turnover", "volume_surge", "turnover_surge"] if source_totals.get(source_type, 0.0) > 0.0) or 1.0)
+    sector_base["signal_breadth_count"] = 0.0
+    for column in scan_source_columns:
+        sector_base["signal_breadth_count"] += _coerce_numeric(sector_base[column]).fillna(0.0).gt(0).astype(float)
+    sector_base["signal_breadth_share"] = _safe_ratio(
+        sector_base["signal_breadth_count"],
+        pd.Series([market_scan_source_count] * len(sector_base), index=sector_base.index),
+    ).fillna(0.0)
     live_sector = (
         live_scan.groupby("sector_name", as_index=False)
         .agg(
@@ -2445,6 +2469,7 @@ def _build_intraday_sector_leaderboard(
     sector_base["breadth"] = sector_base.apply(lambda row: f"{int(row.get('breadth_up', 0) or 0)}:{int(row.get('breadth_down', 0) or 0)}", axis=1)
     sector_base["median_ret"] = _coerce_numeric(sector_base["median_live_ret"])
     sector_base["scan_member_share_of_market_scan"] = _safe_ratio(sector_base["scan_member_count"], pd.Series([market_scan_member_count] * len(sector_base), index=sector_base.index)).fillna(0.0)
+    sector_base["scan_member_count_norm"] = _score_percentile(sector_base["scan_member_count"])
     sector_base["industry_up_rank_norm"] = _score_rank_ascending(sector_base["industry_rank_live"])
     sector_base["leader_concentration_share"] = _safe_ratio(sector_base["leader_live_turnover"], sector_base["live_turnover_total"]).fillna(0.0)
     sector_base["price_up_rate"] = sector_base["price_up_share_of_sector"]
@@ -2463,7 +2488,7 @@ def _build_intraday_sector_leaderboard(
     for column, weight in INTRADAY_BLOCK_COMPONENT_WEIGHTS["participation"].items():
         sector_base["breadth_core_score"] += _coerce_numeric(sector_base[column]).fillna(0.0) * weight
     sector_base["participation_block_score_raw"] = sector_base["breadth_core_score"]
-    sector_base["participation_block_score"] = sector_base["participation_block_score_raw"] * sector_base["breadth_reliability"]
+    sector_base["participation_block_score"] = sector_base["participation_block_score_raw"]
     mode_block_weights = block_weights.get(str(mode), block_weights["now"])
     sector_base["intraday_sector_score_raw"] = (
         sector_base["price_block_score"] * mode_block_weights["price"]
@@ -2491,26 +2516,53 @@ def _build_intraday_sector_leaderboard(
     sector_base.loc[leader_share >= float(concentration_settings["heavy_share"]), "concentration_penalty"] = float(concentration_settings["heavy_penalty"])
     micro_sample_mask = (scan_member_count <= 2.0) & (leader_share >= float(concentration_settings["warn_share"]))
     sector_base.loc[micro_sample_mask, "concentration_penalty"] = _coerce_numeric(sector_base.loc[micro_sample_mask, "concentration_penalty"]).fillna(0.0) + float(concentration_settings["micro_sample_penalty"])
-    sector_base["intraday_penalty_total"] = _coerce_numeric(sector_base["breadth_penalty"]).fillna(0.0) + _coerce_numeric(sector_base["concentration_penalty"]).fillna(0.0)
-    sector_base["intraday_sector_score"] = sector_base["intraday_sector_score_raw"] - sector_base["intraday_penalty_total"]
+    sector_base["intraday_penalty_total"] = 0.0
+    sector_base["intraday_sector_score"] = sector_base["intraday_sector_score_raw"]
     sector_base["today_sector_score"] = sector_base["intraday_sector_score"]
+    price_strong_cutoff = _coerce_numeric(sector_base["price_block_score"]).quantile(0.75)
+    flow_strong_cutoff = _coerce_numeric(sector_base["flow_block_score"]).quantile(0.75)
+    participation_strong_cutoff = _coerce_numeric(sector_base["participation_block_score"]).quantile(0.75)
+    if pd.isna(price_strong_cutoff):
+        price_strong_cutoff = 0.0
+    if pd.isna(flow_strong_cutoff):
+        flow_strong_cutoff = 0.0
+    if pd.isna(participation_strong_cutoff):
+        participation_strong_cutoff = 0.0
+    strong_price_signal = (
+        (_coerce_numeric(sector_base["price_block_score"]).fillna(0.0) > 0.0)
+        & (_coerce_numeric(sector_base["price_block_score"]).fillna(0.0) >= float(price_strong_cutoff))
+    )
+    strong_flow_signal = (
+        (_coerce_numeric(sector_base["flow_block_score"]).fillna(0.0) > 0.0)
+        & (_coerce_numeric(sector_base["flow_block_score"]).fillna(0.0) >= float(flow_strong_cutoff))
+    )
+    strong_participation_signal = (
+        (_coerce_numeric(sector_base["participation_block_score"]).fillna(0.0) > 0.0)
+        & (_coerce_numeric(sector_base["participation_block_score"]).fillna(0.0) >= float(participation_strong_cutoff))
+        & (_coerce_numeric(sector_base["signal_breadth_count"]).fillna(0.0) >= 3.0)
+        & (_coerce_numeric(sector_base["scan_coverage"]).fillna(0.0) >= 0.30)
+    )
+    sector_base["rank_shift_limit"] = float(INTRADAY_INDUSTRY_RANK_TETHER["base_shift"])
+    sector_base.loc[strong_price_signal & strong_flow_signal, "rank_shift_limit"] = float(INTRADAY_INDUSTRY_RANK_TETHER["strong_shift"])
+    sector_base.loc[strong_price_signal & strong_flow_signal & strong_participation_signal, "rank_shift_limit"] = float(INTRADAY_INDUSTRY_RANK_TETHER["very_strong_shift"])
     sector_base["sector_confidence_score"] = 0.0
     sector_base.loc[sector_base["scan_member_count"] >= 5, "sector_confidence_score"] += 1.0
     sector_base.loc[sector_base["scan_coverage"] >= 0.45, "sector_confidence_score"] += 1.0
-    sector_base.loc[sector_base["breadth_up_rate"] >= 0.55, "sector_confidence_score"] += 0.75
-    sector_base.loc[sector_base["breadth_balance"] >= 0.15, "sector_confidence_score"] += 0.75
-    sector_base.loc[sector_base["breadth_reliability"] >= 0.8, "sector_confidence_score"] += 0.5
-    sector_base.loc[sector_base["leader_concentration_share"] <= 0.40, "sector_confidence_score"] += 0.75
-    sector_base.loc[(sector_base["industry_up_rank_norm"] >= 0.7) & (sector_base["participation_block_score"] >= 1.5), "sector_confidence_score"] += 0.5
+    sector_base.loc[sector_base["signal_breadth_count"] >= 3, "sector_confidence_score"] += 0.75
+    sector_base.loc[sector_base["signal_breadth_share"] >= 0.75, "sector_confidence_score"] += 0.5
+    sector_base.loc[strong_price_signal, "sector_confidence_score"] += 0.5
+    sector_base.loc[strong_flow_signal, "sector_confidence_score"] += 0.5
+    sector_base.loc[(sector_base["industry_up_rank_norm"] >= 0.7) & strong_participation_signal, "sector_confidence_score"] += 0.5
     sector_base["sector_confidence"] = sector_base["sector_confidence_score"].apply(_build_sector_confidence)
     sector_base["sector_caution"] = sector_base.apply(
         lambda row: _build_sector_caution_tags(
             [
                 "サンプル少" if float(row.get("scan_member_count", 0.0) or 0.0) < 4 or float(row.get("scan_coverage", 0.0) or 0.0) < 0.25 else "",
-                "breadth母数少" if float(row.get("breadth_sample_count", 0.0) or 0.0) < float(breadth_settings["warn_sample"]) or float(row.get("breadth_reliability", 0.0) or 0.0) < 0.7 else "",
+                "ランキング広がり弱い" if float(row.get("signal_breadth_count", 0.0) or 0.0) <= 1.0 or float(row.get("signal_breadth_share", 0.0) or 0.0) < 0.5 else "",
+                "scan偏在" if float(row.get("scan_member_share_of_market_scan", 0.0) or 0.0) < 0.03 and float(row.get("scan_member_count", 0.0) or 0.0) < 4.0 else "",
+                "live追認弱め" if bool(row.get("breadth_warning_flag")) else "",
                 "一部銘柄偏重" if float(row.get("leader_concentration_share", 0.0) or 0.0) > 0.55 else "",
-                "広がり弱い" if bool(row.get("breadth_warning_flag")) else "",
-                "業種順位先行" if float(row.get("industry_up_rank_norm", 0.0) or 0.0) >= 0.8 and float(row.get("participation_block_score", 0.0) or 0.0) < float(row.get("price_block_score", 0.0) or 0.0) * 0.8 else "",
+                "業種順位先行" if float(row.get("industry_up_rank_norm", 0.0) or 0.0) >= 0.8 and float(row.get("rank_shift_limit", 0.0) or 0.0) <= float(INTRADAY_INDUSTRY_RANK_TETHER["base_shift"]) else "",
             ]
         ),
         axis=1,
@@ -2519,6 +2571,17 @@ def _build_intraday_sector_leaderboard(
     sector_base = sector_base.sort_values(
         ["intraday_sector_score", "price_block_score", "flow_block_score", "participation_block_score"],
         ascending=[False, False, False, False],
+    ).reset_index(drop=True)
+    sector_base["score_rank"] = range(1, len(sector_base) + 1)
+    sector_base["industry_anchor_rank"] = _coerce_numeric(sector_base["industry_rank_live"]).fillna(sector_base["score_rank"])
+    rank_floor = sector_base["industry_anchor_rank"] - _coerce_numeric(sector_base["rank_shift_limit"]).fillna(0.0)
+    rank_ceiling = sector_base["industry_anchor_rank"] + _coerce_numeric(sector_base["rank_shift_limit"]).fillna(0.0)
+    sector_base["tethered_rank"] = _coerce_numeric(sector_base["score_rank"]).fillna(0.0)
+    sector_base["tethered_rank"] = sector_base["tethered_rank"].where(sector_base["tethered_rank"] >= rank_floor, rank_floor)
+    sector_base["tethered_rank"] = sector_base["tethered_rank"].where(sector_base["tethered_rank"] <= rank_ceiling, rank_ceiling)
+    sector_base = sector_base.sort_values(
+        ["tethered_rank", "score_rank", "industry_anchor_rank", "today_sector_score", "price_block_score", "flow_block_score", "participation_block_score"],
+        ascending=[True, True, True, False, False, False, False],
     ).reset_index(drop=True)
     sector_base["today_rank"] = range(1, len(sector_base) + 1)
     return sector_base
@@ -3174,18 +3237,13 @@ TODAY_SECTOR_DISPLAY_COLUMNS = [
     "today_rank",
     "sector_name",
     "leaders",
-    "n",
+    "sector_confidence",
+    "sector_caution",
     "industry_rank_live",
-    "breadth",
-    "price_up_count",
-    "turnover_count",
-    "volume_surge_count",
-    "turnover_surge_count",
     "price_block_score",
     "flow_block_score",
     "participation_block_score",
-    "sector_confidence",
-    "sector_caution",
+    "scan_member_count",
 ]
 
 PERSISTENCE_DISPLAY_COLUMNS = [
@@ -3232,7 +3290,7 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
     if df is None or df.empty:
         return pd.DataFrame(columns=columns), compatibility_notes
     prepared = df.copy()
-    string_columns = {"sector_name", "breadth", "representative_stock", "name", "candidate_quality", "entry_fit", "selection_reason", "risk_note", "candidate_commentary", "finance_health_flag", "sector_confidence", "sector_caution"}
+    string_columns = {"sector_name", "breadth", "leaders", "representative_stock", "name", "candidate_quality", "entry_fit", "selection_reason", "risk_note", "candidate_commentary", "finance_health_flag", "sector_confidence", "sector_caution"}
     for column in columns:
         if column not in prepared.columns:
             prepared[column] = "" if column in string_columns else pd.NA
@@ -3377,8 +3435,31 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
             "buy_candidate_count": int(len(swing_candidates["1m"])),
             "center_stock_count": int(len(sector_representatives)),
             "ranking_candidate_count": int(len(filtered_ranking_df)),
-            "sector_summary_scope": "intraday_market_scan_normalized_by_sector_constituents",
-            "breadth_scope": "focus_stocks_positive_vs_negative_within_market_scan",
+            "sector_summary_scope": "industry_up_anchor_plus_scan_price_flow_participation",
+            "breadth_scope": "live_data_is_reference_only_for_caution_and_representatives",
+            "today_sector_removed_live_inputs": [
+                "median_live_ret_norm",
+                "turnover_ratio_median_norm",
+                "live_turnover_total_norm",
+                "breadth_up_rate",
+                "breadth_balance",
+                "breadth_penalty",
+                "concentration_penalty",
+            ],
+            "today_sector_participation_inputs": [
+                "signal_breadth_count",
+                "signal_breadth_share",
+                "scan_coverage",
+                "scan_member_count",
+                "scan_member_share_of_market_scan",
+            ],
+            "today_sector_rank_tether": {
+                "anchor": "industry_up",
+                "base_shift": int(INTRADAY_INDUSTRY_RANK_TETHER["base_shift"]),
+                "strong_shift": int(INTRADAY_INDUSTRY_RANK_TETHER["strong_shift"]),
+                "very_strong_shift": int(INTRADAY_INDUSTRY_RANK_TETHER["very_strong_shift"]),
+                "rule": "price_and_flow_must_be_strong_to_expand_shift",
+            },
             "includes_kabu": True,
             "non_corporate_products": product_filter_diag["non_corporate_products"],
             "tuning_compare": tuning_compare,
