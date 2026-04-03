@@ -26820,14 +26820,5 @@
       }
     },
     "write_completed": true
-  },
-  "snapshot_source_label": "latest_1530.json を更新しました",
-  "snapshot_backend_name": "local",
-  "snapshot_warning_message": "",
-  "paths": {
-    "json_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\latest_1530.json",
-    "markdown_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\latest_1530.md",
-    "dated_json_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-04-04_003843_1530.json",
-    "dated_markdown_path": "D:\\株アプリ\\sector-strength-app\\data\\snapshots\\2026-04-04_003843_1530.md"
   }
 }
