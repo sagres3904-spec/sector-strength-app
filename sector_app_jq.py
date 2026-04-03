@@ -422,6 +422,27 @@ REPRESENTATIVE_SORT_COLUMNS_BASELINE = ["sector_name", "representative_score", "
 REPRESENTATIVE_SORT_ASCENDING_BASELINE = [True, False, False, False, False]
 REPRESENTATIVE_SORT_COLUMNS = ["sector_name", "stock_turnover_share_of_sector", "representative_score", "avg_turnover_20d", "live_turnover", "live_ret_vs_prev_close"]
 REPRESENTATIVE_SORT_ASCENDING = [True, False, False, False, False, False]
+DEEP_WATCH_MUST_HAVE_TOP_SECTORS = 8
+DEEP_WATCH_MUST_HAVE_PER_SECTOR = 2
+DEEP_WATCH_MUST_HAVE_MAX = 16
+CENTER_LEADER_TRACE_LIMIT = 10
+CENTER_LEADER_CENTRALITY_WEIGHTS = {
+    "sector_contribution_full": 1.55,
+    "contribution_rank_in_sector": 1.05,
+    "turnover_rank_in_sector": 0.95,
+    "avg_turnover_20d": 0.90,
+    "avg_volume_20d": 0.45,
+    "stock_turnover_share_of_sector": 0.55,
+    "liquidity_ok": 0.50,
+}
+CENTER_LEADER_TODAY_WEIGHTS = {
+    "live_ret_vs_prev_close": 1.80,
+    "live_ret_from_open": 0.80,
+    "closing_strength_signal": 0.80,
+    "live_turnover_ratio_20d": 0.60,
+    "live_volume_ratio_20d": 0.45,
+    "sector_relative_live_ret": 0.85,
+}
 SECTOR_CONFIDENCE_PRIORITY = {"高": 2, "中": 1, "低": 0}
 SWING_SELECTION_CONFIG_BASELINE = {
     "extension_threshold_1w": 12.0,
@@ -2322,6 +2343,70 @@ def _unregister_all(settings: dict[str, Any], token: str) -> None:
         raise PipelineFailClosed(f"fail-closed: unregister all failed status={response.status_code} body={_short_body(response.text)}")
 
 
+def _build_deep_watch_must_have_pool(market_scan_df: pd.DataFrame, base_df: pd.DataFrame) -> pd.DataFrame:
+    if base_df.empty:
+        return pd.DataFrame()
+    market_scan_cols = [column for column in ["code", "ranking_combo_score", "ranking_union_member", "industry_basket_member"] if column in market_scan_df.columns]
+    market_scan_meta = market_scan_df[market_scan_cols].copy() if market_scan_cols else pd.DataFrame(columns=["code"])
+    if not market_scan_meta.empty:
+        market_scan_meta["code"] = market_scan_meta["code"].astype(str)
+        market_scan_meta = market_scan_meta.drop_duplicates("code")
+    working = base_df.copy()
+    working["code"] = working["code"].astype(str)
+    working["sector_name"] = working.get("sector_name", pd.Series(dtype=str)).map(_normalize_industry_name)
+    working = working[working["code"].map(_is_code4)].copy()
+    working = working[working["sector_name"].astype(str).str.strip() != ""].copy()
+    if working.empty:
+        return working
+    if not market_scan_meta.empty:
+        working = working.merge(market_scan_meta, on="code", how="left")
+    working["ranking_combo_score"] = _coerce_numeric(working.get("ranking_combo_score", pd.Series([0.0] * len(working), index=working.index))).fillna(0.0)
+    working["ranking_union_member"] = working.get("ranking_union_member", pd.Series(False, index=working.index)).fillna(False).astype(bool)
+    working["industry_basket_member"] = working.get("industry_basket_member", pd.Series(False, index=working.index)).fillna(False).astype(bool)
+    sector_turnover_total = working.groupby("sector_name")["TradingValue_latest"].transform("sum")
+    working["sector_contribution_full"] = _safe_ratio(working["TradingValue_latest"], sector_turnover_total).fillna(0.0)
+    working["contribution_rank_in_sector"] = working.groupby("sector_name")["sector_contribution_full"].rank(method="dense", ascending=False)
+    working["turnover_rank_in_sector"] = working.groupby("sector_name")["avg_turnover_20d"].rank(method="dense", ascending=False)
+    turnover_floor = float(_coerce_numeric(working["avg_turnover_20d"]).median(skipna=True) or 0.0)
+    volume_floor = float(_coerce_numeric(working["avg_volume_20d"]).median(skipna=True) or 0.0)
+    working["liquidity_ok"] = (
+        _coerce_numeric(working["avg_turnover_20d"]).fillna(0.0) >= turnover_floor
+    ) & (
+        _coerce_numeric(working["avg_volume_20d"]).fillna(0.0) >= volume_floor
+    )
+    top_sector_names = (
+        working[["sector_name", "sector_rank_1w"]]
+        .dropna()
+        .drop_duplicates()
+        .sort_values(["sector_rank_1w", "sector_name"])
+        .head(DEEP_WATCH_MUST_HAVE_TOP_SECTORS)["sector_name"]
+        .astype(str)
+        .tolist()
+    )
+    working = working[working["sector_name"].astype(str).isin(top_sector_names)].copy()
+    if working.empty:
+        return working
+    working["must_have_priority"] = 0.0
+    working["must_have_priority"] += _score_percentile(working["sector_contribution_full"]) * 1.60
+    working["must_have_priority"] += _score_rank_ascending(working["contribution_rank_in_sector"]) * 1.10
+    working["must_have_priority"] += _score_rank_ascending(working["turnover_rank_in_sector"]) * 1.00
+    working["must_have_priority"] += _score_percentile(working["avg_turnover_20d"]) * 0.85
+    working["must_have_priority"] += _score_percentile(working["avg_volume_20d"]) * 0.45
+    working["must_have_priority"] += _score_percentile(working["ranking_combo_score"]) * 0.65
+    working["must_have_priority"] += _score_percentile(working["ret_1w"]) * 0.35
+    working["must_have_priority"] += _score_percentile(working["rel_1w"]) * 0.35
+    working.loc[working["ranking_union_member"], "must_have_priority"] += 0.45
+    working.loc[working["industry_basket_member"], "must_have_priority"] += 0.20
+    working.loc[working["liquidity_ok"], "must_have_priority"] += 0.55
+    working = working.sort_values(
+        ["sector_rank_1w", "must_have_priority", "ranking_combo_score", "TradingValue_latest", "avg_turnover_20d"],
+        ascending=[True, False, False, False, False],
+        kind="mergesort",
+    ).copy()
+    working["must_have_rank_in_sector"] = working.groupby("sector_name").cumcount() + 1
+    return working
+
+
 def select_deep_watch_universe(market_scan_df: pd.DataFrame, base_df: pd.DataFrame, settings: dict[str, Any], mode: str) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Select the 50-name deep-watch universe for board enrichment."""
     logger.info("select_deep_watch_universe start mode=%s", mode)
@@ -2345,12 +2430,64 @@ def select_deep_watch_universe(market_scan_df: pd.DataFrame, base_df: pd.DataFra
     duplicate_count = int(combined["code"].duplicated().sum())
     combined = combined[combined["code"].map(_is_code4)].copy()
     combined = combined.sort_values(["combined_priority", "TradingValue_latest"], ascending=[False, False]).drop_duplicates("code")
-    selected = combined.head(register_limit).copy()
+    combined["was_in_selected50"] = False
+    combined["was_in_must_have"] = False
+    combined["deep_watch_selected_reason"] = ""
+    combined["deep_watch_combined_priority"] = _coerce_numeric(combined["combined_priority"]).fillna(0.0)
+    must_have_pool = _build_deep_watch_must_have_pool(market_scan_df, deep_candidates)
+    must_have_selected = pd.DataFrame(columns=combined.columns.tolist() + ["must_have_priority", "must_have_rank_in_sector"])
+    if not must_have_pool.empty:
+        must_have_selected = (
+            must_have_pool[must_have_pool["must_have_rank_in_sector"] <= DEEP_WATCH_MUST_HAVE_PER_SECTOR]
+            .head(DEEP_WATCH_MUST_HAVE_MAX)
+            .copy()
+        )
+        if not must_have_selected.empty:
+            must_have_codes = must_have_selected["code"].astype(str).tolist()
+            combined.loc[combined["code"].astype(str).isin(must_have_codes), "was_in_must_have"] = True
+    selected_frames: list[pd.DataFrame] = []
+    selected_codes: set[str] = set()
+    if not must_have_selected.empty:
+        must_have_selected = must_have_selected.merge(
+            combined.drop(columns=[column for column in ["must_have_priority", "must_have_rank_in_sector"] if column in combined.columns]),
+            on="code",
+            how="left",
+            suffixes=("", "_combined"),
+        )
+        for column in ["combined_priority", "deep_watch_combined_priority", "candidate_seed_score", "ranking_combo_score", "sector_name", "name"]:
+            combined_col = f"{column}_combined"
+            if column not in must_have_selected.columns and combined_col in must_have_selected.columns:
+                must_have_selected[column] = must_have_selected[combined_col]
+            elif combined_col in must_have_selected.columns:
+                must_have_selected[column] = must_have_selected[column].where(must_have_selected[column].notna(), must_have_selected[combined_col])
+        must_have_selected["was_in_selected50"] = True
+        must_have_selected["was_in_must_have"] = True
+        must_have_selected["deep_watch_selected_reason"] = "must_have_lane"
+        must_have_selected["deep_watch_combined_priority"] = _coerce_numeric(must_have_selected.get("combined_priority", must_have_selected.get("deep_watch_combined_priority", 0.0))).fillna(0.0)
+        must_have_selected = must_have_selected[~must_have_selected["code"].astype(str).isin(selected_codes)].copy()
+        selected_frames.append(must_have_selected)
+        selected_codes.update(must_have_selected["code"].astype(str).tolist())
+    remaining_slots = max(register_limit - len(selected_codes), 0)
+    if remaining_slots > 0:
+        remaining = combined[~combined["code"].astype(str).isin(selected_codes)].head(remaining_slots).copy()
+        if not remaining.empty:
+            remaining["was_in_selected50"] = True
+            remaining["deep_watch_selected_reason"] = remaining["was_in_must_have"].map(lambda value: "must_have_plus_priority" if bool(value) else "priority_fill")
+            selected_frames.append(remaining)
+            selected_codes.update(remaining["code"].astype(str).tolist())
+    selected = pd.concat(selected_frames, ignore_index=True, sort=False) if selected_frames else combined.head(register_limit).copy()
+    if not selected.empty:
+        selected["was_in_selected50"] = True
+        selected["was_in_must_have"] = selected.get("was_in_must_have", pd.Series(False, index=selected.index)).fillna(False).astype(bool)
+        selected["deep_watch_selected_reason"] = selected.get("deep_watch_selected_reason", pd.Series(["priority_fill"] * len(selected), index=selected.index)).replace("", "priority_fill")
+        selected["deep_watch_combined_priority"] = _coerce_numeric(selected.get("deep_watch_combined_priority", selected.get("combined_priority", 0.0))).fillna(0.0)
     logger.debug("deep-watch candidate_count=%s selected=%s excluded_duplicate=%s excluded_invalid=%s excluded_market_unknown=%s", pre_count, len(selected), duplicate_count, invalid_code_count, 0)
     logger.info("select_deep_watch_universe end selected=%s", len(selected))
     return selected, {
         "candidate_count": pre_count,
         "selected_count": int(len(selected)),
+        "must_have_selected_count": int(selected.get("was_in_must_have", pd.Series(dtype=bool)).fillna(False).sum()) if not selected.empty else 0,
+        "must_have_selected_codes": selected.loc[selected.get("was_in_must_have", pd.Series(False, index=selected.index)).fillna(False), "code"].astype(str).tolist()[:20] if not selected.empty else [],
         "excluded_invalid_code": invalid_code_count,
         "excluded_duplicate": duplicate_count,
         "excluded_market_unknown": 0,
@@ -3459,43 +3596,231 @@ def _build_sector_persistence_tables(base_df: pd.DataFrame, *, display_base_df: 
     return {"1w": _build("1w", "sector_rank_1w"), "1m": _build("1m", "sector_rank_1m"), "3m": _build("3m", "sector_rank_3m")}
 
 
-def _build_sector_representatives(
+def _empty_sector_representatives_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "sector_name",
+            "representative_rank",
+            "code",
+            "name",
+            "live_price",
+            "live_ret_vs_prev_close",
+            "live_turnover",
+            "stock_turnover_share_of_sector",
+            "representative_score",
+            "rep_score_total",
+            "rep_score_centrality",
+            "rep_score_today_leadership",
+            "rep_score_sanity",
+            "rep_selected_reason",
+            "rep_excluded_reason",
+            "rep_fallback_reason",
+            "representative_selected_reason",
+            "representative_quality_flag",
+            "representative_fallback_reason",
+            "was_in_selected50",
+            "was_in_must_have",
+            "nikkei_search",
+            "material_link",
+        ]
+    )
+
+
+def _score_sector_center_candidates(
     merged: pd.DataFrame,
     today_sector_leaderboard: pd.DataFrame,
-    *,
-    representative_weights_override: dict[str, float] | None = None,
-    sort_columns: list[str] | None = None,
-    sort_ascending: list[bool] | None = None,
+    display_base_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    if merged.empty or today_sector_leaderboard.empty:
-        return pd.DataFrame(columns=["sector_name", "representative_rank", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "stock_turnover_share_of_sector", "representative_score", "nikkei_search", "material_link"])
+    if merged.empty or today_sector_leaderboard.empty or display_base_df.empty:
+        return pd.DataFrame()
     sorted_today_sector_leaderboard = _sort_today_sector_leaderboard_for_display(today_sector_leaderboard)
-    sector_key_col = _sector_key_column(sorted_today_sector_leaderboard, merged)
-    leaderboard_sector_keys = sorted_today_sector_leaderboard.head(10)[sector_key_col].astype(str).tolist()
-    working = merged[merged[sector_key_col].astype(str).isin(leaderboard_sector_keys)].copy()
+    sector_key_col = _sector_key_column(sorted_today_sector_leaderboard, merged, display_base_df)
+    display_sector_keys = set(sorted_today_sector_leaderboard[sector_key_col].astype(str).tolist())
+    working = merged[merged[sector_key_col].astype(str).isin(display_sector_keys)].copy()
     if working.empty:
-        return pd.DataFrame(columns=["sector_name", "representative_rank", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "stock_turnover_share_of_sector", "representative_score", "nikkei_search", "material_link"])
+        return working
     sector_scores = sorted_today_sector_leaderboard[
-        [sector_key_col, "sector_name", "price_block_score", "flow_block_score", "participation_block_score", "intraday_sector_score"]
+        [sector_key_col, "sector_name", "today_rank", "price_block_score", "flow_block_score", "participation_block_score", "intraday_sector_score"]
     ].drop_duplicates(sector_key_col).rename(columns={"sector_name": "leaderboard_sector_name"})
     working = working.merge(sector_scores, on=sector_key_col, how="left")
     working["sector_name"] = working.get("leaderboard_sector_name", working["sector_name"]).fillna(working["sector_name"])
+    full_base = display_base_df.copy()
+    full_base["sector_name"] = full_base.get("sector_name", pd.Series(dtype=str)).map(_normalize_industry_name)
+    if sector_key_col == "normalized_sector_name":
+        full_base["normalized_sector_name"] = full_base.get("original_sector_name", full_base["sector_name"]).map(_normalize_industry_key)
+    full_base = full_base[full_base[sector_key_col].astype(str).isin(display_sector_keys)].copy()
+    sector_turnover_total_full = full_base.groupby(sector_key_col)["TradingValue_latest"].transform("sum")
+    full_base["sector_contribution_full"] = _safe_ratio(full_base["TradingValue_latest"], sector_turnover_total_full).fillna(0.0)
+    full_base["contribution_rank_in_sector"] = full_base.groupby(sector_key_col)["sector_contribution_full"].rank(method="dense", ascending=False)
+    full_base["turnover_rank_in_sector"] = full_base.groupby(sector_key_col)["avg_turnover_20d"].rank(method="dense", ascending=False)
+    global_turnover_floor = float(_coerce_numeric(full_base["avg_turnover_20d"]).median(skipna=True) or 0.0)
+    global_volume_floor = float(_coerce_numeric(full_base["avg_volume_20d"]).median(skipna=True) or 0.0)
+    sector_turnover_floor = full_base.groupby(sector_key_col)["avg_turnover_20d"].transform(lambda s: float(_coerce_numeric(s).median(skipna=True) or 0.0))
+    sector_volume_floor = full_base.groupby(sector_key_col)["avg_volume_20d"].transform(lambda s: float(_coerce_numeric(s).median(skipna=True) or 0.0))
+    turnover_threshold = (_coerce_numeric(sector_turnover_floor).fillna(0.0) * 0.20).clip(lower=global_turnover_floor * 0.01)
+    volume_threshold = (_coerce_numeric(sector_volume_floor).fillna(0.0) * 0.20).clip(lower=global_volume_floor * 0.01)
+    full_base["liquidity_ok"] = (
+        _coerce_numeric(full_base["avg_turnover_20d"]).fillna(0.0) >= turnover_threshold
+    ) & (
+        _coerce_numeric(full_base["avg_volume_20d"]).fillna(0.0) >= volume_threshold
+    )
+    base_metrics = full_base[["code", sector_key_col, "sector_contribution_full", "contribution_rank_in_sector", "turnover_rank_in_sector", "liquidity_ok"]].drop_duplicates("code")
+    working = working.merge(base_metrics, on=["code", sector_key_col], how="left")
+    working["was_in_selected50"] = working.get("was_in_selected50", pd.Series(True, index=working.index)).fillna(True).astype(bool)
+    working["was_in_must_have"] = working.get("was_in_must_have", pd.Series(False, index=working.index)).fillna(False).astype(bool)
     working["sector_live_turnover_total"] = working.groupby(sector_key_col)["live_turnover"].transform("sum")
     working["stock_turnover_share_of_sector"] = _safe_ratio(working["live_turnover"], working["sector_live_turnover_total"]).fillna(0.0)
-    working["representative_score"] = 0.0
-    representative_weights = dict(representative_weights_override or REPRESENTATIVE_STOCK_SCORE_WEIGHTS)
-    representative_weights.update({
-        "stock_turnover_share_of_sector": 1.75 if representative_weights_override is None else representative_weights.get("stock_turnover_share_of_sector", 1.25),
-        "flow_block_score": 0.25 if representative_weights_override is None else representative_weights.get("flow_block_score", 0.35),
-        "price_block_score": 0.10 if representative_weights_override is None else representative_weights.get("price_block_score", 0.25),
-    })
-    for column, weight in representative_weights.items():
-        working["representative_score"] += _score_percentile(working[column]) * weight
-    sort_columns = sort_columns or REPRESENTATIVE_SORT_COLUMNS
-    sort_ascending = sort_ascending or REPRESENTATIVE_SORT_ASCENDING
-    working = working.sort_values(sort_columns, ascending=sort_ascending).copy()
-    working["representative_rank"] = working.groupby(sector_key_col).cumcount() + 1
-    return working[working["representative_rank"] <= 3][["sector_name", "representative_rank", "code", "name", "live_price", "live_ret_vs_prev_close", "live_turnover", "stock_turnover_share_of_sector", "representative_score", "nikkei_search", "material_link"]].reset_index(drop=True)
+    intraday_push = (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) - _coerce_numeric(working["live_ret_from_open"]).fillna(0.0)).clip(lower=-15.0, upper=15.0)
+    working["closing_strength_signal"] = _coerce_numeric(working["high_close_score"]).fillna(0.0) + intraday_push * 0.05
+    working["sector_live_ret_median"] = working.groupby(sector_key_col)["live_ret_vs_prev_close"].transform(lambda s: float(_coerce_numeric(s).median(skipna=True) or 0.0))
+    working["sector_closing_strength_median"] = working.groupby(sector_key_col)["closing_strength_signal"].transform(lambda s: float(_coerce_numeric(s).median(skipna=True) or 0.0))
+    working["sector_relative_live_ret"] = _coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) - working["sector_live_ret_median"]
+    working["sector_positive_candidate_count"] = working.groupby(sector_key_col)["live_ret_vs_prev_close"].transform(lambda s: int((_coerce_numeric(s).fillna(-999.0) >= 0.0).sum()))
+    working["sector_negative_candidate_count"] = working.groupby(sector_key_col)["live_ret_vs_prev_close"].transform(lambda s: int((_coerce_numeric(s).fillna(0.0) < 0.0).sum()))
+    working["exclude_spike"] = (
+        (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) >= 12.0)
+        & (_coerce_numeric(working["live_turnover_ratio_20d"]).fillna(0.0) >= 2.5)
+        & (
+            (_coerce_numeric(working["price_vs_ma20_pct"]).fillna(0.0) >= 18.0)
+            | ~working["liquidity_ok"].fillna(False)
+            | (_coerce_numeric(working["avg_turnover_20d"]).fillna(0.0) < global_turnover_floor)
+        )
+    )
+    working["rep_score_centrality"] = 0.0
+    working["rep_score_centrality"] += _score_percentile(working["sector_contribution_full"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["sector_contribution_full"]
+    working["rep_score_centrality"] += _score_rank_ascending(working["contribution_rank_in_sector"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["contribution_rank_in_sector"]
+    working["rep_score_centrality"] += _score_rank_ascending(working["turnover_rank_in_sector"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["turnover_rank_in_sector"]
+    working["rep_score_centrality"] += _score_percentile(working["avg_turnover_20d"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["avg_turnover_20d"]
+    working["rep_score_centrality"] += _score_percentile(working["avg_volume_20d"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["avg_volume_20d"]
+    working["rep_score_centrality"] += _score_percentile(working["stock_turnover_share_of_sector"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["stock_turnover_share_of_sector"]
+    working.loc[working["liquidity_ok"].fillna(False), "rep_score_centrality"] += CENTER_LEADER_CENTRALITY_WEIGHTS["liquidity_ok"]
+    working["rep_score_today_leadership"] = 0.0
+    working["rep_score_today_leadership"] += _score_percentile(working["live_ret_vs_prev_close"]) * CENTER_LEADER_TODAY_WEIGHTS["live_ret_vs_prev_close"]
+    working["rep_score_today_leadership"] += _score_percentile(working["live_ret_from_open"]) * CENTER_LEADER_TODAY_WEIGHTS["live_ret_from_open"]
+    working["rep_score_today_leadership"] += _score_percentile(working["closing_strength_signal"]) * CENTER_LEADER_TODAY_WEIGHTS["closing_strength_signal"]
+    working["rep_score_today_leadership"] += _score_percentile(working["live_turnover_ratio_20d"]) * CENTER_LEADER_TODAY_WEIGHTS["live_turnover_ratio_20d"]
+    working["rep_score_today_leadership"] += _score_percentile(working["live_volume_ratio_20d"]) * CENTER_LEADER_TODAY_WEIGHTS["live_volume_ratio_20d"]
+    working["rep_score_today_leadership"] += _score_percentile(working["sector_relative_live_ret"]) * CENTER_LEADER_TODAY_WEIGHTS["sector_relative_live_ret"]
+    working["rep_score_sanity"] = 0.0
+    working.loc[working["liquidity_ok"].fillna(False), "rep_score_sanity"] += 1.00
+    working.loc[~working["exclude_spike"].fillna(False), "rep_score_sanity"] += 0.80
+    working.loc[_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(-999.0) >= 0.0, "rep_score_sanity"] += 0.60
+    working.loc[_coerce_numeric(working["closing_strength_signal"]).fillna(0.0) >= _coerce_numeric(working["sector_closing_strength_median"]).fillna(0.0), "rep_score_sanity"] += 0.45
+    weak_relative_close_mask = (
+        _coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) < _coerce_numeric(working["sector_live_ret_median"]).fillna(0.0)
+    ) & (
+        _coerce_numeric(working["closing_strength_signal"]).fillna(0.0) < _coerce_numeric(working["sector_closing_strength_median"]).fillna(0.0)
+    )
+    working.loc[weak_relative_close_mask, "rep_score_sanity"] -= 1.75
+    working.loc[(_coerce_numeric(working["live_turnover_ratio_20d"]).fillna(0.0) >= 1.20) & (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) < 0.0), "rep_score_sanity"] -= 1.50
+    working.loc[_coerce_numeric(working["live_ret_from_open"]).fillna(0.0) < 0.0, "rep_score_sanity"] -= 0.90
+    working.loc[_coerce_numeric(working["high_close_score"]).fillna(1.0) < 0.88, "rep_score_sanity"] -= 0.80
+    working["rep_score_total"] = working["rep_score_centrality"] + working["rep_score_today_leadership"] + working["rep_score_sanity"]
+    working["rep_hard_block"] = False
+    working["rep_excluded_reason"] = ""
+    hard_block_liquidity = ~working["liquidity_ok"].fillna(False)
+    hard_block_spike = working["exclude_spike"].fillna(False)
+    hard_block_negative = (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) < 0.0) & (_coerce_numeric(working["sector_positive_candidate_count"]).fillna(0.0) > 0.0)
+    working.loc[hard_block_liquidity, "rep_hard_block"] = True
+    working.loc[hard_block_liquidity, "rep_excluded_reason"] = "liquidity_not_ok"
+    working.loc[hard_block_spike, "rep_hard_block"] = True
+    working.loc[hard_block_spike, "rep_excluded_reason"] = working["rep_excluded_reason"].where(working["rep_excluded_reason"].astype(str) != "", "exclude_spike")
+    working.loc[hard_block_negative, "rep_hard_block"] = True
+    working.loc[hard_block_negative, "rep_excluded_reason"] = working["rep_excluded_reason"].where(working["rep_excluded_reason"].astype(str) != "", "negative_live_ret_while_positive_peer_exists")
+    working["rep_quality_pass"] = (
+        ~working["rep_hard_block"].fillna(False)
+        & (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(-999.0) >= 0.0)
+        & (_coerce_numeric(working["rep_score_today_leadership"]).fillna(0.0) >= 1.35)
+        & (_coerce_numeric(working["rep_score_sanity"]).fillna(0.0) >= 0.0)
+    )
+    working["rep_selected_reason"] = ""
+    working["rep_fallback_reason"] = ""
+    working["representative_selected_reason"] = ""
+    working["representative_quality_flag"] = "excluded"
+    working["representative_fallback_reason"] = ""
+    working["is_sector_center_candidate"] = ~working["rep_hard_block"].fillna(False)
+    return working
+
+
+def _build_sector_representatives(scored_candidates: pd.DataFrame) -> pd.DataFrame:
+    if scored_candidates.empty:
+        return _empty_sector_representatives_frame()
+    working = scored_candidates.copy()
+    sector_key_col = _sector_key_column(working)
+    representative_frames: list[pd.DataFrame] = []
+    for _, group in working.groupby(sector_key_col, dropna=False):
+        sector_group = group.sort_values(
+            ["rep_score_total", "rep_score_centrality", "live_ret_vs_prev_close", "stock_turnover_share_of_sector", "avg_turnover_20d"],
+            ascending=[False, False, False, False, False],
+            kind="mergesort",
+        ).copy()
+        quality = sector_group[sector_group["rep_quality_pass"].fillna(False)].copy()
+        chosen_frames: list[pd.DataFrame] = []
+        if not quality.empty:
+            quality = quality.head(3).copy()
+            quality["representative_quality_flag"] = "quality_pass"
+            chosen_frames.append(quality)
+        filled_codes = set(pd.concat(chosen_frames, ignore_index=True)["code"].astype(str).tolist()) if chosen_frames else set()
+        remaining_slots = max(3 - len(filled_codes), 0)
+        fallback_reason = ""
+        if remaining_slots > 0:
+            fallback_pool = sector_group[
+                (~sector_group["rep_hard_block"].fillna(False))
+                & (~sector_group["code"].astype(str).isin(filled_codes))
+            ].copy()
+            if not fallback_pool.empty:
+                if quality.empty:
+                    fallback_reason = "no_quality_candidate_met_center_leader_gate"
+                    if int(_coerce_numeric(fallback_pool["sector_positive_candidate_count"]).max() or 0) <= 0:
+                        fallback_reason = "no_positive_candidate_in_selected50"
+                else:
+                    fallback_reason = "filled_remaining_support_slots_with_best_available_nonblocked_candidates"
+                fallback_pool = fallback_pool.head(remaining_slots).copy()
+                fallback_pool["rep_fallback_reason"] = fallback_reason
+                fallback_pool["representative_fallback_reason"] = fallback_reason
+                fallback_pool["representative_quality_flag"] = "fallback"
+                chosen_frames.append(fallback_pool)
+        if not chosen_frames:
+            continue
+        chosen = pd.concat(chosen_frames, ignore_index=True).head(3).copy()
+        chosen["representative_rank"] = range(1, len(chosen) + 1)
+        chosen["rep_selected_reason"] = chosen["representative_rank"].map(lambda rank: "center_leader" if int(rank) == 1 else "sector_support_leader")
+        chosen["representative_selected_reason"] = chosen["rep_selected_reason"]
+        chosen.loc[chosen["representative_quality_flag"].astype(str).isin(["", "excluded", "nan"]), "representative_quality_flag"] = "quality_pass"
+        chosen.loc[chosen["rep_fallback_reason"].astype(str).eq(""), "rep_fallback_reason"] = chosen["representative_fallback_reason"]
+        chosen["representative_score"] = chosen["rep_score_total"]
+        representative_frames.append(
+            chosen[
+                [
+                    "sector_name",
+                    "representative_rank",
+                    "code",
+                    "name",
+                    "live_price",
+                    "live_ret_vs_prev_close",
+                    "live_turnover",
+                    "stock_turnover_share_of_sector",
+                    "representative_score",
+                    "rep_score_total",
+                    "rep_score_centrality",
+                    "rep_score_today_leadership",
+                    "rep_score_sanity",
+                    "rep_selected_reason",
+                    "rep_excluded_reason",
+                    "rep_fallback_reason",
+                    "representative_selected_reason",
+                    "representative_quality_flag",
+                    "representative_fallback_reason",
+                    "was_in_selected50",
+                    "was_in_must_have",
+                    "nikkei_search",
+                    "material_link",
+                ]
+            ]
+        )
+    if not representative_frames:
+        return _empty_sector_representatives_frame()
+    return pd.concat(representative_frames, ignore_index=True, sort=False)
 
 
 def _join_candidate_tags(tags: list[str]) -> str:
@@ -3553,6 +3878,16 @@ def _build_representative_stocks_map(sector_representatives: pd.DataFrame, *, se
                     "representative_rank": int(row.get("representative_rank", 0) or 0),
                     "code": str(row.get("code", "") or ""),
                     "name": str(row.get("name", "") or ""),
+                    "live_ret_vs_prev_close": float(row.get("live_ret_vs_prev_close", 0.0) or 0.0) if pd.notna(row.get("live_ret_vs_prev_close")) else None,
+                    "rep_score_total": float(row.get("rep_score_total", row.get("representative_score", 0.0)) or 0.0) if pd.notna(row.get("rep_score_total", row.get("representative_score", 0.0))) else None,
+                    "rep_score_centrality": float(row.get("rep_score_centrality", 0.0) or 0.0) if pd.notna(row.get("rep_score_centrality")) else None,
+                    "rep_score_today_leadership": float(row.get("rep_score_today_leadership", 0.0) or 0.0) if pd.notna(row.get("rep_score_today_leadership")) else None,
+                    "rep_score_sanity": float(row.get("rep_score_sanity", 0.0) or 0.0) if pd.notna(row.get("rep_score_sanity")) else None,
+                    "representative_selected_reason": str(row.get("representative_selected_reason", row.get("rep_selected_reason", "")) or ""),
+                    "representative_quality_flag": str(row.get("representative_quality_flag", "") or ""),
+                    "representative_fallback_reason": str(row.get("representative_fallback_reason", row.get("rep_fallback_reason", "")) or ""),
+                    "was_in_selected50": bool(row.get("was_in_selected50", True)),
+                    "was_in_must_have": bool(row.get("was_in_must_have", False)),
                 }
             )
         records_by_sector[str(sector_name or "")] = rows
@@ -4201,8 +4536,34 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
     return prepared.reindex(columns=columns), compatibility_notes
 
 
-def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.DataFrame, board_df: pd.DataFrame, base_df: pd.DataFrame, now_ts: datetime) -> dict[str, Any]:
+def build_live_snapshot(
+    mode: str,
+    ranking_df: pd.DataFrame,
+    industry_df: pd.DataFrame,
+    board_df: pd.DataFrame,
+    base_df: pd.DataFrame,
+    now_ts: datetime,
+    deep_watch_df: pd.DataFrame | None = None,
+) -> dict[str, Any]:
     merged = base_df.merge(board_df, on="code", how="inner")
+    if deep_watch_df is not None and not deep_watch_df.empty:
+        deep_watch_meta_cols = [
+            column
+            for column in [
+                "code",
+                "was_in_selected50",
+                "was_in_must_have",
+                "deep_watch_selected_reason",
+                "deep_watch_combined_priority",
+            ]
+            if column in deep_watch_df.columns
+        ]
+        if deep_watch_meta_cols:
+            merged = merged.merge(deep_watch_df[deep_watch_meta_cols].drop_duplicates("code"), on="code", how="left")
+    merged["was_in_selected50"] = merged.get("was_in_selected50", pd.Series(True, index=merged.index)).fillna(True).astype(bool)
+    merged["was_in_must_have"] = merged.get("was_in_must_have", pd.Series(False, index=merged.index)).fillna(False).astype(bool)
+    merged["deep_watch_selected_reason"] = merged.get("deep_watch_selected_reason", pd.Series(["priority_fill"] * len(merged), index=merged.index)).fillna("").replace("", "priority_fill")
+    merged["deep_watch_combined_priority"] = _coerce_numeric(merged.get("deep_watch_combined_priority", pd.Series([0.0] * len(merged), index=merged.index))).fillna(0.0)
     merged = _annotate_non_corporate_products(merged)
     merged["live_price"] = _coerce_numeric(merged["CurrentPrice"])
     merged["prev_close"] = _coerce_numeric(merged["PrevClose"])
@@ -4249,19 +4610,120 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
     today_sector_leaderboard = _build_intraday_sector_leaderboard(mode, filtered_ranking_df, industry_df, stock_merged, stock_base_df)
     baseline_today_sector_leaderboard = _sort_today_sector_leaderboard_for_display(baseline_today_sector_leaderboard)
     today_sector_leaderboard = _sort_today_sector_leaderboard_for_display(today_sector_leaderboard)
-    baseline_sector_representatives = _build_sector_representatives(
-        stock_merged,
-        baseline_today_sector_leaderboard,
-        representative_weights_override=REPRESENTATIVE_STOCK_SCORE_WEIGHTS_BASELINE,
-        sort_columns=REPRESENTATIVE_SORT_COLUMNS_BASELINE,
-        sort_ascending=REPRESENTATIVE_SORT_ASCENDING_BASELINE,
-    )
-    sector_representatives = _build_sector_representatives(stock_merged, today_sector_leaderboard)
+    baseline_representative_pool = _score_sector_center_candidates(stock_merged, baseline_today_sector_leaderboard, stock_base_df)
+    representative_pool = _score_sector_center_candidates(stock_merged, today_sector_leaderboard, stock_base_df)
+    baseline_sector_representatives = _build_sector_representatives(baseline_representative_pool)
+    sector_representatives = _build_sector_representatives(representative_pool)
     leaderboard_sector_key_col = _sector_key_column(today_sector_leaderboard, stock_merged)
-    top_sector_keys = set(today_sector_leaderboard.head(10)[leaderboard_sector_key_col].astype(str).tolist()) if not today_sector_leaderboard.empty else set()
     selected50_codes_by_sector = _group_sector_codes(stock_merged, sector_col=leaderboard_sector_key_col)
-    representative_candidate_pool = stock_merged[stock_merged[leaderboard_sector_key_col].astype(str).isin(top_sector_keys)].copy() if top_sector_keys else stock_merged.iloc[0:0].copy()
-    representative_candidate_codes_by_sector = _group_sector_codes(representative_candidate_pool, sector_col=leaderboard_sector_key_col)
+    sector_center_candidate_pool = representative_pool[representative_pool.get("is_sector_center_candidate", pd.Series(False, index=representative_pool.index)).fillna(False)].copy() if not representative_pool.empty else pd.DataFrame()
+    representative_candidate_codes_by_sector = _group_sector_codes(sector_center_candidate_pool, sector_col=leaderboard_sector_key_col)
+    representative_pool_with_selection = representative_pool.copy()
+    if not representative_pool_with_selection.empty:
+        representative_pool_with_selection["code"] = representative_pool_with_selection["code"].astype(str)
+    if not sector_representatives.empty:
+        representative_pool_with_selection = representative_pool_with_selection.merge(
+            sector_representatives[
+                [
+                    "code",
+                    "rep_selected_reason",
+                    "rep_fallback_reason",
+                    "representative_quality_flag",
+                    "representative_fallback_reason",
+                ]
+            ].drop_duplicates("code"),
+            on="code",
+            how="left",
+            suffixes=("", "_selected"),
+        )
+        representative_pool_with_selection["rep_selected_reason"] = representative_pool_with_selection["rep_selected_reason"].where(
+            representative_pool_with_selection["rep_selected_reason"].astype(str) != "",
+            representative_pool_with_selection.get("rep_selected_reason_selected", ""),
+        )
+        representative_pool_with_selection["rep_fallback_reason"] = representative_pool_with_selection["rep_fallback_reason"].where(
+            representative_pool_with_selection["rep_fallback_reason"].astype(str) != "",
+            representative_pool_with_selection.get("rep_fallback_reason_selected", ""),
+        )
+        representative_pool_with_selection["representative_quality_flag"] = representative_pool_with_selection["representative_quality_flag"].where(
+            representative_pool_with_selection["representative_quality_flag"].astype(str) != "excluded",
+            representative_pool_with_selection.get("representative_quality_flag_selected", "excluded"),
+        )
+        representative_pool_with_selection["representative_fallback_reason"] = representative_pool_with_selection["representative_fallback_reason"].where(
+            representative_pool_with_selection["representative_fallback_reason"].astype(str) != "",
+            representative_pool_with_selection.get("representative_fallback_reason_selected", ""),
+        )
+    for column in [
+        "rep_selected_reason",
+        "rep_fallback_reason",
+        "representative_quality_flag",
+        "representative_fallback_reason",
+    ]:
+        if column in representative_pool_with_selection.columns:
+            representative_pool_with_selection[column] = representative_pool_with_selection[column].where(
+                representative_pool_with_selection[column].notna(),
+                "",
+            )
+    positive_count_by_sector = (
+        representative_pool_with_selection.groupby(leaderboard_sector_key_col)["sector_positive_candidate_count"].max().to_dict()
+        if not representative_pool_with_selection.empty
+        else {}
+    )
+    negative_count_by_sector = (
+        representative_pool_with_selection.groupby(leaderboard_sector_key_col)["sector_negative_candidate_count"].max().to_dict()
+        if not representative_pool_with_selection.empty
+        else {}
+    )
+    representative_trace_by_sector: dict[str, list[dict[str, Any]]] = {}
+    representative_excluded_reason_by_sector: dict[str, dict[str, str]] = {}
+    if not representative_pool_with_selection.empty:
+        trace_source = representative_pool_with_selection.sort_values(
+            [leaderboard_sector_key_col, "rep_score_total", "rep_score_centrality", "live_ret_vs_prev_close"],
+            ascending=[True, False, False, False],
+            kind="mergesort",
+        ).copy()
+        for sector_key, group in trace_source.groupby(leaderboard_sector_key_col, dropna=False):
+            rows: list[dict[str, Any]] = []
+            reason_map: dict[str, str] = {}
+            for _, row in group.head(CENTER_LEADER_TRACE_LIMIT).iterrows():
+                code = str(row.get("code", "") or "")
+                selected_reason_raw = row.get("rep_selected_reason", "")
+                fallback_reason_raw = row.get("rep_fallback_reason", "")
+                excluded_reason_raw = row.get("rep_excluded_reason", "")
+                selected_reason = "" if pd.isna(selected_reason_raw) else str(selected_reason_raw or "")
+                fallback_reason = "" if pd.isna(fallback_reason_raw) else str(fallback_reason_raw or "")
+                excluded_reason = "" if pd.isna(excluded_reason_raw) else str(excluded_reason_raw or "")
+                if not excluded_reason and not selected_reason:
+                    excluded_reason = "not_selected_after_center_leader_ranking" if bool(row.get("is_sector_center_candidate")) else "not_in_sector_center_candidates"
+                if selected_reason:
+                    reason_map[code] = selected_reason
+                elif excluded_reason:
+                    reason_map[code] = excluded_reason
+                rows.append(
+                    {
+                        "code": code,
+                        "name": str(row.get("name", "") or ""),
+                        "was_in_selected50": bool(row.get("was_in_selected50", True)),
+                        "was_in_must_have": bool(row.get("was_in_must_have", False)),
+                        "rep_score_total": float(row.get("rep_score_total", 0.0) or 0.0) if pd.notna(row.get("rep_score_total")) else None,
+                        "rep_score_centrality": float(row.get("rep_score_centrality", 0.0) or 0.0) if pd.notna(row.get("rep_score_centrality")) else None,
+                        "rep_score_today_leadership": float(row.get("rep_score_today_leadership", 0.0) or 0.0) if pd.notna(row.get("rep_score_today_leadership")) else None,
+                        "rep_score_sanity": float(row.get("rep_score_sanity", 0.0) or 0.0) if pd.notna(row.get("rep_score_sanity")) else None,
+                        "rep_selected_reason": selected_reason,
+                        "rep_excluded_reason": excluded_reason,
+                        "rep_fallback_reason": fallback_reason,
+                        "representative_quality_flag": "" if pd.isna(row.get("representative_quality_flag", "")) else str(row.get("representative_quality_flag", "") or ""),
+                        "live_ret_vs_prev_close": float(row.get("live_ret_vs_prev_close", 0.0) or 0.0) if pd.notna(row.get("live_ret_vs_prev_close")) else None,
+                        "live_ret_from_open": float(row.get("live_ret_from_open", 0.0) or 0.0) if pd.notna(row.get("live_ret_from_open")) else None,
+                        "closing_strength": float(row.get("closing_strength_signal", 0.0) or 0.0) if pd.notna(row.get("closing_strength_signal")) else None,
+                        "sector_contribution_full": float(row.get("sector_contribution_full", 0.0) or 0.0) if pd.notna(row.get("sector_contribution_full")) else None,
+                        "contribution_rank_in_sector": int(row.get("contribution_rank_in_sector", 0) or 0) if pd.notna(row.get("contribution_rank_in_sector")) else None,
+                        "turnover_rank_in_sector": int(row.get("turnover_rank_in_sector", 0) or 0) if pd.notna(row.get("turnover_rank_in_sector")) else None,
+                        "liquidity_ok": bool(row.get("liquidity_ok", False)),
+                        "exclude_spike": bool(row.get("exclude_spike", False)),
+                    }
+                )
+            representative_trace_by_sector[str(sector_key or "")] = rows
+            representative_excluded_reason_by_sector[str(sector_key or "")] = reason_map
     rep_top1 = sector_representatives[sector_representatives.get("representative_rank", pd.Series(dtype=int)).eq(1)].copy() if not sector_representatives.empty else pd.DataFrame()
     rep_map = rep_top1.set_index("sector_name")["name"] if not rep_top1.empty else pd.Series(dtype=str)
     representative_stocks_map = _build_representative_stocks_map(sector_representatives)
@@ -4277,19 +4739,24 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
         today_sector_leaderboard["representative_stocks"] = today_sector_leaderboard["sector_name"].map(representative_stocks_map).apply(lambda value: value if isinstance(value, list) else [])
         today_sector_leaderboard["leaders"] = today_sector_leaderboard["sector_name"].map(leaders_map).fillna(today_sector_leaderboard["representative_stock"])
         today_sector_leaderboard["selected50_codes_in_sector"] = today_sector_leaderboard[leaderboard_sector_key_col].map(selected50_codes_by_sector).apply(lambda value: value if isinstance(value, list) else [])
+        today_sector_leaderboard["sector_center_candidate_codes"] = today_sector_leaderboard[leaderboard_sector_key_col].map(representative_candidate_codes_by_sector).apply(lambda value: value if isinstance(value, list) else [])
         today_sector_leaderboard["representative_candidate_codes"] = today_sector_leaderboard[leaderboard_sector_key_col].map(representative_candidate_codes_by_sector).apply(lambda value: value if isinstance(value, list) else [])
+        today_sector_leaderboard["sector_positive_candidate_count"] = today_sector_leaderboard[leaderboard_sector_key_col].map(positive_count_by_sector).fillna(0).astype(int)
+        today_sector_leaderboard["sector_negative_candidate_count"] = today_sector_leaderboard[leaderboard_sector_key_col].map(negative_count_by_sector).fillna(0).astype(int)
+        today_sector_leaderboard["representative_trace_top10"] = today_sector_leaderboard[leaderboard_sector_key_col].map(representative_trace_by_sector).apply(lambda value: value if isinstance(value, list) else [])
         today_sector_leaderboard["representative_excluded_reason_by_code"] = today_sector_leaderboard.apply(
             lambda row: {
-                code: (
-                    "selected_representative"
-                    if code in {str(item.get('code', '') or '') for item in row.get("representative_stocks", []) if isinstance(item, dict)}
-                    else "selected50_in_sector_but_representative_rank_gt3"
+                code: representative_excluded_reason_by_sector.get(str(row.get(leaderboard_sector_key_col, "") or ""), {}).get(
+                    code,
+                    "selected_representative" if code in {str(item.get('code', '') or '') for item in row.get("representative_stocks", []) if isinstance(item, dict)}
+                    else "selected50_not_center_candidate"
                     if code in set(row.get("selected50_codes_in_sector", []))
                     else "not_in_selected50_live_pool"
                 )
                 for code in sorted(
                     set(row.get("wide_scan_member_codes", []))
                     | set(row.get("selected50_codes_in_sector", []))
+                    | set(row.get("representative_candidate_codes", []))
                 )
             },
             axis=1,
@@ -4389,9 +4856,13 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
                     "wide_scan_member_codes",
                     "ranking_confirmed_codes",
                     "selected50_codes_in_sector",
+                    "sector_center_candidate_codes",
                     "representative_candidate_codes",
+                    "sector_positive_candidate_count",
+                    "sector_negative_candidate_count",
                     "representative_stocks",
                     "representative_excluded_reason_by_code",
+                    "representative_trace_top10",
                 ]
                 if column in today_sector_leaderboard.columns
             ]
@@ -4648,7 +5119,7 @@ def run_cli(mode: str, write_drive: bool = False, fast_check: bool = False) -> d
             ranking_df, industry_df, ranking_diag = build_market_scan_universe(base_df, settings, token)
         deep_watch_df, deep_watch_diag = select_deep_watch_universe(ranking_df, base_df, settings, mode)
         board_df, board_diag = enrich_with_board_snapshot(deep_watch_df, base_df, settings, token, mode=mode)
-        bundle = build_live_snapshot(mode, ranking_df, industry_df, board_df, base_df, datetime.now(timezone.utc))
+        bundle = build_live_snapshot(mode, ranking_df, industry_df, board_df, base_df, datetime.now(timezone.utc), deep_watch_df=deep_watch_df)
         bundle["diagnostics"].update({"base_meta": base_meta, "ranking": ranking_diag, "deep_watch": deep_watch_diag, "board": board_diag, "write_completed": False})
         bundle["diagnostics"]["write_completed"] = True
         write_result = write_snapshot_bundle(bundle, settings, write_drive=write_drive)
