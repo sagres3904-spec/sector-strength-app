@@ -246,23 +246,23 @@ MODE_SCORE_WEIGHTS = {
 }
 INTRADAY_BLOCK_COMPONENT_WEIGHTS = {
     "price": {
-        "industry_up_rank_norm": 1.5,
-        "price_up_share_of_sector": 0.95,
-        "price_up_share_of_market_scan": 0.8,
+        "industry_up_rank_norm": 1.65,
+        "price_up_share_of_sector": 1.0,
+        "price_up_count_norm": 0.65,
+        "ranking_confirmed_count_norm": 0.45,
     },
     "flow": {
-        "turnover_share_of_sector": 0.9,
-        "turnover_share_of_market_scan": 0.9,
+        "turnover_share_of_sector": 0.95,
+        "turnover_count_norm": 0.45,
         "volume_surge_share_of_sector": 0.8,
-        "volume_surge_share_of_market_scan": 0.65,
+        "volume_surge_count_norm": 0.35,
         "turnover_surge_share_of_sector": 0.8,
-        "turnover_surge_share_of_market_scan": 0.65,
+        "turnover_surge_count_norm": 0.35,
     },
     "participation": {
-        "signal_breadth_share": 1.05,
-        "scan_coverage": 0.8,
-        "scan_member_count_norm": 0.6,
-        "scan_member_share_of_market_scan": 0.45,
+        "ranking_source_breadth_ex_basket_norm": 1.0,
+        "ranking_confirmed_count_norm": 0.9,
+        "ranking_confirmed_share_of_sector": 1.1,
     },
 }
 INTRADAY_BLOCK_MODE_WEIGHTS_BASELINE = {
@@ -278,9 +278,15 @@ INTRADAY_BLOCK_MODE_WEIGHTS = {
     "now": {"price": 0.45, "flow": 0.30, "participation": 0.25},
 }
 INTRADAY_INDUSTRY_RANK_TETHER = {
-    "base_shift": 1,
-    "strong_shift": 2,
-    "very_strong_shift": 3,
+    "base_shift": 0,
+    "strong_shift": 1,
+    "very_strong_shift": 2,
+    "max_downshift": 2,
+}
+TODAY_SECTOR_RANK_MODE_RULES = {
+    "ranking_union_count_min": 120,
+    "sectors_with_ranking_confirmed_ge5_min": 8,
+    "sectors_with_source_breadth_ge2_min": 6,
 }
 INTRADAY_SCAN_SAMPLE_WARNING_RULES = {
     "critical_count": 4.0,
@@ -289,6 +295,10 @@ INTRADAY_SCAN_SAMPLE_WARNING_RULES = {
     "thin_count": 10.0,
     "thin_coverage": 0.10,
 }
+WIDE_SCAN_BASKET_MIN_PER_SECTOR = 5
+WIDE_SCAN_BASKET_TARGET_PER_SECTOR = 7
+WIDE_SCAN_BASKET_MAX_PER_SECTOR = 10
+WIDE_SCAN_TARGET_RANGE = (200, 400)
 INTRADAY_BREADTH_SLOT_SETTINGS_BASELINE = {
     "0915": {
         "reliability_k": 3.0,
@@ -1642,6 +1652,92 @@ def fetch_kabu_ranking(settings: dict[str, Any], token: str, source_type: str) -
     return out
 
 
+def _build_industry_representative_basket(
+    base_df: pd.DataFrame,
+    *,
+    min_per_sector: int = WIDE_SCAN_BASKET_MIN_PER_SECTOR,
+    target_per_sector: int = WIDE_SCAN_BASKET_TARGET_PER_SECTOR,
+    max_per_sector: int = WIDE_SCAN_BASKET_MAX_PER_SECTOR,
+    diagnostics: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    target_size = max(int(min_per_sector), min(int(target_per_sector), int(max_per_sector)))
+    if base_df.empty:
+        empty_columns = [
+            "code",
+            "name",
+            "sector_name",
+            "TradingValue_latest",
+            "avg_turnover_20d",
+            "avg_volume_20d",
+            "basket_liquidity_score",
+            "basket_rank_in_sector",
+            "industry_basket_member",
+        ]
+        empty_diag = {
+            "industry_basket_count": 0,
+            "sector_basket_counts": {},
+            "basket_target_per_sector": int(target_size),
+            "basket_min_per_sector": int(min_per_sector),
+            "basket_max_per_sector": int(max_per_sector),
+        }
+        return pd.DataFrame(columns=empty_columns), empty_diag
+    eligible = _exclude_non_corporate_products(base_df, diagnostics, context="wide_scan_industry_basket")
+    eligible = eligible.copy()
+    eligible["sector_name"] = eligible.get("sector_name", pd.Series(dtype=str)).map(_normalize_industry_name)
+    eligible = eligible[eligible["code"].astype(str).map(_is_code4)].copy()
+    eligible = eligible[eligible["sector_name"].astype(str).str.strip() != ""].copy()
+    if eligible.empty:
+        return pd.DataFrame(columns=["code", "name", "sector_name"]), {
+            "industry_basket_count": 0,
+            "sector_basket_counts": {},
+            "basket_target_per_sector": int(target_size),
+            "basket_min_per_sector": int(min_per_sector),
+            "basket_max_per_sector": int(max_per_sector),
+        }
+    eligible["basket_liquidity_score"] = (
+        _score_percentile(_coerce_numeric(eligible.get("TradingValue_latest", pd.Series([pd.NA] * len(eligible), index=eligible.index))).fillna(0.0)) * 0.55
+        + _score_percentile(_coerce_numeric(eligible.get("avg_turnover_20d", pd.Series([pd.NA] * len(eligible), index=eligible.index))).fillna(0.0)) * 0.30
+        + _score_percentile(_coerce_numeric(eligible.get("avg_volume_20d", pd.Series([pd.NA] * len(eligible), index=eligible.index))).fillna(0.0)) * 0.15
+    )
+    basket_frames: list[pd.DataFrame] = []
+    sector_basket_counts: dict[str, int] = {}
+    for sector_name, group in eligible.groupby("sector_name", dropna=False):
+        sorted_group = group.sort_values(
+            ["basket_liquidity_score", "TradingValue_latest", "avg_turnover_20d", "avg_volume_20d", "code"],
+            ascending=[False, False, False, False, True],
+            kind="mergesort",
+        ).copy()
+        sector_limit = min(len(sorted_group), int(max_per_sector), int(target_size))
+        chosen = sorted_group.head(sector_limit).copy()
+        chosen["basket_rank_in_sector"] = range(1, len(chosen) + 1)
+        chosen["industry_basket_member"] = True
+        basket_frames.append(chosen)
+        sector_basket_counts[str(sector_name or "")] = int(len(chosen))
+    basket_df = pd.concat(basket_frames, ignore_index=True) if basket_frames else pd.DataFrame(columns=eligible.columns.tolist() + ["basket_rank_in_sector", "industry_basket_member"])
+    basket_df = basket_df.drop_duplicates("code").reset_index(drop=True)
+    return basket_df, {
+        "industry_basket_count": int(len(basket_df)),
+        "sector_basket_counts": sector_basket_counts,
+        "basket_target_per_sector": int(target_size),
+        "basket_min_per_sector": int(min_per_sector),
+        "basket_max_per_sector": int(max_per_sector),
+    }
+
+
+def _classify_wide_scan_mode(
+    ranking_union_count: int,
+    sectors_with_ranking_confirmed_ge5: int,
+    sectors_with_source_breadth_ge2: int,
+) -> str:
+    if int(ranking_union_count) < int(TODAY_SECTOR_RANK_MODE_RULES["ranking_union_count_min"]):
+        return "anchor_only"
+    if int(sectors_with_ranking_confirmed_ge5) < int(TODAY_SECTOR_RANK_MODE_RULES["sectors_with_ranking_confirmed_ge5_min"]):
+        return "anchor_only"
+    if int(sectors_with_source_breadth_ge2) < int(TODAY_SECTOR_RANK_MODE_RULES["sectors_with_source_breadth_ge2_min"]):
+        return "anchor_only"
+    return "anchored_overlay"
+
+
 def build_market_scan_universe(base_df: pd.DataFrame, settings: dict[str, Any], token: str) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Build a market-wide rough scan from kabu ranking endpoints."""
     logger.info("build_market_scan_universe start")
@@ -1655,7 +1751,7 @@ def build_market_scan_universe(base_df: pd.DataFrame, settings: dict[str, Any], 
     if ranking_df.empty:
         raise PipelineFailClosed("fail-closed: market scan rankings returned no rows.")
     ranking_df = ranking_df[ranking_df["code"].map(_is_code4)].copy()
-    ranking_combo = (
+    ranking_union = (
         ranking_df.groupby("code", as_index=False)
         .agg(
             ranking_combo_score=("rank_score", "sum"),
@@ -1685,19 +1781,120 @@ def build_market_scan_universe(base_df: pd.DataFrame, settings: dict[str, Any], 
         "is_non_corporate_product",
         "non_corporate_product_reason",
     ] + [column for column in NON_CORPORATE_PRODUCT_ATTRIBUTE_COLUMNS if column in base_df.columns and column not in {"exchange_name"}]
-    ranking_combo = ranking_combo.merge(
+    ranking_union = ranking_union.merge(
         base_df[base_merge_columns],
         on="code",
         how="left",
         suffixes=("", "_base"),
     )
-    ranking_combo["name"] = ranking_combo["name"].fillna(ranking_combo["ranking_name"]).fillna("")
-    ranking_combo["sector_name"] = ranking_combo["sector_name"].fillna(ranking_combo["ranking_sector_name"]).fillna("")
-    ranking_combo = _exclude_non_corporate_products(ranking_combo, diagnostics, context="market_scan")
+    ranking_union["name"] = ranking_union["name"].fillna(ranking_union["ranking_name"]).fillna("")
+    ranking_union["sector_name"] = ranking_union["sector_name"].fillna(ranking_union["ranking_sector_name"]).fillna("").map(_normalize_industry_name)
+    ranking_union = _exclude_non_corporate_products(ranking_union, diagnostics, context="market_scan_ranking_union")
+    ranking_union["ranking_union_member"] = True
+    ranking_union["industry_basket_member"] = False
+    ranking_union_count = int(len(ranking_union))
+    industry_basket_df, basket_diag = _build_industry_representative_basket(base_df, diagnostics=diagnostics)
+    industry_basket_df = industry_basket_df.copy()
+    if not industry_basket_df.empty:
+        industry_basket_df["ranking_combo_score"] = 0.0
+        industry_basket_df["ranking_sources"] = ""
+        industry_basket_df["ranking_name"] = industry_basket_df.get("name", pd.Series([""] * len(industry_basket_df), index=industry_basket_df.index)).fillna("")
+        industry_basket_df["ranking_sector_name"] = industry_basket_df.get("sector_name", pd.Series([""] * len(industry_basket_df), index=industry_basket_df.index)).map(_normalize_industry_name)
+        industry_basket_df["ranking_union_member"] = False
+        industry_basket_df["industry_basket_member"] = True
+    combine_columns = sorted(
+        set(ranking_union.columns).union(industry_basket_df.columns if not industry_basket_df.empty else []).union({"ranking_union_member", "industry_basket_member"})
+    )
+    combined_scan = pd.concat(
+        [
+            ranking_union.reindex(columns=combine_columns),
+            industry_basket_df.reindex(columns=combine_columns),
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+    if combined_scan.empty:
+        raise PipelineFailClosed("fail-closed: wide market scan returned no rows.")
+    wide_scan = (
+        combined_scan.groupby("code", as_index=False)
+        .agg(
+            ranking_combo_score=("ranking_combo_score", "max"),
+            ranking_sources=("ranking_sources", lambda s: ",".join(sorted({str(value).strip() for value in s if str(value).strip()}))),
+            ranking_name=("ranking_name", "first"),
+            ranking_sector_name=("ranking_sector_name", "first"),
+            exchange=("exchange", "first"),
+            name=("name", "first"),
+            sector_name=("sector_name", "first"),
+            sector_rank_1w=("sector_rank_1w", "first"),
+            sector_rank_1m=("sector_rank_1m", "first"),
+            sector_rank_3m=("sector_rank_3m", "first"),
+            ret_1w=("ret_1w", "first"),
+            ret_1m=("ret_1m", "first"),
+            ret_3m=("ret_3m", "first"),
+            TradingValue_latest=("TradingValue_latest", "first"),
+            avg_volume_20d=("avg_volume_20d", "first"),
+            avg_turnover_20d=("avg_turnover_20d", "first"),
+            close_ma_20d=("close_ma_20d", "first"),
+            exchange_name=("exchange_name", "first"),
+            is_non_corporate_product=("is_non_corporate_product", "max"),
+            non_corporate_product_reason=("non_corporate_product_reason", "first"),
+            ranking_union_member=("ranking_union_member", "max"),
+            industry_basket_member=("industry_basket_member", "max"),
+            basket_liquidity_score=("basket_liquidity_score", "max"),
+            basket_rank_in_sector=("basket_rank_in_sector", "min"),
+        )
+        .sort_values(["ranking_combo_score", "TradingValue_latest", "avg_turnover_20d"], ascending=[False, False, False], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    wide_scan["name"] = wide_scan["name"].fillna(wide_scan["ranking_name"]).fillna("")
+    wide_scan["sector_name"] = wide_scan["sector_name"].fillna(wide_scan["ranking_sector_name"]).fillna("").map(_normalize_industry_name)
+    wide_scan["wide_scan_sources"] = wide_scan.apply(
+        lambda row: ",".join(
+            [
+                label
+                for label, enabled in [
+                    ("ranking_union", bool(row.get("ranking_union_member"))),
+                    ("industry_basket", bool(row.get("industry_basket_member"))),
+                ]
+                if enabled
+            ]
+        ),
+        axis=1,
+    )
+    wide_scan = _exclude_non_corporate_products(wide_scan, diagnostics, context="market_scan_wide")
+    wide_scan_total_count = int(len(wide_scan))
+    market_scan_quality = _summarize_market_scan_quality(
+        scan_df=wide_scan,
+        ranking_union_count=int(wide_scan["ranking_union_member"].fillna(False).sum()) if not wide_scan.empty else 0,
+        sector_basket_counts=basket_diag.get("sector_basket_counts", {}),
+    )
+    wide_scan_mode = _classify_wide_scan_mode(
+        market_scan_quality["ranking_union_count"],
+        market_scan_quality["sectors_with_ranking_confirmed_ge5"],
+        market_scan_quality["sectors_with_source_breadth_ge2"],
+    )
+    diagnostics.update(
+        {
+            "ranking_union_count": int(wide_scan["ranking_union_member"].fillna(False).sum()) if not wide_scan.empty else 0,
+            "industry_basket_count": int(wide_scan["industry_basket_member"].fillna(False).sum()) if not wide_scan.empty else 0,
+            "wide_scan_total_count": wide_scan_total_count,
+            "wide_scan_mode": wide_scan_mode,
+            "sector_basket_counts": basket_diag.get("sector_basket_counts", {}),
+            "sectors_with_ranking_confirmed_ge5": int(market_scan_quality["sectors_with_ranking_confirmed_ge5"]),
+            "sectors_with_source_breadth_ge2": int(market_scan_quality["sectors_with_source_breadth_ge2"]),
+            "rank_mode_reason": str(market_scan_quality["reason"]),
+            "market_scan_quality_summary": str(market_scan_quality["summary"]),
+            "basket_target_per_sector": int(basket_diag.get("basket_target_per_sector", WIDE_SCAN_BASKET_TARGET_PER_SECTOR)),
+            "basket_min_per_sector": int(basket_diag.get("basket_min_per_sector", WIDE_SCAN_BASKET_MIN_PER_SECTOR)),
+            "basket_max_per_sector": int(basket_diag.get("basket_max_per_sector", WIDE_SCAN_BASKET_MAX_PER_SECTOR)),
+            "wide_scan_target_range": {"min": int(WIDE_SCAN_TARGET_RANGE[0]), "max": int(WIDE_SCAN_TARGET_RANGE[1])},
+            "ranking_union_count_raw": ranking_union_count,
+        }
+    )
     industry_df = fetch_kabu_ranking(settings, token, "industry_up")
     diagnostics["ranking_counts"]["industry_up"] = int(len(industry_df))
-    logger.info("build_market_scan_universe end candidates=%s industries=%s", len(ranking_combo), len(industry_df))
-    return ranking_combo, industry_df, diagnostics
+    logger.info("build_market_scan_universe end candidates=%s industries=%s mode=%s", len(wide_scan), len(industry_df), wide_scan_mode)
+    return wide_scan, industry_df, diagnostics
 
 
 def _resolve_primary_exchange(code: str, exchange: Any, exchange_name: Any, source_hint: str | None = None) -> int:
@@ -2215,6 +2412,129 @@ def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     return _coerce_numeric(numerator) / _coerce_numeric(denominator).replace(0, pd.NA)
 
 
+def _summarize_market_scan_quality(
+    *,
+    scan_df: pd.DataFrame | None = None,
+    sector_frame: pd.DataFrame | None = None,
+    ranking_union_count: int | None = None,
+    sector_basket_counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    thresholds = TODAY_SECTOR_RANK_MODE_RULES
+    summary_sector_frame = sector_frame.copy() if isinstance(sector_frame, pd.DataFrame) and not sector_frame.empty else pd.DataFrame()
+    if summary_sector_frame.empty:
+        base_scan = scan_df.copy() if isinstance(scan_df, pd.DataFrame) and not scan_df.empty else pd.DataFrame()
+        if not base_scan.empty and "sector_name" in base_scan.columns:
+            base_scan["sector_name"] = base_scan["sector_name"].map(_normalize_industry_name)
+            base_scan = base_scan[base_scan["sector_name"].astype(str).str.strip() != ""].copy()
+            summary_sector_frame = (
+                base_scan.groupby("sector_name", as_index=False)
+                .agg(
+                    ranking_confirmed_count=(
+                        "ranking_union_member",
+                        lambda s: int(
+                            base_scan.loc[s.index, "code"].astype(str)[base_scan.loc[s.index, "ranking_union_member"].fillna(False)].drop_duplicates().shape[0]
+                        ),
+                    ),
+                    ranking_source_breadth_ex_basket=("ranking_sources", lambda s: 0),
+                    basket_member_count=(
+                        "industry_basket_member",
+                        lambda s: int(
+                            base_scan.loc[s.index, "code"].astype(str)[base_scan.loc[s.index, "industry_basket_member"].fillna(False)].drop_duplicates().shape[0]
+                        ),
+                    ),
+                )
+            )
+            expanded_scan = _ensure_scan_source_type(base_scan)
+            if not expanded_scan.empty and "sector_name" in expanded_scan.columns:
+                expanded_scan["sector_name"] = expanded_scan["sector_name"].map(_normalize_industry_name)
+                expanded_scan = expanded_scan[expanded_scan["sector_name"].astype(str).str.strip() != ""].copy()
+                breadth_map = (
+                    expanded_scan[expanded_scan.get("source_type", pd.Series(dtype=str)).astype(str).ne("industry_basket")]
+                    .groupby("sector_name")["source_type"]
+                    .nunique()
+                    .to_dict()
+                )
+                summary_sector_frame["ranking_source_breadth_ex_basket"] = summary_sector_frame["sector_name"].map(lambda value: int(breadth_map.get(str(value or ""), 0) or 0))
+            if ranking_union_count is None:
+                ranking_union_count = int(
+                    base_scan[base_scan.get("ranking_union_member", pd.Series(False, index=base_scan.index)).fillna(False)]["code"].astype(str).drop_duplicates().shape[0]
+                ) if "code" in base_scan.columns else 0
+            if sector_basket_counts is None:
+                sector_basket_counts = {
+                    str(key): int(value or 0)
+                    for key, value in (
+                        base_scan[base_scan.get("industry_basket_member", pd.Series(False, index=base_scan.index)).fillna(False)]
+                        .groupby("sector_name")["code"]
+                        .nunique()
+                        .to_dict()
+                    ).items()
+                } if "code" in base_scan.columns else {}
+    else:
+        if ranking_union_count is None:
+            ranking_union_count = 0
+        if sector_basket_counts is None:
+            if {"sector_name", "basket_member_count"}.issubset(summary_sector_frame.columns):
+                sector_basket_counts = {
+                    str(row.get("sector_name", "") or ""): int(row.get("basket_member_count", 0) or 0)
+                    for _, row in summary_sector_frame.iterrows()
+                }
+            else:
+                sector_basket_counts = {}
+    ranking_union_count = int(ranking_union_count or 0)
+    sector_basket_counts = {str(key): int(value or 0) for key, value in (sector_basket_counts or {}).items()}
+    sectors_with_ranking_confirmed_ge5 = (
+        int(_coerce_numeric(summary_sector_frame.get("ranking_confirmed_count", pd.Series(dtype="float64"))).fillna(0.0).ge(5.0).sum())
+        if not summary_sector_frame.empty
+        else 0
+    )
+    sectors_with_source_breadth_ge2 = (
+        int(_coerce_numeric(summary_sector_frame.get("ranking_source_breadth_ex_basket", pd.Series(dtype="float64"))).fillna(0.0).ge(2.0).sum())
+        if not summary_sector_frame.empty
+        else 0
+    )
+    gate_failures: list[str] = []
+    if ranking_union_count < int(thresholds["ranking_union_count_min"]):
+        gate_failures.append(f"ranking_union_count={ranking_union_count}<{int(thresholds['ranking_union_count_min'])}")
+    if sectors_with_ranking_confirmed_ge5 < int(thresholds["sectors_with_ranking_confirmed_ge5_min"]):
+        gate_failures.append(
+            f"sectors_with_ranking_confirmed_ge5={sectors_with_ranking_confirmed_ge5}<{int(thresholds['sectors_with_ranking_confirmed_ge5_min'])}"
+        )
+    if sectors_with_source_breadth_ge2 < int(thresholds["sectors_with_source_breadth_ge2_min"]):
+        gate_failures.append(
+            f"sectors_with_source_breadth_ge2={sectors_with_source_breadth_ge2}<{int(thresholds['sectors_with_source_breadth_ge2_min'])}"
+        )
+    mode = "anchor_only" if gate_failures else "anchored_overlay"
+    reason = (
+        "; ".join(gate_failures)
+        if gate_failures
+        else (
+            f"ranking_union_count={ranking_union_count}>={int(thresholds['ranking_union_count_min'])}; "
+            f"sectors_with_ranking_confirmed_ge5={sectors_with_ranking_confirmed_ge5}>={int(thresholds['sectors_with_ranking_confirmed_ge5_min'])}; "
+            f"sectors_with_source_breadth_ge2={sectors_with_source_breadth_ge2}>={int(thresholds['sectors_with_source_breadth_ge2_min'])}"
+        )
+    )
+    summary_text = (
+        f"mode={mode}; ranking_union_count={ranking_union_count}; "
+        f"sectors_with_ranking_confirmed_ge5={sectors_with_ranking_confirmed_ge5}; "
+        f"sectors_with_source_breadth_ge2={sectors_with_source_breadth_ge2}; "
+        f"reason={reason}"
+    )
+    return {
+        "mode": mode,
+        "reason": reason,
+        "summary": summary_text,
+        "ranking_union_count": ranking_union_count,
+        "sector_basket_counts": sector_basket_counts,
+        "sectors_with_ranking_confirmed_ge5": sectors_with_ranking_confirmed_ge5,
+        "sectors_with_source_breadth_ge2": sectors_with_source_breadth_ge2,
+        "thresholds": {
+            "ranking_union_count_min": int(thresholds["ranking_union_count_min"]),
+            "sectors_with_ranking_confirmed_ge5_min": int(thresholds["sectors_with_ranking_confirmed_ge5_min"]),
+            "sectors_with_source_breadth_ge2_min": int(thresholds["sectors_with_source_breadth_ge2_min"]),
+        },
+    }
+
+
 def _rank_display_series(primary: pd.Series | None, *, fallback: pd.Series | None = None) -> pd.Series:
     numeric = _coerce_numeric(primary) if primary is not None else pd.Series(dtype="float64")
     if fallback is not None:
@@ -2242,15 +2562,15 @@ def _scan_sample_warning_details(
     level.loc[warn_mask] = "warn"
     level.loc[critical_mask] = "critical"
     label = pd.Series([""] * len(count), index=count.index, dtype="object")
-    label.loc[no_scan_mask] = "scan裏付けなし"
-    label.loc[thin_mask] = "scan母数薄い"
-    label.loc[warn_mask] = "scan母数少"
-    label.loc[critical_mask] = "scan母数極少"
+    label.loc[no_scan_mask] = "wide scan母数不足"
+    label.loc[thin_mask] = "wide scan母数不足"
+    label.loc[warn_mask] = "wide scan母数不足"
+    label.loc[critical_mask] = "wide scan母数不足"
     reason = pd.Series([""] * len(count), index=count.index, dtype="object")
-    reason.loc[no_scan_mask] = count.loc[no_scan_mask].map(lambda value: f"scan_member_count={int(value)}") + coverage.loc[no_scan_mask].map(lambda value: f", scan_coverage={value:.3f}")
-    reason.loc[thin_mask] = count.loc[thin_mask].map(lambda value: f"scan_member_count={int(value)}") + coverage.loc[thin_mask].map(lambda value: f", scan_coverage={value:.3f}")
-    reason.loc[warn_mask] = count.loc[warn_mask].map(lambda value: f"scan_member_count={int(value)}") + coverage.loc[warn_mask].map(lambda value: f", scan_coverage={value:.3f}")
-    reason.loc[critical_mask] = count.loc[critical_mask].map(lambda value: f"scan_member_count={int(value)}") + coverage.loc[critical_mask].map(lambda value: f", scan_coverage={value:.3f}")
+    reason.loc[no_scan_mask] = count.loc[no_scan_mask].map(lambda value: f"wide_scan_member_count={int(value)}") + coverage.loc[no_scan_mask].map(lambda value: f", wide_scan_coverage={value:.3f}")
+    reason.loc[thin_mask] = count.loc[thin_mask].map(lambda value: f"wide_scan_member_count={int(value)}") + coverage.loc[thin_mask].map(lambda value: f", wide_scan_coverage={value:.3f}")
+    reason.loc[warn_mask] = count.loc[warn_mask].map(lambda value: f"wide_scan_member_count={int(value)}") + coverage.loc[warn_mask].map(lambda value: f", wide_scan_coverage={value:.3f}")
+    reason.loc[critical_mask] = count.loc[critical_mask].map(lambda value: f"wide_scan_member_count={int(value)}") + coverage.loc[critical_mask].map(lambda value: f", wide_scan_coverage={value:.3f}")
     return level, label, reason
 
 
@@ -2298,12 +2618,17 @@ def _ensure_scan_source_type(scan_df: pd.DataFrame) -> pd.DataFrame:
         return out
 
     if "ranking_sources" in out.columns:
-        source_labels = {"price_up", "turnover", "volume_surge", "turnover_surge"}
+        source_labels = {"price_up", "turnover", "volume_surge", "turnover_surge", "industry_basket"}
         expanded = out.copy()
         expanded["source_type"] = expanded["ranking_sources"].fillna("").astype(str).str.split(",")
         expanded = expanded.explode("source_type")
         expanded["source_type"] = expanded["source_type"].fillna("").astype(str).str.strip()
         expanded = expanded[expanded["source_type"].isin(source_labels)].copy()
+        if "industry_basket_member" in out.columns:
+            basket_rows = out[out["industry_basket_member"].fillna(False)].copy()
+            if not basket_rows.empty:
+                basket_rows["source_type"] = "industry_basket"
+                expanded = pd.concat([expanded, basket_rows], ignore_index=True, sort=False)
         if not expanded.empty:
             dedupe_cols = [c for c in ["code", "sector_name", "source_type"] if c in expanded.columns]
             if dedupe_cols:
@@ -2354,6 +2679,9 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
     return pd.DataFrame(
         columns=[
             "today_rank",
+            "today_display_rank",
+            "today_rank_mode",
+            "rank_mode_reason",
             "sector_name",
             "representative_stock",
             "representative_stocks",
@@ -2378,10 +2706,26 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
             "sector_constituent_count",
             "scan_member_count",
             "scan_member_count_norm",
+            "wide_scan_member_count",
+            "wide_scan_member_count_norm",
+            "wide_scan_coverage",
+            "ranking_confirmed_count",
+            "ranking_confirmed_count_norm",
+            "ranking_confirmed_share_of_sector",
+            "ranking_confirmed_share_of_market",
+            "ranking_confirmed_coverage",
+            "basket_member_count",
+            "ranking_source_breadth_ex_basket",
+            "ranking_source_breadth_ex_basket_norm",
+            "market_scan_quality_summary",
             "price_up_count",
+            "price_up_count_norm",
             "turnover_count",
+            "turnover_count_norm",
             "volume_surge_count",
+            "volume_surge_count_norm",
             "turnover_surge_count",
+            "turnover_surge_count_norm",
             "breadth_sample_count",
             "breadth_reliability",
             "breadth_core_score",
@@ -2395,6 +2739,8 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
             "industry_up_anchor_rank",
             "industry_anchor_rank",
             "allowed_shift",
+            "max_upshift",
+            "max_downshift",
             "upshift_blocked_reason",
             "rank_constraint_applied",
             "final_rank_delta",
@@ -2410,7 +2756,9 @@ def _sort_today_sector_leaderboard_rows(frame: pd.DataFrame) -> pd.DataFrame:
         return frame.copy() if isinstance(frame, pd.DataFrame) else _empty_sector_leaderboard()
     working = frame.copy()
     sort_priority = [
+        ("today_display_rank", True),
         ("tethered_rank", True),
+        ("preferred_rank_slot", True),
         ("industry_anchor_rank", True),
         ("industry_rank_live", True),
         ("score_rank", True),
@@ -2455,17 +2803,17 @@ def _is_rank_slot_assignment_feasible(frame: pd.DataFrame, available_slots: list
 
 def _build_upshift_blocked_reason(row: pd.Series) -> str:
     reasons: list[str] = []
-    warning_level = str(row.get("scan_sample_warning_level", "") or "").strip()
-    if warning_level == "no_scan":
-        reasons.append("scan裏付けなし")
-    if warning_level == "critical":
-        reasons.append("scan母数極少")
-    if bool(row.get("source_bias_warning_flag")):
-        reasons.append("source偏りあり")
-    if bool(row.get("ranking_breadth_warning_flag")):
-        reasons.append("ランキング広がり弱い")
-    if str(row.get("sector_confidence", "") or "").strip() == "低":
-        reasons.append("信頼度=低")
+    ranking_confirmed_count = int(float(row.get("ranking_confirmed_count", 0.0) or 0.0))
+    max_upshift = int(float(row.get("max_upshift", 0.0) or 0.0))
+    wide_scan_member_count = int(float(row.get("wide_scan_member_count", row.get("scan_member_count", 0.0)) or 0.0))
+    if ranking_confirmed_count <= 0:
+        reasons.append("ランキング裏付けなし")
+    elif ranking_confirmed_count <= 2:
+        reasons.append("ランキング裏付け極少")
+    elif ranking_confirmed_count <= 4 and max_upshift <= 0:
+        reasons.append("ランキング裏付け薄い")
+    if wide_scan_member_count < int(WIDE_SCAN_BASKET_MIN_PER_SECTOR) and max_upshift <= 0:
+        reasons.append("wide scan母数不足")
     return _build_sector_caution_tags(reasons)
 
 
@@ -2476,15 +2824,18 @@ def _apply_true_rank_shift_limits(frame: pd.DataFrame) -> pd.DataFrame:
     total_rows = len(working)
     fallback_anchor = pd.Series(range(1, total_rows + 1), index=working.index, dtype="float64")
     anchor_rank = _coerce_numeric(working["industry_anchor_rank"]).fillna(fallback_anchor)
-    shift_limit = _coerce_numeric(working["rank_shift_limit"]).fillna(0.0).round().clip(lower=0.0)
-    working["allowed_shift"] = shift_limit.astype(int)
+    max_upshift = _coerce_numeric(working.get("max_upshift", working.get("rank_shift_limit", pd.Series([0.0] * total_rows, index=working.index)))).fillna(0.0).round().clip(lower=0.0)
+    max_downshift = _coerce_numeric(working.get("max_downshift", pd.Series([float(INTRADAY_INDUSTRY_RANK_TETHER["max_downshift"])] * total_rows, index=working.index))).fillna(0.0).round().clip(lower=0.0)
+    working["max_upshift"] = max_upshift.astype(int)
+    working["max_downshift"] = max_downshift.astype(int)
+    working["allowed_shift"] = max_upshift.astype(int)
     working["upshift_blocked_reason"] = working.apply(_build_upshift_blocked_reason, axis=1)
     blocked_upshift = working["upshift_blocked_reason"].astype(str).str.strip() != ""
     anchor_rank_int = anchor_rank.round().astype(int)
     raw_preferred_rank = _coerce_numeric(working["score_rank"]).fillna(_coerce_numeric(working["tethered_rank"])).fillna(anchor_rank).clip(lower=1.0, upper=float(total_rows)).round().astype(int)
-    rank_floor = (anchor_rank - shift_limit).clip(lower=1.0, upper=float(total_rows)).round().astype(int)
+    rank_floor = (anchor_rank - max_upshift).clip(lower=1.0, upper=float(total_rows)).round().astype(int)
     rank_floor = rank_floor.where(~blocked_upshift, anchor_rank_int)
-    rank_ceiling = (anchor_rank + shift_limit).clip(lower=1.0, upper=float(total_rows)).round().astype(int)
+    rank_ceiling = (anchor_rank + max_downshift).clip(lower=1.0, upper=float(total_rows)).round().astype(int)
     blocked_preferred_slot = raw_preferred_rank.where(raw_preferred_rank >= anchor_rank_int, anchor_rank_int)
     preferred_slot = raw_preferred_rank.where(~blocked_upshift, blocked_preferred_slot)
     working["rank_floor_bound"] = rank_floor
@@ -2525,12 +2876,10 @@ def _sort_today_sector_leaderboard_for_display(frame: pd.DataFrame) -> pd.DataFr
         return frame.copy() if isinstance(frame, pd.DataFrame) else _empty_sector_leaderboard()
     working = _sort_today_sector_leaderboard_rows(frame)
     fallback_rank = pd.Series(range(1, len(working) + 1), index=working.index, dtype="int64")
-    if "tethered_rank" in working.columns:
-        working["today_rank"] = _coerce_numeric(working["tethered_rank"]).fillna(fallback_rank).round().clip(lower=1.0).astype("int64")
-    else:
-        working["today_rank"] = fallback_rank
+    working["today_display_rank"] = fallback_rank
+    working["today_rank"] = working["today_display_rank"]
     if "industry_anchor_rank" in working.columns:
-        working["final_rank_delta"] = _coerce_numeric(working["today_rank"]).fillna(0.0) - _coerce_numeric(working["industry_anchor_rank"]).fillna(_coerce_numeric(working["today_rank"]).fillna(0.0))
+        working["final_rank_delta"] = _coerce_numeric(working["today_display_rank"]).fillna(0.0) - _coerce_numeric(working["industry_anchor_rank"]).fillna(_coerce_numeric(working["today_display_rank"]).fillna(0.0))
     return working
 
 
@@ -2569,6 +2918,7 @@ def _build_intraday_sector_leaderboard(
     concentration_settings_map = concentration_settings_map or INTRADAY_CONCENTRATION_PENALTY_SETTINGS
     breadth_settings = breadth_settings_map.get(str(mode), breadth_settings_map["now"])
     concentration_settings = concentration_settings_map.get(str(mode), concentration_settings_map["now"])
+    del concentration_settings
     industry_base = industry_df[
         [column for column in ["sector_name", "rank_position", "industry_up_value"] if column in industry_df.columns]
     ].copy()
@@ -2595,18 +2945,9 @@ def _build_intraday_sector_leaderboard(
         how="left",
     )
     market_scan_member_count = 0.0
+    ranking_union_total_count = 0.0
     source_totals: dict[str, float] = {}
-    live_scan = pd.DataFrame(
-        columns=[
-            "code",
-            "sector_name",
-            "name",
-            "live_ret_vs_prev_close",
-            "live_turnover_ratio_20d",
-            "live_volume_ratio_20d",
-            "live_turnover",
-        ]
-    )
+    sector_basket_counts: dict[str, int] = {}
     if not ranking_df.empty:
         scan = ranking_df.merge(
             base_df[["code", "name", "sector_name", "sector_constituent_count"]],
@@ -2618,21 +2959,37 @@ def _build_intraday_sector_leaderboard(
         scan = scan[scan["sector_name"].astype(str).str.strip() != ""].copy()
         if not scan.empty:
             market_scan_member_count = float(scan["code"].nunique() or 0.0)
-            source_totals = {str(key): float(value or 0.0) for key, value in scan.groupby("source_type")["code"].nunique().to_dict().items()}
+            ranking_union_total_count = float(
+                scan[scan.get("ranking_union_member", pd.Series(False, index=scan.index)).fillna(False)]["code"].astype(str).drop_duplicates().shape[0]
+            ) if "code" in scan.columns else 0.0
+            sector_basket_counts = (
+                scan[scan.get("industry_basket_member", pd.Series(False, index=scan.index)).fillna(False)]
+                .groupby("sector_name")["code"]
+                .nunique()
+                .to_dict()
+            ) if "code" in scan.columns else {}
+            ranking_only_scan = scan[scan.get("source_type", pd.Series(dtype=str)).astype(str).ne("industry_basket")].copy()
+            source_totals = {str(key): float(value or 0.0) for key, value in ranking_only_scan.groupby("source_type")["code"].nunique().to_dict().items()}
             source_counts = (
-                scan.groupby(["sector_name", "source_type"])["code"]
+                ranking_only_scan.groupby(["sector_name", "source_type"])["code"]
                 .nunique()
                 .unstack(fill_value=0)
                 .reset_index()
-            )
-            scan_sector_base = (
-                scan.groupby("sector_name", as_index=False)
-                .agg(
-                    scan_member_count=("code", "nunique"),
-                    sector_constituent_count_scan=("sector_constituent_count", "max"),
+            ) if not ranking_only_scan.empty else pd.DataFrame(columns=["sector_name"])
+            member_rows: list[dict[str, Any]] = []
+            for sector_name, group in scan.groupby("sector_name", dropna=False):
+                confirmed_mask = group.get("ranking_union_member", pd.Series(False, index=group.index)).fillna(False)
+                basket_mask = group.get("industry_basket_member", pd.Series(False, index=group.index)).fillna(False)
+                member_rows.append(
+                    {
+                        "sector_name": str(sector_name or ""),
+                        "wide_scan_member_count": int(group["code"].astype(str).drop_duplicates().shape[0]),
+                        "ranking_confirmed_count": int(group.loc[confirmed_mask, "code"].astype(str).drop_duplicates().shape[0]),
+                        "basket_member_count": int(group.loc[basket_mask, "code"].astype(str).drop_duplicates().shape[0]),
+                        "sector_constituent_count_scan": float(_coerce_numeric(group.get("sector_constituent_count", pd.Series(dtype="float64"))).max(skipna=True) or 0.0),
+                    }
                 )
-                .merge(source_counts, on="sector_name", how="left")
-            )
+            scan_sector_base = pd.DataFrame(member_rows).merge(source_counts, on="sector_name", how="left")
             for column in ["price_up", "turnover", "volume_surge", "turnover_surge"]:
                 if column not in scan_sector_base.columns:
                     scan_sector_base[column] = 0
@@ -2645,57 +3002,57 @@ def _build_intraday_sector_leaderboard(
                 }
             )
             sector_base = sector_base.merge(scan_sector_base, on="sector_name", how="left")
-            if not merged.empty:
-                live_scan = scan[["code", "sector_name"]].drop_duplicates().merge(
-                    merged[
-                        [
-                            "code",
-                            "name",
-                            "live_ret_vs_prev_close",
-                            "live_turnover_ratio_20d",
-                            "live_volume_ratio_20d",
-                            "live_turnover",
-                        ]
-                    ],
-                    on="code",
-                    how="left",
-                )
-    for column in ["scan_member_count", "price_up_count", "turnover_count", "volume_surge_count", "turnover_surge_count"]:
+    if ranking_union_total_count <= 0.0 and not ranking_df.empty and "ranking_union_member" in ranking_df.columns and "code" in ranking_df.columns:
+        ranking_union_total_count = float(
+            ranking_df[ranking_df["ranking_union_member"].fillna(False)]["code"].astype(str).drop_duplicates().shape[0]
+        )
+    for column in [
+        "wide_scan_member_count",
+        "ranking_confirmed_count",
+        "basket_member_count",
+        "price_up_count",
+        "turnover_count",
+        "volume_surge_count",
+        "turnover_surge_count",
+    ]:
         if column not in sector_base.columns:
             sector_base[column] = 0.0
         sector_base[column] = _coerce_numeric(sector_base[column]).fillna(0.0)
     scan_source_columns = ["price_up_count", "turnover_count", "volume_surge_count", "turnover_surge_count"]
     market_scan_source_count = float(sum(1 for source_type in ["price_up", "turnover", "volume_surge", "turnover_surge"] if source_totals.get(source_type, 0.0) > 0.0) or 1.0)
-    sector_base["signal_breadth_count"] = 0.0
+    sector_base["ranking_source_breadth_ex_basket"] = 0.0
     for column in scan_source_columns:
-        sector_base["signal_breadth_count"] += _coerce_numeric(sector_base[column]).fillna(0.0).gt(0).astype(float)
+        sector_base["ranking_source_breadth_ex_basket"] += _coerce_numeric(sector_base[column]).fillna(0.0).gt(0).astype(float)
+    sector_base["signal_breadth_count"] = sector_base["ranking_source_breadth_ex_basket"]
     sector_base["signal_breadth_share"] = _safe_ratio(
-        sector_base["signal_breadth_count"],
+        sector_base["ranking_source_breadth_ex_basket"],
         pd.Series([market_scan_source_count] * len(sector_base), index=sector_base.index),
     ).fillna(0.0)
     sector_base["max_scan_source_count"] = _coerce_numeric(sector_base[scan_source_columns].max(axis=1)).fillna(0.0)
-    live_sector = (
-        live_scan.groupby("sector_name", as_index=False)
-        .agg(
-            breadth_up=("live_ret_vs_prev_close", lambda s: int((_coerce_numeric(s) > 0).sum())),
-            breadth_down=("live_ret_vs_prev_close", lambda s: int((_coerce_numeric(s) < 0).sum())),
-            median_live_ret=("live_ret_vs_prev_close", "median"),
-            turnover_ratio_median=("live_turnover_ratio_20d", "median"),
-            live_turnover_total=("live_turnover", "sum"),
-        )
-    )
-    sector_base = sector_base.merge(live_sector, on="sector_name", how="left")
-    leader_turnover = live_scan.groupby("sector_name", as_index=False).agg(leader_live_turnover=("live_turnover", "max"))
-    sector_base = sector_base.merge(leader_turnover, on="sector_name", how="left")
-    for column in ["breadth_up", "breadth_down", "live_turnover_total", "leader_live_turnover"]:
-        if column not in sector_base.columns:
-            sector_base[column] = 0.0
-        sector_base[column] = _coerce_numeric(sector_base[column]).fillna(0.0)
+    sector_base["breadth_up"] = _coerce_numeric(sector_base["price_up_count"]).fillna(0.0)
+    sector_base["breadth_down"] = 0.0
+    sector_base["live_turnover_total"] = 0.0
+    sector_base["leader_live_turnover"] = 0.0
+    sector_base["median_live_ret"] = pd.NA
+    sector_base["turnover_ratio_median"] = pd.NA
     if "sector_constituent_count_scan" in sector_base.columns:
         sector_base["sector_constituent_count"] = _coerce_numeric(sector_base["sector_constituent_count"]).fillna(_coerce_numeric(sector_base["sector_constituent_count_scan"]))
-    sector_base["sector_constituent_count"] = _coerce_numeric(sector_base["sector_constituent_count"]).fillna(sector_base["scan_member_count"]).clip(lower=1.0)
-    sector_base["scan_member_count"] = _coerce_numeric(sector_base["scan_member_count"]).fillna(0.0)
-    sector_base["scan_coverage"] = _safe_ratio(sector_base["scan_member_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["sector_constituent_count"] = _coerce_numeric(sector_base["sector_constituent_count"]).fillna(sector_base["wide_scan_member_count"]).clip(lower=1.0)
+    sector_base = sector_base[sector_base["sector_constituent_count"] >= 3].copy()
+    if sector_base.empty:
+        return _empty_sector_leaderboard()
+    sector_base = sector_base.sort_values(["industry_rank_live", "sector_name"], ascending=[True, True], kind="mergesort").reset_index(drop=True)
+    sector_base["industry_anchor_rank"] = pd.Series(range(1, len(sector_base) + 1), index=sector_base.index, dtype="int64")
+    sector_base["wide_scan_member_count"] = _coerce_numeric(sector_base["wide_scan_member_count"]).fillna(0.0)
+    sector_base["scan_member_count"] = sector_base["wide_scan_member_count"]
+    sector_base["wide_scan_coverage"] = _safe_ratio(sector_base["wide_scan_member_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["scan_coverage"] = sector_base["wide_scan_coverage"]
+    sector_base["ranking_confirmed_share_of_sector"] = _safe_ratio(sector_base["ranking_confirmed_count"], sector_base["sector_constituent_count"]).fillna(0.0)
+    sector_base["ranking_confirmed_coverage"] = sector_base["ranking_confirmed_share_of_sector"]
+    sector_base["ranking_confirmed_share_of_market"] = _safe_ratio(
+        sector_base["ranking_confirmed_count"],
+        pd.Series([ranking_union_total_count] * len(sector_base), index=sector_base.index),
+    ).fillna(0.0)
     sector_base["price_up_share_of_sector"] = _safe_ratio(sector_base["price_up_count"], sector_base["sector_constituent_count"]).fillna(0.0)
     sector_base["price_up_share_of_market_scan"] = _safe_ratio(sector_base["price_up_count"], pd.Series([source_totals.get("price_up", 0.0)] * len(sector_base), index=sector_base.index)).fillna(0.0)
     sector_base["turnover_share_of_sector"] = _safe_ratio(sector_base["turnover_count"], sector_base["sector_constituent_count"]).fillna(0.0)
@@ -2704,29 +3061,39 @@ def _build_intraday_sector_leaderboard(
     sector_base["volume_surge_share_of_market_scan"] = _safe_ratio(sector_base["volume_surge_count"], pd.Series([source_totals.get("volume_surge", 0.0)] * len(sector_base), index=sector_base.index)).fillna(0.0)
     sector_base["turnover_surge_share_of_sector"] = _safe_ratio(sector_base["turnover_surge_count"], sector_base["sector_constituent_count"]).fillna(0.0)
     sector_base["turnover_surge_share_of_market_scan"] = _safe_ratio(sector_base["turnover_surge_count"], pd.Series([source_totals.get("turnover_surge", 0.0)] * len(sector_base), index=sector_base.index)).fillna(0.0)
-    sector_base["breadth_up_rate"] = _safe_ratio(sector_base["breadth_up"], sector_base["scan_member_count"]).fillna(0.0)
-    sector_base["breadth_down_rate"] = _safe_ratio(sector_base["breadth_down"], sector_base["scan_member_count"]).fillna(0.0)
+    sector_base["breadth_up_rate"] = sector_base["price_up_share_of_sector"]
+    sector_base["breadth_down_rate"] = 0.0
     sector_base["breadth_balance"] = sector_base["breadth_up_rate"] - sector_base["breadth_down_rate"]
     sector_base["breadth_net_rate"] = sector_base["breadth_balance"]
-    sector_base["breadth_sample_count"] = (_coerce_numeric(sector_base["breadth_up"]).fillna(0.0) + _coerce_numeric(sector_base["breadth_down"]).fillna(0.0))
-    sector_base["breadth_active_coverage"] = _safe_ratio(sector_base["breadth_sample_count"], sector_base["scan_member_count"]).fillna(0.0)
+    sector_base["breadth_sample_count"] = _coerce_numeric(sector_base["ranking_confirmed_count"]).fillna(0.0)
+    sector_base["breadth_active_coverage"] = sector_base["ranking_confirmed_coverage"]
     sector_base["breadth_reliability"] = _safe_ratio(
         sector_base["breadth_sample_count"],
         pd.Series([float(breadth_settings["reliability_k"])] * len(sector_base), index=sector_base.index),
     ).fillna(0.0).clip(lower=0.0, upper=1.0)
-    sector_base["breadth"] = sector_base.apply(lambda row: f"{int(row.get('breadth_up', 0) or 0)}:{int(row.get('breadth_down', 0) or 0)}", axis=1)
+    sector_base["breadth"] = sector_base.apply(lambda row: f"{int(row.get('ranking_source_breadth_ex_basket', 0) or 0)}src/{int(row.get('ranking_confirmed_count', 0) or 0)}rk", axis=1)
     sector_base["median_ret"] = _coerce_numeric(sector_base["median_live_ret"])
     sector_base["scan_member_share_of_market_scan"] = _safe_ratio(sector_base["scan_member_count"], pd.Series([market_scan_member_count] * len(sector_base), index=sector_base.index)).fillna(0.0)
     sector_base["scan_member_count_norm"] = _score_percentile(sector_base["scan_member_count"])
-    sector_base["source_bias_share"] = _safe_ratio(sector_base["max_scan_source_count"], sector_base["scan_member_count"]).fillna(0.0)
+    sector_base["wide_scan_member_count_norm"] = sector_base["scan_member_count_norm"]
+    sector_base["ranking_confirmed_count_norm"] = _score_percentile(sector_base["ranking_confirmed_count"])
+    sector_base["ranking_source_breadth_ex_basket_norm"] = _safe_ratio(
+        sector_base["ranking_source_breadth_ex_basket"],
+        pd.Series([market_scan_source_count] * len(sector_base), index=sector_base.index),
+    ).fillna(0.0)
+    sector_base["price_up_count_norm"] = _score_percentile(sector_base["price_up_count"])
+    sector_base["turnover_count_norm"] = _score_percentile(sector_base["turnover_count"])
+    sector_base["volume_surge_count_norm"] = _score_percentile(sector_base["volume_surge_count"])
+    sector_base["turnover_surge_count_norm"] = _score_percentile(sector_base["turnover_surge_count"])
+    sector_base["source_bias_share"] = _safe_ratio(sector_base["max_scan_source_count"], sector_base["ranking_confirmed_count"]).fillna(0.0)
     sector_base["industry_up_rank_norm"] = _score_rank_ascending(sector_base["industry_rank_live"])
-    sector_base["leader_concentration_share"] = _safe_ratio(sector_base["leader_live_turnover"], sector_base["live_turnover_total"]).fillna(0.0)
+    sector_base["leader_concentration_share"] = 0.0
     sector_base["price_up_rate"] = sector_base["price_up_share_of_sector"]
     sector_base["turnover_count_rate"] = sector_base["turnover_share_of_sector"]
     sector_base["volume_surge_rate"] = sector_base["volume_surge_share_of_sector"]
     sector_base["turnover_surge_rate"] = sector_base["turnover_surge_share_of_sector"]
-    sector_base["scan_participation_rate"] = sector_base["scan_coverage"]
-    sector_base["n"] = sector_base["scan_member_count"].fillna(0.0).astype(int)
+    sector_base["scan_participation_rate"] = sector_base["ranking_confirmed_coverage"]
+    sector_base["n"] = sector_base["wide_scan_member_count"].fillna(0.0).astype(int)
     sector_base["price_block_score"] = 0.0
     for column, weight in INTRADAY_BLOCK_COMPONENT_WEIGHTS["price"].items():
         sector_base["price_block_score"] += _coerce_numeric(sector_base[column]).fillna(0.0) * weight
@@ -2745,108 +3112,122 @@ def _build_intraday_sector_leaderboard(
         + sector_base["participation_block_score"] * mode_block_weights["participation"]
     )
     sector_base["intraday_total_score"] = sector_base["intraday_sector_score_raw"]
-    weak_up = sector_base["breadth_up_rate"] < float(breadth_settings["penalty_up_rate"])
-    weak_balance = sector_base["breadth_balance"] < float(breadth_settings["penalty_balance"])
-    weak_sample = sector_base["breadth_sample_count"] < float(breadth_settings["penalty_sample"])
+    weak_up = sector_base["ranking_source_breadth_ex_basket"] < 2.0
+    weak_balance = sector_base["ranking_confirmed_coverage"] < 0.10
+    weak_sample = sector_base["ranking_confirmed_count"] < 5.0
     penalty_hits = weak_up.astype(int) + weak_balance.astype(int) + weak_sample.astype(int)
     sector_base["breadth_penalty_flag"] = penalty_hits.gt(0)
-    sector_base["breadth_warning_flag"] = (
-        (sector_base["breadth_up_rate"] < float(breadth_settings["warn_up_rate"]))
-        | (sector_base["breadth_balance"] < float(breadth_settings["warn_balance"]))
-        | (sector_base["breadth_sample_count"] < float(breadth_settings["warn_sample"]))
-    )
+    sector_base["breadth_warning_flag"] = sector_base["breadth_penalty_flag"]
     sector_base["breadth_penalty"] = 0.0
-    sector_base.loc[penalty_hits == 1, "breadth_penalty"] = float(breadth_settings["light_penalty"])
-    sector_base.loc[penalty_hits >= 2, "breadth_penalty"] = float(breadth_settings["heavy_penalty"])
     sector_base["concentration_penalty"] = 0.0
-    leader_share = _coerce_numeric(sector_base["leader_concentration_share"]).fillna(0.0)
-    scan_member_count = _coerce_numeric(sector_base["scan_member_count"]).fillna(0.0)
-    sector_base.loc[leader_share >= float(concentration_settings["light_share"]), "concentration_penalty"] = float(concentration_settings["light_penalty"])
-    sector_base.loc[leader_share >= float(concentration_settings["heavy_share"]), "concentration_penalty"] = float(concentration_settings["heavy_penalty"])
-    micro_sample_mask = (scan_member_count <= 2.0) & (leader_share >= float(concentration_settings["warn_share"]))
-    sector_base.loc[micro_sample_mask, "concentration_penalty"] = _coerce_numeric(sector_base.loc[micro_sample_mask, "concentration_penalty"]).fillna(0.0) + float(concentration_settings["micro_sample_penalty"])
     sector_base["intraday_penalty_total"] = 0.0
     sector_base["intraday_sector_score"] = sector_base["intraday_sector_score_raw"]
     sector_base["today_sector_score"] = sector_base["intraday_sector_score"]
     price_strong_cutoff = _coerce_numeric(sector_base["price_block_score"]).quantile(0.75)
     flow_strong_cutoff = _coerce_numeric(sector_base["flow_block_score"]).quantile(0.75)
-    participation_strong_cutoff = _coerce_numeric(sector_base["participation_block_score"]).quantile(0.75)
+    price_weak_cutoff = _coerce_numeric(sector_base["price_block_score"]).quantile(0.35)
+    flow_weak_cutoff = _coerce_numeric(sector_base["flow_block_score"]).quantile(0.35)
     if pd.isna(price_strong_cutoff):
         price_strong_cutoff = 0.0
     if pd.isna(flow_strong_cutoff):
         flow_strong_cutoff = 0.0
-    if pd.isna(participation_strong_cutoff):
-        participation_strong_cutoff = 0.0
+    if pd.isna(price_weak_cutoff):
+        price_weak_cutoff = 0.0
+    if pd.isna(flow_weak_cutoff):
+        flow_weak_cutoff = 0.0
     strong_price_signal = (
         (_coerce_numeric(sector_base["price_block_score"]).fillna(0.0) > 0.0)
         & (_coerce_numeric(sector_base["price_block_score"]).fillna(0.0) >= float(price_strong_cutoff))
+        & (_coerce_numeric(sector_base["industry_up_rank_norm"]).fillna(0.0) >= 0.55)
     )
     strong_flow_signal = (
         (_coerce_numeric(sector_base["flow_block_score"]).fillna(0.0) > 0.0)
         & (_coerce_numeric(sector_base["flow_block_score"]).fillna(0.0) >= float(flow_strong_cutoff))
     )
-    strong_participation_signal = (
-        (_coerce_numeric(sector_base["participation_block_score"]).fillna(0.0) > 0.0)
-        & (_coerce_numeric(sector_base["participation_block_score"]).fillna(0.0) >= float(participation_strong_cutoff))
-        & (_coerce_numeric(sector_base["signal_breadth_count"]).fillna(0.0) >= 3.0)
-        & (_coerce_numeric(sector_base["scan_coverage"]).fillna(0.0) >= 0.30)
-    )
+    weak_price_signal = _coerce_numeric(sector_base["price_block_score"]).fillna(0.0) <= float(price_weak_cutoff)
+    weak_flow_signal = _coerce_numeric(sector_base["flow_block_score"]).fillna(0.0) <= float(flow_weak_cutoff)
     sector_base["rank_shift_limit"] = float(INTRADAY_INDUSTRY_RANK_TETHER["base_shift"])
-    sector_base.loc[strong_price_signal & strong_flow_signal, "rank_shift_limit"] = float(INTRADAY_INDUSTRY_RANK_TETHER["strong_shift"])
-    sector_base.loc[strong_price_signal & strong_flow_signal & strong_participation_signal, "rank_shift_limit"] = float(INTRADAY_INDUSTRY_RANK_TETHER["very_strong_shift"])
     sector_base["sector_confidence_score"] = 0.0
-    sector_base.loc[sector_base["scan_member_count"] >= 5, "sector_confidence_score"] += 1.0
-    sector_base.loc[sector_base["scan_coverage"] >= 0.45, "sector_confidence_score"] += 1.0
-    sector_base.loc[sector_base["signal_breadth_count"] >= 3, "sector_confidence_score"] += 0.75
-    sector_base.loc[sector_base["signal_breadth_share"] >= 0.75, "sector_confidence_score"] += 0.5
+    sector_base.loc[sector_base["ranking_confirmed_count"] >= 5, "sector_confidence_score"] += 1.0
+    sector_base.loc[sector_base["ranking_confirmed_coverage"] >= 0.12, "sector_confidence_score"] += 0.75
+    sector_base.loc[sector_base["ranking_source_breadth_ex_basket"] >= 2, "sector_confidence_score"] += 0.75
+    sector_base.loc[sector_base["ranking_source_breadth_ex_basket"] >= 3, "sector_confidence_score"] += 0.5
     sector_base.loc[strong_price_signal, "sector_confidence_score"] += 0.5
     sector_base.loc[strong_flow_signal, "sector_confidence_score"] += 0.5
-    sector_base.loc[(sector_base["industry_up_rank_norm"] >= 0.7) & strong_participation_signal, "sector_confidence_score"] += 0.5
+    sector_base.loc[sector_base["industry_up_rank_norm"] >= 0.75, "sector_confidence_score"] += 0.5
     sector_base["sector_confidence"] = sector_base["sector_confidence_score"].apply(_build_sector_confidence)
     scan_sample_warning_level, scan_sample_warning_label, scan_sample_warning_reason = _scan_sample_warning_details(
-        sector_base["scan_member_count"],
-        sector_base["scan_coverage"],
+        sector_base["wide_scan_member_count"],
+        sector_base["wide_scan_coverage"],
     )
     sector_base["scan_sample_warning_level"] = scan_sample_warning_level
     sector_base["scan_sample_warning_flag"] = sector_base["scan_sample_warning_level"].astype(str).str.strip() != ""
     sector_base["scan_sample_warning_reason"] = scan_sample_warning_reason
-    sector_base["ranking_breadth_warning_flag"] = (
-        (_coerce_numeric(sector_base["signal_breadth_count"]).fillna(0.0) <= 1.0)
-        | (_coerce_numeric(sector_base["signal_breadth_share"]).fillna(0.0) < 0.50)
+    sector_base["ranking_breadth_warning_flag"] = _coerce_numeric(sector_base["ranking_source_breadth_ex_basket"]).fillna(0.0) <= 1.0
+    sector_base["source_bias_warning_flag"] = _coerce_numeric(sector_base["ranking_source_breadth_ex_basket"]).fillna(0.0) == 1.0
+    sector_base["severe_caution_flag"] = (
+        (_coerce_numeric(sector_base["ranking_confirmed_count"]).fillna(0.0) <= 2.0)
+        | (_coerce_numeric(sector_base["wide_scan_member_count"]).fillna(0.0) < float(WIDE_SCAN_BASKET_MIN_PER_SECTOR))
     )
-    sector_base["source_bias_warning_flag"] = (
-        (_coerce_numeric(sector_base["source_bias_share"]).fillna(0.0) >= 0.80)
-        & (_coerce_numeric(sector_base["signal_breadth_count"]).fillna(0.0) <= 2.0)
-    ) | (
-        (_coerce_numeric(sector_base["scan_member_share_of_market_scan"]).fillna(0.0) < 0.03)
-        & (_coerce_numeric(sector_base["scan_member_count"]).fillna(0.0) < 4.0)
+    market_scan_quality = _summarize_market_scan_quality(
+        sector_frame=sector_base,
+        ranking_union_count=int(ranking_union_total_count or 0),
+        sector_basket_counts={str(key): int(value or 0) for key, value in sector_basket_counts.items()},
     )
+    sector_base["today_rank_mode"] = str(market_scan_quality["mode"])
+    sector_base["rank_mode_reason"] = str(market_scan_quality["reason"])
+    sector_base["market_scan_quality_summary"] = str(market_scan_quality["summary"])
+    sector_base["max_upshift"] = 0
+    sector_base["max_downshift"] = 0
+    if str(market_scan_quality["mode"]) == "anchored_overlay":
+        sector_base.loc[
+            (_coerce_numeric(sector_base["ranking_confirmed_count"]).fillna(0.0) <= 2.0)
+            | weak_price_signal
+            | weak_flow_signal,
+            "max_downshift",
+        ] = 1
+        sector_base.loc[
+            (_coerce_numeric(sector_base["ranking_confirmed_count"]).fillna(0.0) == 0.0)
+            | (weak_price_signal & weak_flow_signal),
+            "max_downshift",
+        ] = int(INTRADAY_INDUSTRY_RANK_TETHER["max_downshift"])
+        plus_one_mask = (
+            (_coerce_numeric(sector_base["ranking_confirmed_count"]).fillna(0.0) >= 5.0)
+            & (_coerce_numeric(sector_base["ranking_source_breadth_ex_basket"]).fillna(0.0) >= 2.0)
+            & strong_price_signal
+        )
+        plus_two_mask = (
+            (_coerce_numeric(sector_base["ranking_confirmed_count"]).fillna(0.0) >= 8.0)
+            & (_coerce_numeric(sector_base["ranking_source_breadth_ex_basket"]).fillna(0.0) >= 3.0)
+            & strong_price_signal
+            & strong_flow_signal
+            & ~sector_base["severe_caution_flag"]
+        )
+        sector_base.loc[plus_one_mask, "max_upshift"] = int(INTRADAY_INDUSTRY_RANK_TETHER["strong_shift"])
+        sector_base.loc[plus_two_mask, "max_upshift"] = int(INTRADAY_INDUSTRY_RANK_TETHER["very_strong_shift"])
+    sector_base["rank_shift_limit"] = _coerce_numeric(sector_base["max_upshift"]).fillna(0.0)
     sector_base["sector_caution"] = sector_base.apply(
         lambda row: _build_sector_caution_tags(
             [
-                str(scan_sample_warning_label.loc[row.name] or "") if row.name in scan_sample_warning_label.index else "",
-                "ランキング広がり弱い" if bool(row.get("ranking_breadth_warning_flag")) else "",
+                "ランキング裏付けなし" if float(row.get("ranking_confirmed_count", 0.0) or 0.0) <= 0.0 else "",
+                "ランキング裏付け極少" if 1.0 <= float(row.get("ranking_confirmed_count", 0.0) or 0.0) <= 2.0 else "",
+                "ランキング裏付け薄い" if 3.0 <= float(row.get("ranking_confirmed_count", 0.0) or 0.0) <= 4.0 else "",
                 "source偏りあり" if bool(row.get("source_bias_warning_flag")) else "",
-                "業種順位先行" if float(row.get("industry_up_rank_norm", 0.0) or 0.0) >= 0.8 and float(row.get("rank_shift_limit", 0.0) or 0.0) <= float(INTRADAY_INDUSTRY_RANK_TETHER["base_shift"]) else "",
+                "wide scan母数不足" if float(row.get("wide_scan_member_count", 0.0) or 0.0) < float(WIDE_SCAN_BASKET_MIN_PER_SECTOR) else "",
+                "業種順位先行" if float(row.get("industry_up_rank_norm", 0.0) or 0.0) >= 0.8 and float(row.get("max_upshift", 0.0) or 0.0) <= 0.0 else "",
             ]
         ),
         axis=1,
     )
-    sector_base = sector_base[sector_base["sector_constituent_count"] >= 3].copy()
     sector_base = sector_base.sort_values(
         ["intraday_sector_score", "price_block_score", "flow_block_score", "participation_block_score"],
         ascending=[False, False, False, False],
     ).reset_index(drop=True)
     sector_base["score_rank"] = range(1, len(sector_base) + 1)
-    sector_base["industry_anchor_rank"] = _coerce_numeric(sector_base["industry_rank_live"]).fillna(sector_base["score_rank"])
     sector_base["industry_up_rank"] = _rank_display_series(sector_base["industry_rank_live"], fallback=sector_base["score_rank"])
-    rank_floor = sector_base["industry_anchor_rank"] - _coerce_numeric(sector_base["rank_shift_limit"]).fillna(0.0)
-    rank_ceiling = sector_base["industry_anchor_rank"] + _coerce_numeric(sector_base["rank_shift_limit"]).fillna(0.0)
-    sector_base["tethered_rank"] = _coerce_numeric(sector_base["score_rank"]).fillna(0.0)
-    sector_base["tethered_rank"] = sector_base["tethered_rank"].where(sector_base["tethered_rank"] >= rank_floor, rank_floor)
-    sector_base["tethered_rank"] = sector_base["tethered_rank"].where(sector_base["tethered_rank"] <= rank_ceiling, rank_ceiling)
     sector_base["industry_up_anchor_rank"] = _rank_display_series(sector_base["industry_anchor_rank"], fallback=sector_base["industry_up_rank"])
     sector_base["industry_up"] = _coerce_numeric(sector_base["industry_up_value"]).fillna(_coerce_numeric(sector_base["industry_up_rank"]))
+    sector_base["tethered_rank"] = _coerce_numeric(sector_base["industry_anchor_rank"]).fillna(0.0)
     sector_base = _apply_true_rank_shift_limits(sector_base)
     return _sort_today_sector_leaderboard_for_display(sector_base)
 
@@ -3023,13 +3404,17 @@ def _summarize_sector_rank_table(frame: pd.DataFrame, *, limit: int = 10) -> lis
         return []
     summary: list[dict[str, Any]] = []
     for _, row in frame.head(limit).iterrows():
+        display_rank = int(row.get("today_display_rank", row.get("today_rank", 0)) or 0)
         summary.append(
             {
-                "today_rank": int(row.get("today_rank", 0) or 0),
+                "today_rank": display_rank,
+                "today_display_rank": display_rank,
                 "sector_name": str(row.get("sector_name", "") or ""),
                 "breadth": str(row.get("breadth", "") or ""),
                 "sector_confidence": str(row.get("sector_confidence", "") or ""),
                 "sector_caution": str(row.get("sector_caution", "") or ""),
+                "industry_anchor_rank": int(row.get("industry_anchor_rank", 0) or 0),
+                "today_rank_mode": str(row.get("today_rank_mode", "") or ""),
             }
         )
     return summary
@@ -3038,11 +3423,11 @@ def _summarize_sector_rank_table(frame: pd.DataFrame, *, limit: int = 10) -> lis
 def _summarize_sector_rank_changes(before: pd.DataFrame, after: pd.DataFrame, *, limit: int = 10) -> list[dict[str, Any]]:
     if before.empty or after.empty:
         return []
-    before_map = {str(row.get("sector_name", "") or ""): int(row.get("today_rank", 0) or 0) for _, row in before.iterrows()}
+    before_map = {str(row.get("sector_name", "") or ""): int(row.get("today_display_rank", row.get("today_rank", 0)) or 0) for _, row in before.iterrows()}
     changes: list[dict[str, Any]] = []
     for _, row in after.head(limit).iterrows():
         sector_name = str(row.get("sector_name", "") or "")
-        after_rank = int(row.get("today_rank", 0) or 0)
+        after_rank = int(row.get("today_display_rank", row.get("today_rank", 0)) or 0)
         before_rank = before_map.get(sector_name)
         if before_rank is None:
             changes.append({"sector_name": sector_name, "before_rank": None, "after_rank": after_rank})
@@ -3070,23 +3455,30 @@ def _summarize_industry_anchor_positions(industry_df: pd.DataFrame, today_sector
         industry_row = matched.iloc[0]
         sector_name = str(industry_row.get("sector_name", "") or "")
         current_row = leaderboard_map.loc[sector_name] if isinstance(leaderboard_map, pd.DataFrame) and sector_name in leaderboard_map.index else None
-        current_today_rank = int(current_row.get("today_rank", 0) or 0) if current_row is not None else None
+        current_today_rank = int(current_row.get("today_display_rank", current_row.get("today_rank", 0)) or 0) if current_row is not None else None
         summary.append(
             {
                 "sector_name": sector_name,
                 "industry_up_rank": int(anchor_rank),
                 "industry_up_value": float(industry_row.get("industry_up_value", 0.0) or 0.0) if pd.notna(industry_row.get("industry_up_value")) else None,
                 "today_rank": current_today_rank,
+                "today_display_rank": current_today_rank,
                 "rank_delta_vs_industry": (current_today_rank - int(anchor_rank)) if current_today_rank is not None else None,
                 "tethered_rank": float(current_row.get("tethered_rank", 0.0) or 0.0) if current_row is not None and pd.notna(current_row.get("tethered_rank")) else None,
                 "score_rank": int(current_row.get("score_rank", 0) or 0) if current_row is not None and pd.notna(current_row.get("score_rank")) else None,
                 "industry_anchor_rank": int(current_row.get("industry_anchor_rank", 0) or 0) if current_row is not None and pd.notna(current_row.get("industry_anchor_rank")) else int(anchor_rank),
                 "allowed_shift": int(current_row.get("allowed_shift", 0) or 0) if current_row is not None and pd.notna(current_row.get("allowed_shift")) else None,
                 "rank_shift_limit": int(current_row.get("rank_shift_limit", 0) or 0) if current_row is not None and pd.notna(current_row.get("rank_shift_limit")) else None,
+                "today_rank_mode": str(current_row.get("today_rank_mode", "") or "") if current_row is not None else "",
+                "rank_mode_reason": str(current_row.get("rank_mode_reason", "") or "") if current_row is not None else "",
+                "max_upshift": int(current_row.get("max_upshift", 0) or 0) if current_row is not None and pd.notna(current_row.get("max_upshift")) else None,
                 "upshift_blocked_reason": str(current_row.get("upshift_blocked_reason", "") or "") if current_row is not None else "",
                 "rank_constraint_applied": bool(current_row.get("rank_constraint_applied", False)) if current_row is not None else False,
                 "final_rank_delta": float(current_row.get("final_rank_delta", 0.0) or 0.0) if current_row is not None and pd.notna(current_row.get("final_rank_delta")) else None,
                 "scan_member_count": int(current_row.get("scan_member_count", 0) or 0) if current_row is not None else 0,
+                "wide_scan_member_count": int(current_row.get("wide_scan_member_count", 0) or 0) if current_row is not None else 0,
+                "ranking_confirmed_count": int(current_row.get("ranking_confirmed_count", 0) or 0) if current_row is not None else 0,
+                "ranking_source_breadth_ex_basket": int(current_row.get("ranking_source_breadth_ex_basket", 0) or 0) if current_row is not None else 0,
                 "scan_sample_warning_level": str(current_row.get("scan_sample_warning_level", "") or "") if current_row is not None else "",
                 "scan_sample_warning_reason": str(current_row.get("scan_sample_warning_reason", "") or "") if current_row is not None else "",
             }
@@ -3730,6 +4122,23 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
     }
     meta = build_snapshot_meta(mode=mode, generated_at=now_ts, source_profile="local_kabu_jq_yanoshin", includes_kabu=True)
     tuned_top_sector_names = today_sector_leaderboard.head(5)["sector_name"].astype(str).tolist() if not today_sector_leaderboard.empty else []
+    filtered_wide_scan_total_count = int(filtered_ranking_df["code"].astype(str).drop_duplicates().shape[0]) if not filtered_ranking_df.empty and "code" in filtered_ranking_df.columns else 0
+    filtered_ranking_union_count = int(filtered_ranking_df[filtered_ranking_df.get("ranking_union_member", pd.Series(False, index=filtered_ranking_df.index)).fillna(False)]["code"].astype(str).drop_duplicates().shape[0]) if not filtered_ranking_df.empty and "code" in filtered_ranking_df.columns else 0
+    filtered_industry_basket_count = int(filtered_ranking_df[filtered_ranking_df.get("industry_basket_member", pd.Series(False, index=filtered_ranking_df.index)).fillna(False)]["code"].astype(str).drop_duplicates().shape[0]) if not filtered_ranking_df.empty and "code" in filtered_ranking_df.columns else 0
+    filtered_sector_basket_counts = (
+        filtered_ranking_df[filtered_ranking_df.get("industry_basket_member", pd.Series(False, index=filtered_ranking_df.index)).fillna(False)]
+        .groupby("sector_name")["code"]
+        .nunique()
+        .to_dict()
+        if not filtered_ranking_df.empty and "sector_name" in filtered_ranking_df.columns and "code" in filtered_ranking_df.columns
+        else {}
+    )
+    today_market_scan_quality = _summarize_market_scan_quality(
+        sector_frame=today_sector_leaderboard,
+        ranking_union_count=filtered_ranking_union_count,
+        sector_basket_counts={str(key): int(value or 0) for key, value in filtered_sector_basket_counts.items()},
+    )
+    today_sector_scan_mode = str(today_market_scan_quality["mode"])
     industry_anchor_watch_before = _summarize_industry_anchor_positions(industry_df, baseline_today_sector_leaderboard, anchor_ranks=[2, 3, 4])
     industry_anchor_watch_after = _summarize_industry_anchor_positions(industry_df, today_sector_leaderboard, anchor_ranks=[2, 3, 4])
     tuning_compare = {
@@ -3775,27 +4184,37 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
             "buy_candidate_count": int(len(swing_candidates["1m"])),
             "center_stock_count": int(len(sector_representatives)),
             "ranking_candidate_count": int(len(filtered_ranking_df)),
-            "sector_summary_scope": "full_tse_industry_universe_left_join_scan_adjustments",
-            "today_sector_population_basis": "industry_up_full_universe_then_left_join_scan_sector_aggregates",
+            "sector_summary_scope": "full_tse_industry_universe_left_join_wide_scan_adjustments",
+            "today_sector_population_basis": "industry_up_full_universe_then_left_join_wide_scan_sector_aggregates",
             "today_sector_population_counts": {
                 "industry_universe_count": int(industry_df["sector_name"].astype(str).map(_normalize_industry_name).str.strip().replace("", pd.NA).dropna().nunique()) if not industry_df.empty and "sector_name" in industry_df.columns else 0,
                 "leaderboard_sector_count": int(len(today_sector_leaderboard)),
                 "scan_sector_count": int(filtered_ranking_df.get("sector_name", pd.Series(dtype=str)).astype(str).str.strip().replace("", pd.NA).dropna().map(_normalize_industry_name).nunique()) if not filtered_ranking_df.empty else 0,
                 "scan_zero_sector_count": int(_coerce_numeric(today_sector_leaderboard.get("scan_member_count", pd.Series(dtype="float64"))).fillna(0.0).eq(0.0).sum()) if not today_sector_leaderboard.empty else 0,
             },
+            "wide_scan_total_count": filtered_wide_scan_total_count,
+            "ranking_union_count": filtered_ranking_union_count,
+            "industry_basket_count": filtered_industry_basket_count,
+            "sector_basket_counts": {str(key): int(value or 0) for key, value in filtered_sector_basket_counts.items()},
+            "sectors_with_ranking_confirmed_ge5": int(today_market_scan_quality["sectors_with_ranking_confirmed_ge5"]),
+            "sectors_with_source_breadth_ge2": int(today_market_scan_quality["sectors_with_source_breadth_ge2"]),
+            "wide_scan_mode": today_sector_scan_mode,
+            "today_rank_mode": today_sector_scan_mode,
+            "rank_mode_reason": str(today_market_scan_quality["reason"]),
+            "market_scan_quality_summary": str(today_market_scan_quality["summary"]),
             "today_upshift_block_rules": [
-                "scan裏付けなし",
-                "scan母数極少",
+                "ランキング裏付けなし",
+                "ランキング裏付け極少",
+                "ランキング裏付け薄い",
                 "source偏りあり",
-                "ランキング広がり弱い",
-                "信頼度=低",
+                "wide scan母数不足",
             ],
-            "breadth_scope": "scan_based_caution_live_data_only_for_representatives",
-            "today_sector_primary_rank_column": "tethered_rank",
-            "today_sector_display_rank_column": "today_rank",
-            "today_top_sectors_basis": "today_sector_leaderboard_sorted_by_true_tethered_slot_then_industry_anchor_then_score_rank",
-            "today_rank_rule": "today_rank_is_reassigned_as_dense_display_rank_after_final_sector_sort",
-            "today_rank_absolute_constraint": "abs(today_rank-industry_anchor_rank)<=allowed_shift and blocked_upshift_sectors_cannot_finish_above_industry_anchor_rank",
+            "breadth_scope": "wide_scan_based_caution_without_live_sector_inputs",
+            "today_sector_primary_rank_column": "today_display_rank",
+            "today_sector_display_rank_column": "today_display_rank",
+            "today_top_sectors_basis": "today_sector_leaderboard_sorted_by_final_dense_display_rank_after_industry_anchor_overlay",
+            "today_rank_rule": "today_display_rank_is_dense_final_rank_and_today_rank_equals_today_display_rank",
+            "today_rank_absolute_constraint": "anchor_only_days_keep_industry_anchor_order; anchored_overlay_days_allow_max_upshift<=2_and_max_downshift<=2",
             "today_sector_removed_live_inputs": [
                 "median_live_ret_norm",
                 "turnover_ratio_median_norm",
@@ -3804,44 +4223,50 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
                 "breadth_balance",
                 "breadth_penalty",
                 "concentration_penalty",
+                "leader_concentration_share",
             ],
             "today_sector_participation_inputs": [
-                "signal_breadth_count",
-                "signal_breadth_share",
-                "scan_coverage",
-                "scan_member_count",
-                "scan_member_share_of_market_scan",
+                "ranking_source_breadth_ex_basket",
+                "ranking_confirmed_count_norm",
+                "ranking_confirmed_share_of_sector",
             ],
             "scan_sample_warning_rules": {
-                "items": ["scan_member_count", "scan_coverage"],
+                "items": ["wide_scan_member_count", "wide_scan_coverage"],
                 "no_scan": {
-                    "scan_member_count_eq": 0,
-                    "label": "scan裏付けなし",
+                    "wide_scan_member_count_eq": 0,
+                    "label": "wide scan母数不足",
                 },
                 "critical": {
-                    "scan_member_count_lt": int(INTRADAY_SCAN_SAMPLE_WARNING_RULES["critical_count"]),
-                    "label": "scan母数極少",
+                    "wide_scan_member_count_lt": int(INTRADAY_SCAN_SAMPLE_WARNING_RULES["critical_count"]),
+                    "label": "wide scan母数不足",
                 },
                 "warn": {
-                    "scan_member_count_lt": int(INTRADAY_SCAN_SAMPLE_WARNING_RULES["warn_count"]),
-                    "scan_coverage_lt": float(INTRADAY_SCAN_SAMPLE_WARNING_RULES["warn_coverage"]),
-                    "label": "scan母数少",
+                    "wide_scan_member_count_lt": int(INTRADAY_SCAN_SAMPLE_WARNING_RULES["warn_count"]),
+                    "wide_scan_coverage_lt": float(INTRADAY_SCAN_SAMPLE_WARNING_RULES["warn_coverage"]),
+                    "label": "wide scan母数不足",
                 },
                 "thin": {
-                    "scan_member_count_lt": int(INTRADAY_SCAN_SAMPLE_WARNING_RULES["thin_count"]),
-                    "scan_coverage_lt": float(INTRADAY_SCAN_SAMPLE_WARNING_RULES["thin_coverage"]),
-                    "label": "scan母数薄い",
+                    "wide_scan_member_count_lt": int(INTRADAY_SCAN_SAMPLE_WARNING_RULES["thin_count"]),
+                    "wide_scan_coverage_lt": float(INTRADAY_SCAN_SAMPLE_WARNING_RULES["thin_coverage"]),
+                    "label": "wide scan母数不足",
                 },
-                "note": "scan_member_count>=10 sectors are not flagged by this rule",
+                "note": "today sector caution prioritizes ranking_confirmed support; wide_scan warnings are baseline-only context",
             },
             "today_sector_rank_tether": {
                 "anchor": "industry_up",
                 "base_shift": int(INTRADAY_INDUSTRY_RANK_TETHER["base_shift"]),
                 "strong_shift": int(INTRADAY_INDUSTRY_RANK_TETHER["strong_shift"]),
                 "very_strong_shift": int(INTRADAY_INDUSTRY_RANK_TETHER["very_strong_shift"]),
-                "rule": "base_plus_minus_1_only_expand_to_2_when_price_and_flow_are_strong_expand_to_3_only_when_price_flow_participation_are_all_strong",
+                "max_downshift": int(INTRADAY_INDUSTRY_RANK_TETHER["max_downshift"]),
+                "rule": "default_upshift_0; plus1_requires_confirmed5_breadth2_and_strong_price; plus2_requires_confirmed8_breadth3_strong_price_flow_and_no_severe_caution; plus3_removed",
             },
+            "industry_anchor_watch_before": industry_anchor_watch_before,
             "industry_anchor_watch_after": industry_anchor_watch_after,
+            "top10_before_after_compare": {
+                "before": tuning_compare["sectors_before"],
+                "after": tuning_compare["sectors_after"],
+                "changes": tuning_compare["sector_rank_changes"],
+            },
             "includes_kabu": True,
             "non_corporate_products": product_filter_diag["non_corporate_products"],
             "tuning_compare": tuning_compare,
