@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 import pandas as pd
 import requests
@@ -755,14 +755,65 @@ def _is_streamlit_runtime() -> bool:
     )
 
 
-def _is_streamlit_cloud() -> bool:
+def _explicit_streamlit_cloud_flags() -> dict[str, str]:
+    return {
+        "STREAMLIT_SHARING_MODE": str(os.environ.get("STREAMLIT_SHARING_MODE", "")).strip(),
+        "STREAMLIT_CLOUD": str(os.environ.get("STREAMLIT_CLOUD", "")).strip(),
+        "STREAMLIT_RUNTIME": str(os.environ.get("STREAMLIT_RUNTIME", "")).strip(),
+        "STREAMLIT_SERVER_PORT": str(os.environ.get("STREAMLIT_SERVER_PORT", "")).strip(),
+        "STREAMLIT_SERVER_HEADLESS": str(os.environ.get("STREAMLIT_SERVER_HEADLESS", "")).strip(),
+    }
+
+
+def _is_local_collector_capable(settings: dict[str, Any] | None = None) -> bool:
+    settings = settings or get_settings()
+    api_key = (
+        _read_streamlit_secret("JQUANTS_API_KEY")
+        or str(os.environ.get("JQUANTS_API_KEY", "")).strip()
+        or str(settings.get("JQUANTS_API_KEY", "")).strip()
+    )
+    kabu_password = (
+        _read_streamlit_secret("KABU_API_PASSWORD")
+        or str(os.environ.get("KABU_API_PASSWORD", "")).strip()
+        or str(settings.get("KABU_API_PASSWORD", "")).strip()
+    )
+    kabu_base_url = str(settings.get("KABU_API_BASE_URL", "") or "").strip()
+    parsed = urlparse(kabu_base_url)
+    host = str(parsed.hostname or "").strip().lower()
+    local_hosts = {"localhost", "127.0.0.1", "::1"}
+    return bool(api_key) and bool(kabu_password) and host in local_hosts
+
+
+def _streamlit_runtime_context(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    settings = settings or get_settings()
+    env_flags = _explicit_streamlit_cloud_flags()
+    runtime_detected = _is_streamlit_runtime()
     sharing_mode = str(os.environ.get("STREAMLIT_SHARING_MODE", "")).strip().lower()
     cloud_flag = str(os.environ.get("STREAMLIT_CLOUD", "")).strip().lower()
-    if sharing_mode in {"1", "true", "cloud"}:
-        return True
-    if cloud_flag in {"1", "true", "yes"}:
-        return True
-    return False
+    explicit_cloud_detected = sharing_mode in {"1", "true", "cloud"} or cloud_flag in {"1", "true", "yes"}
+    local_collector_capable = _is_local_collector_capable(settings)
+    cloud_detected = bool(explicit_cloud_detected or (runtime_detected and not local_collector_capable))
+    viewer_only = bool(cloud_detected or (runtime_detected and not local_collector_capable))
+    if explicit_cloud_detected:
+        detection_reason = "explicit_streamlit_cloud_env"
+    elif runtime_detected and not local_collector_capable:
+        detection_reason = "streamlit_runtime_without_local_collector_prereqs_fail_closed_to_viewer_only"
+    elif runtime_detected and local_collector_capable:
+        detection_reason = "streamlit_runtime_with_local_collector_prereqs"
+    else:
+        detection_reason = "non_streamlit_runtime"
+    return {
+        "runtime_detected": bool(runtime_detected),
+        "cloud_detected": bool(cloud_detected),
+        "viewer_only": bool(viewer_only),
+        "local_collector_capable": bool(local_collector_capable),
+        "detection_reason": detection_reason,
+        "env_flags": env_flags,
+    }
+
+
+def _is_streamlit_cloud(settings: dict[str, Any] | None = None) -> bool:
+    return bool(_streamlit_runtime_context(settings).get("cloud_detected"))
 
 
 def _snapshot_json_path(mode: str, settings: dict[str, Any] | None = None) -> Path:
@@ -783,7 +834,8 @@ def _github_deploy_snapshot_json_path(mode: str, settings: dict[str, Any] | None
 
 
 def _viewer_snapshot_github_token() -> str:
-    use_streamlit_secrets = _is_streamlit_cloud()
+    runtime_context = _streamlit_runtime_context()
+    use_streamlit_secrets = bool(runtime_context.get("runtime_detected"))
     token = _github_control_token(use_streamlit_secrets=use_streamlit_secrets)
     if token:
         return token
@@ -904,6 +956,26 @@ def _render_snapshot_cache_admin_tools() -> None:
             st.cache_data.clear()
             st.success("snapshot cache をクリアしました。")
             st.rerun()
+
+
+def _render_runtime_detection_diagnostics(runtime_context: dict[str, Any]) -> None:
+    if not runtime_context:
+        return
+    summary = {
+        "runtime_detected": bool(runtime_context.get("runtime_detected")),
+        "cloud_detected": bool(runtime_context.get("cloud_detected")),
+        "viewer_only": bool(runtime_context.get("viewer_only")),
+        "local_collector_capable": bool(runtime_context.get("local_collector_capable")),
+        "detection_reason": str(runtime_context.get("detection_reason", "") or ""),
+        "env_flags": runtime_context.get("env_flags", {}),
+    }
+    st.caption(
+        "runtime_detected="
+        f"{summary['runtime_detected']} / cloud_detected={summary['cloud_detected']} / "
+        f"viewer_only={summary['viewer_only']} / reason={summary['detection_reason']}"
+    )
+    with st.expander("runtime detection", expanded=False):
+        st.json(summary)
 
 
 @contextmanager
@@ -5573,9 +5645,11 @@ def render_app() -> None:
     st.set_page_config(page_title="Sector Strength Live", layout="wide")
     st.title("セクター強度ライブ")
     settings = get_settings()
-    if _is_streamlit_cloud():
+    runtime_context = _streamlit_runtime_context(settings)
+    _render_runtime_detection_diagnostics(runtime_context)
+    if bool(runtime_context.get("viewer_only")):
         st.caption("Cloud では viewer-only で動作します。保存済み snapshot の表示と更新依頼だけを行います。")
-        st.info("latest_1130.json / latest_1530.json / latest_now.json を優先して読み込みます。Cloud では collector / kabu live 取得は実行しません。")
+        st.info("latest_0915.json / latest_1130.json / latest_1530.json / latest_now.json を優先して読み込みます。Cloud では collector / kabu live 取得は実行しません。")
         _render_viewer_only_app(settings)
         return
     st.caption("J-Quants を土台に、kabu ステーション API のライブデータを重ねてスナップショットを作成・表示します。")
