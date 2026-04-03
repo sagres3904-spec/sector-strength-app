@@ -774,9 +774,95 @@ def _snapshot_json_path(mode: str, settings: dict[str, Any] | None = None) -> Pa
     return output_path / f"latest_{mode}.json"
 
 
+def _github_deploy_snapshot_json_path(mode: str, settings: dict[str, Any] | None = None) -> str:
+    config = get_github_control_config(settings)
+    base_path = str(config["deploy_snapshot_json_path"]).strip().replace("\\", "/")
+    parent_dir, _, _ = base_path.rpartition("/")
+    file_name = f"latest_{mode}.json"
+    return f"{parent_dir}/{file_name}" if parent_dir else file_name
+
+
+def _viewer_snapshot_github_token() -> str:
+    use_streamlit_secrets = _is_streamlit_cloud()
+    token = _github_control_token(use_streamlit_secrets=use_streamlit_secrets)
+    if token:
+        return token
+    if use_streamlit_secrets:
+        return _github_control_token(use_streamlit_secrets=False)
+    return ""
+
+
+def _set_viewer_snapshot_mode_warnings(messages: list[str]) -> None:
+    try:
+        st.session_state["_viewer_snapshot_mode_warnings"] = list(messages)
+    except Exception:
+        pass
+
+
+def _get_viewer_snapshot_mode_warnings() -> list[str]:
+    try:
+        messages = st.session_state.get("_viewer_snapshot_mode_warnings", [])
+    except Exception:
+        return []
+    return [str(message).strip() for message in messages if str(message).strip()]
+
+
+def _read_github_deploy_snapshot_text(mode: str, settings: dict[str, Any] | None = None) -> tuple[str, str, str]:
+    settings = settings or get_settings()
+    config = get_github_control_config(settings)
+    path = _github_deploy_snapshot_json_path(mode, settings)
+    text, sha = github_read_text_file(
+        config["repository"],
+        config["deploy_branch"],
+        path,
+        _viewer_snapshot_github_token(),
+    )
+    source_path = f"{config['repository']}@{config['deploy_branch']}:{path}"
+    return text, sha, source_path
+
+
+def _load_saved_snapshot_payload_from_github(mode: str, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload_text, sha, source_path = _read_github_deploy_snapshot_text(mode, settings)
+    return {
+        "payload": json.loads(payload_text),
+        "paths": {"json_path": source_path, "json_sha": sha},
+        "source_label": f"{source_path} を読み込みました",
+        "backend_name": "github-deploy",
+        "warning_message": "",
+    }
+
+
+def _probe_viewer_snapshot_mode(mode: str, settings: dict[str, Any] | None = None) -> tuple[bool, str]:
+    settings = settings or get_settings()
+    try:
+        if _is_streamlit_cloud():
+            _load_saved_snapshot_payload_from_github(mode, settings)
+        else:
+            snapshot_path = _snapshot_json_path(mode, settings)
+            if not snapshot_path.exists():
+                raise FileNotFoundError(f"latest_{mode}.json がありません")
+            json.loads(snapshot_path.read_text(encoding="utf-8"))
+        return True, ""
+    except FileNotFoundError as exc:
+        return False, f"{mode}: missing ({exc})"
+    except json.JSONDecodeError as exc:
+        return False, f"{mode}: invalid json ({exc})"
+    except Exception as exc:
+        return False, f"{mode}: unavailable ({exc})"
+
+
 def _available_viewer_snapshot_modes(settings: dict[str, Any] | None = None) -> list[str]:
     settings = settings or get_settings()
-    return [mode for mode in VIEWER_ONLY_SNAPSHOT_MODES if _snapshot_json_path(mode, settings).exists()]
+    available_modes: list[str] = []
+    warnings: list[str] = []
+    for mode in VIEWER_ONLY_SNAPSHOT_MODES:
+        is_available, warning_message = _probe_viewer_snapshot_mode(mode, settings)
+        if is_available:
+            available_modes.append(mode)
+        elif warning_message:
+            warnings.append(warning_message)
+    _set_viewer_snapshot_mode_warnings(warnings)
+    return available_modes
 
 
 def _snapshot_mtime_ns(snapshot_path: Path) -> int:
@@ -940,6 +1026,50 @@ def _github_contents_url(repository: str, path: str) -> str:
     return f"https://api.github.com/repos/{repository}/contents/{path}"
 
 
+def _github_read_raw_text_fallback(
+    repository: str,
+    branch: str,
+    path: str,
+    token: str,
+    *,
+    session: requests.sessions.Session | None = None,
+    download_url: str = "",
+) -> str:
+    session = session or requests
+    fallback_errors: list[str] = []
+    if str(download_url or "").strip():
+        response = session.get(
+            str(download_url).strip(),
+            headers=_github_api_headers(token),
+            timeout=20,
+        )
+        if response.status_code == 404:
+            fallback_errors.append("download_url=404")
+        elif response.status_code < 400 and response.text:
+            return response.text
+        else:
+            fallback_errors.append(f"download_url_status={response.status_code}")
+    raw_headers = dict(_github_api_headers(token))
+    raw_headers["Accept"] = "application/vnd.github.raw"
+    response = session.get(
+        _github_contents_url(repository, path),
+        headers=raw_headers,
+        params={"ref": branch, "_ts": str(time.time_ns())},
+        timeout=20,
+    )
+    if response.status_code == 404:
+        raise FileNotFoundError(f"GitHub file not found: {repository}@{branch}:{path}")
+    if response.status_code >= 400:
+        details = ", ".join(fallback_errors)
+        suffix = f" fallback={details}" if details else ""
+        raise RuntimeError(f"GitHub raw read failed status={response.status_code} path={path}{suffix} body={_short_body(response.text)}")
+    if not response.text:
+        details = ", ".join(fallback_errors)
+        suffix = f" fallback={details}" if details else ""
+        raise RuntimeError(f"GitHub raw read returned empty content for {path}{suffix}")
+    return response.text
+
+
 def github_read_json_file(
     repository: str,
     branch: str,
@@ -972,11 +1102,22 @@ def github_read_text_file(
     if response.status_code >= 400:
         raise RuntimeError(f"GitHub read failed status={response.status_code} path={path} body={_short_body(response.text)}")
     payload = response.json()
+    sha = str(payload.get("sha", ""))
     encoded = str(payload.get("content", "")).replace("\n", "")
-    if not encoded:
-        raise RuntimeError(f"GitHub read returned empty content for {path}")
-    text = base64.b64decode(encoded).decode("utf-8")
-    return text, str(payload.get("sha", ""))
+    encoding = str(payload.get("encoding", "") or "").strip().lower()
+    if encoded and encoding in {"base64", ""}:
+        text = base64.b64decode(encoded).decode("utf-8")
+        if text:
+            return text, sha
+    text = _github_read_raw_text_fallback(
+        repository,
+        branch,
+        path,
+        token,
+        session=session,
+        download_url=str(payload.get("download_url", "") or ""),
+    )
+    return text, sha
 
 
 def github_write_json_file(
@@ -4999,11 +5140,114 @@ def build_live_snapshot(
 
 
 def write_snapshot_bundle(bundle: dict[str, Any], settings: dict[str, Any], *, write_drive: bool = False) -> dict[str, str]:
+    def _trim_sector_summary_for_storage(frame: Any) -> Any:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return frame
+        drop_columns = [
+            "wide_scan_member_codes",
+            "ranking_confirmed_codes",
+            "selected50_codes_in_sector",
+            "sector_center_candidate_codes",
+            "representative_candidate_codes",
+            "representative_excluded_reason_by_code",
+            "representative_trace_top10",
+        ]
+        keep_columns = [column for column in frame.columns if column not in drop_columns]
+        return frame[keep_columns].copy()
+
+    def _trim_representatives_for_storage(frame: Any) -> Any:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return frame
+        keep_columns = [
+            column
+            for column in [
+                "sector_name",
+                "representative_rank",
+                "code",
+                "name",
+                "live_price",
+                "live_ret_vs_prev_close",
+                "live_turnover",
+                "stock_turnover_share_of_sector",
+                "representative_score",
+                "rep_score_total",
+                "rep_score_centrality",
+                "rep_score_today_leadership",
+                "rep_score_sanity",
+                "representative_selected_reason",
+                "representative_quality_flag",
+                "representative_fallback_reason",
+                "was_in_selected50",
+                "was_in_must_have",
+                "nikkei_search",
+                "material_link",
+            ]
+            if column in frame.columns
+        ]
+        return frame[keep_columns].copy()
+
+    def _trim_diagnostics_for_storage(diagnostics: Any) -> Any:
+        if not isinstance(diagnostics, dict):
+            return diagnostics
+        trimmed = dict(diagnostics)
+        for key in [
+            "representative_sector_trace_top10",
+            "tuning_compare",
+            "non_corporate_products",
+            "sector_basket_counts",
+            "industry_anchor_watch_before",
+            "industry_anchor_watch_after",
+            "industry_anchor_presence_watch",
+            "top10_before_after_compare",
+            "base_meta",
+            "ranking",
+            "deep_watch",
+            "board",
+        ]:
+            trimmed.pop(key, None)
+        return trimmed
+
+    def _bundle_for_storage(source_bundle: dict[str, Any]) -> dict[str, Any]:
+        storage_bundle: dict[str, Any] = {}
+        for key, value in source_bundle.items():
+            if key in {
+                "today_sector_summary",
+                "today_sector_leaderboard",
+                "weekly_sector_summary",
+                "monthly_sector_summary",
+                "leaders_by_sector",
+                "center_stocks",
+                "focus_candidates",
+                "watch_candidates",
+                "buy_candidates",
+                "swing_buy_candidates_1w",
+                "swing_watch_candidates_1w",
+                "swing_buy_candidates_1m",
+                "swing_watch_candidates_1m",
+                "paths",
+                "snapshot_source_label",
+                "snapshot_backend_name",
+                "snapshot_warning_message",
+            }:
+                continue
+            if key == "sector_summary":
+                storage_bundle[key] = _trim_sector_summary_for_storage(value)
+                continue
+            if key == "sector_representatives":
+                storage_bundle[key] = _trim_representatives_for_storage(value)
+                continue
+            if key == "diagnostics":
+                storage_bundle[key] = _trim_diagnostics_for_storage(value)
+                continue
+            storage_bundle[key] = value.copy() if isinstance(value, pd.DataFrame) else value
+        return storage_bundle
+
+    storage_bundle = _bundle_for_storage(bundle)
     markdown_text = bundle_to_markdown(bundle)
     result = write_snapshot_bundle_to_store(
         mode=str(bundle["meta"]["mode"]),
         generated_at=str(bundle["meta"]["generated_at"]),
-        json_text=bundle_to_json_text(bundle),
+        json_text=bundle_to_json_text(storage_bundle),
         markdown_text=markdown_text,
         settings=settings,
         root_dir=ROOT_DIR,
@@ -5021,8 +5265,11 @@ def write_snapshot_bundle(bundle: dict[str, Any], settings: dict[str, Any], *, w
 
 def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> dict[str, Any]:
     settings = settings or get_settings()
-    snapshot_path = _snapshot_json_path(mode, settings)
-    cached_payload = _load_saved_snapshot_payload_cached(mode, str(snapshot_path), _snapshot_mtime_ns(snapshot_path))
+    if _is_streamlit_cloud():
+        cached_payload = _load_saved_snapshot_payload_from_github(mode, settings)
+    else:
+        snapshot_path = _snapshot_json_path(mode, settings)
+        cached_payload = _load_saved_snapshot_payload_cached(mode, str(snapshot_path), _snapshot_mtime_ns(snapshot_path))
     payload = cached_payload["payload"]
     meta = normalize_snapshot_meta(payload.get("meta", {}))
     snapshot_guard = evaluate_snapshot_guard(mode, meta)
@@ -5295,19 +5542,30 @@ def _render_viewer_only_app(settings: dict[str, Any]) -> None:
     _render_control_plane_status(settings)
     _render_snapshot_cache_admin_tools()
     available_modes = _available_viewer_snapshot_modes(settings)
+    mode_warnings = _get_viewer_snapshot_mode_warnings()
+    for warning_message in mode_warnings:
+        st.warning(warning_message)
     if not available_modes:
         st.warning("まだ snapshot がありません")
-        st.caption("表示対象: latest_1130.json / latest_1530.json / latest_now.json")
+        st.caption("表示対象: latest_0915.json / latest_1130.json / latest_1530.json / latest_now.json")
         return
     if len(available_modes) == 1:
         mode = available_modes[0]
-        bundle = load_saved_snapshot(mode, settings)
+        try:
+            bundle = load_saved_snapshot(mode, settings)
+        except Exception as exc:
+            st.warning(f"{mode} の snapshot 読み込みに失敗したため、この mode は unavailable 扱いにします: {exc}")
+            return
         _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
         return
     tabs = st.tabs([f"{mode}" for mode in available_modes])
     for tab, mode in zip(tabs, available_modes):
         with tab:
-            bundle = load_saved_snapshot(mode, settings)
+            try:
+                bundle = load_saved_snapshot(mode, settings)
+            except Exception as exc:
+                st.warning(f"{mode} の snapshot 読み込みに失敗したため、この mode は unavailable 扱いにします: {exc}")
+                continue
             _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
 
 
