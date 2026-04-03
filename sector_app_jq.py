@@ -462,7 +462,7 @@ SWING_SELECTION_CONFIG = {
     "sector_confidence_bonus_high_1m": 0.30,
     "sector_confidence_bonus_mid_1m": 0.12,
 }
-VIEWER_ONLY_SNAPSHOT_MODES = ("1130", "1530", "now")
+VIEWER_ONLY_SNAPSHOT_MODES = ("0915", "1130", "1530", "now")
 DEFAULT_GITHUB_REPOSITORY = "sagres3904-spec/sector-strength-app"
 DEFAULT_GITHUB_CONTROL_BRANCH = "control-plane"
 DEFAULT_GITHUB_DEPLOY_BRANCH = "deploy/streamlit-live"
@@ -5359,7 +5359,12 @@ def write_snapshot_bundle(bundle: dict[str, Any], settings: dict[str, Any], *, w
     }
 
 
-def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+def load_saved_snapshot(
+    mode: str,
+    settings: dict[str, Any] | None = None,
+    *,
+    allow_stale_content: bool = False,
+) -> dict[str, Any]:
     settings = settings or get_settings()
     if _is_streamlit_cloud():
         cached_payload = _load_saved_snapshot_payload_from_github(mode, settings)
@@ -5380,7 +5385,7 @@ def load_saved_snapshot(mode: str, settings: dict[str, Any] | None = None) -> di
     swing_watch_candidates_1w = pd.DataFrame(payload.get("swing_watch_candidates_1w", []))
     swing_buy_candidates_1m = pd.DataFrame(payload.get("swing_buy_candidates_1m", []))
     swing_watch_candidates_1m = pd.DataFrame(payload.get("swing_watch_candidates_1m", []))
-    if bool(snapshot_guard.get("is_stale")):
+    if bool(snapshot_guard.get("is_stale")) and not allow_stale_content:
         stale_reason = str(snapshot_guard.get("reason", "")).strip()
         today_sector_summary = pd.DataFrame()
         weekly_sector_summary = pd.DataFrame()
@@ -5573,7 +5578,6 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
 
 
 def _render_control_plane_status(settings: dict[str, Any]) -> None:
-    st.subheader("更新依頼")
     if st.button("状態を再読込", key="refresh-control-plane-status"):
         st.rerun()
     token = _github_control_token(use_streamlit_secrets=True)
@@ -5632,37 +5636,51 @@ def _render_control_plane_status(settings: dict[str, Any]) -> None:
             st.error(f"now 更新依頼の送信に失敗しました: {exc}")
 
 
-def _render_viewer_only_app(settings: dict[str, Any]) -> None:
-    st.caption("Cloud viewer-only モードです。保存済み snapshot の表示と更新依頼のみ行います。")
+def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str, Any] | None = None) -> None:
+    runtime_context = runtime_context or {}
+    st.caption("Cloud viewer-only モードです。保存済み snapshot をそのまま表示し、更新依頼は補助導線として扱います。")
     _enable_viewer_auto_refresh(settings)
-    _render_control_plane_status(settings)
     _render_snapshot_cache_admin_tools()
     available_modes = _available_viewer_snapshot_modes(settings)
     mode_warnings = _get_viewer_snapshot_mode_warnings()
+    st.markdown("### 保存済み snapshot")
+    st.caption("0915 / 1130 / 1530 / now の順で表示します。stale の場合も最後に保存された中身を表示し、警告だけ残します。")
     for warning_message in mode_warnings:
         st.warning(warning_message)
     if not available_modes:
         st.warning("まだ snapshot がありません")
         st.caption("表示対象: latest_0915.json / latest_1130.json / latest_1530.json / latest_now.json")
+        with st.expander("更新依頼 / control-plane", expanded=False):
+            _render_control_plane_status(settings)
+        _render_runtime_detection_diagnostics(runtime_context)
         return
     if len(available_modes) == 1:
         mode = available_modes[0]
         try:
-            bundle = load_saved_snapshot(mode, settings)
+            bundle = load_saved_snapshot(mode, settings, allow_stale_content=True)
         except Exception as exc:
             st.warning(f"{mode} の snapshot 読み込みに失敗したため、この mode は unavailable 扱いにします: {exc}")
+            with st.expander("更新依頼 / control-plane", expanded=False):
+                _render_control_plane_status(settings)
+            _render_runtime_detection_diagnostics(runtime_context)
             return
         _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
+        with st.expander("更新依頼 / control-plane", expanded=False):
+            _render_control_plane_status(settings)
+        _render_runtime_detection_diagnostics(runtime_context)
         return
     tabs = st.tabs([f"{mode}" for mode in available_modes])
     for tab, mode in zip(tabs, available_modes):
         with tab:
             try:
-                bundle = load_saved_snapshot(mode, settings)
+                bundle = load_saved_snapshot(mode, settings, allow_stale_content=True)
             except Exception as exc:
                 st.warning(f"{mode} の snapshot 読み込みに失敗したため、この mode は unavailable 扱いにします: {exc}")
                 continue
             _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
+    with st.expander("更新依頼 / control-plane", expanded=False):
+        _render_control_plane_status(settings)
+    _render_runtime_detection_diagnostics(runtime_context)
 
 
 def render_app() -> None:
@@ -5670,11 +5688,10 @@ def render_app() -> None:
     st.title("セクター強度ライブ")
     settings = get_settings()
     runtime_context = _streamlit_runtime_context(settings)
-    _render_runtime_detection_diagnostics(runtime_context)
     if bool(runtime_context.get("viewer_only")):
         st.caption("Cloud では viewer-only で動作します。保存済み snapshot の表示と更新依頼だけを行います。")
         st.info("latest_0915.json / latest_1130.json / latest_1530.json / latest_now.json を優先して読み込みます。Cloud では collector / kabu live 取得は実行しません。")
-        _render_viewer_only_app(settings)
+        _render_viewer_only_app(settings, runtime_context)
         return
     st.caption("J-Quants を土台に、kabu ステーション API のライブデータを重ねてスナップショットを作成・表示します。")
     st.info("過去の任意時点をあとから再取得することはできません。保存済みスナップショットのみ再表示できます。")
@@ -5699,6 +5716,7 @@ def render_app() -> None:
                 st.warning(str(exc))
             except Exception as exc:
                 st.error(str(exc))
+    _render_runtime_detection_diagnostics(runtime_context)
 
 
 if __name__ == "__main__":
