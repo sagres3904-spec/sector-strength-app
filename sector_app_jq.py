@@ -762,6 +762,8 @@ def _explicit_streamlit_cloud_flags() -> dict[str, str]:
         "STREAMLIT_RUNTIME": str(os.environ.get("STREAMLIT_RUNTIME", "")).strip(),
         "STREAMLIT_SERVER_PORT": str(os.environ.get("STREAMLIT_SERVER_PORT", "")).strip(),
         "STREAMLIT_SERVER_HEADLESS": str(os.environ.get("STREAMLIT_SERVER_HEADLESS", "")).strip(),
+        "FORCE_VIEWER_ONLY": str(os.environ.get("FORCE_VIEWER_ONLY", "")).strip(),
+        "FORCE_LOCAL_COLLECTOR_UI": str(os.environ.get("FORCE_LOCAL_COLLECTOR_UI", "")).strip(),
     }
 
 
@@ -791,23 +793,42 @@ def _streamlit_runtime_context(settings: dict[str, Any] | None = None) -> dict[s
     sharing_mode = str(os.environ.get("STREAMLIT_SHARING_MODE", "")).strip().lower()
     cloud_flag = str(os.environ.get("STREAMLIT_CLOUD", "")).strip().lower()
     explicit_cloud_detected = sharing_mode in {"1", "true", "cloud"} or cloud_flag in {"1", "true", "yes"}
+    force_viewer_only = str(env_flags.get("FORCE_VIEWER_ONLY", "")).strip().lower() in {"1", "true", "yes", "on"}
+    force_local_collector_ui = str(env_flags.get("FORCE_LOCAL_COLLECTOR_UI", "")).strip().lower() in {"1", "true", "yes", "on"}
     local_collector_capable = _is_local_collector_capable(settings)
-    cloud_detected = bool(explicit_cloud_detected or (runtime_detected and not local_collector_capable))
-    viewer_only = bool(cloud_detected or (runtime_detected and not local_collector_capable))
-    if explicit_cloud_detected:
+    override_mode = ""
+    if force_viewer_only:
+        override_mode = "viewer_only"
+    elif force_local_collector_ui:
+        override_mode = "local_collector_ui"
+    if override_mode == "viewer_only":
+        viewer_only = True
+        cloud_detected = True
+        detection_reason = "override_force_viewer_only"
+    elif override_mode == "local_collector_ui":
+        viewer_only = False
+        cloud_detected = False
+        detection_reason = "override_force_local_collector_ui"
+    elif runtime_detected:
+        viewer_only = True
+        cloud_detected = True
+        detection_reason = "streamlit_runtime_default_viewer_only_fail_closed"
+    elif explicit_cloud_detected:
+        viewer_only = True
+        cloud_detected = True
         detection_reason = "explicit_streamlit_cloud_env"
-    elif runtime_detected and not local_collector_capable:
-        detection_reason = "streamlit_runtime_without_local_collector_prereqs_fail_closed_to_viewer_only"
-    elif runtime_detected and local_collector_capable:
-        detection_reason = "streamlit_runtime_with_local_collector_prereqs"
     else:
-        detection_reason = "non_streamlit_runtime"
+        viewer_only = False
+        cloud_detected = False
+        detection_reason = "non_streamlit_runtime_default_local_ui"
     return {
         "runtime_detected": bool(runtime_detected),
         "cloud_detected": bool(cloud_detected),
         "viewer_only": bool(viewer_only),
         "local_collector_capable": bool(local_collector_capable),
         "detection_reason": detection_reason,
+        "explicit_override": override_mode or "none",
+        "final_mode": "viewer_only" if viewer_only else "local_collector_ui",
         "env_flags": env_flags,
     }
 
@@ -966,13 +987,16 @@ def _render_runtime_detection_diagnostics(runtime_context: dict[str, Any]) -> No
         "cloud_detected": bool(runtime_context.get("cloud_detected")),
         "viewer_only": bool(runtime_context.get("viewer_only")),
         "local_collector_capable": bool(runtime_context.get("local_collector_capable")),
+        "explicit_override": str(runtime_context.get("explicit_override", "") or "none"),
+        "final_mode": str(runtime_context.get("final_mode", "") or ""),
         "detection_reason": str(runtime_context.get("detection_reason", "") or ""),
         "env_flags": runtime_context.get("env_flags", {}),
     }
     st.caption(
-        "runtime_detected="
-        f"{summary['runtime_detected']} / cloud_detected={summary['cloud_detected']} / "
-        f"viewer_only={summary['viewer_only']} / reason={summary['detection_reason']}"
+        "runtime="
+        f"{summary['runtime_detected']} / override={summary['explicit_override']} / "
+        f"capable={summary['local_collector_capable']} / final={summary['final_mode']} / "
+        f"reason={summary['detection_reason']}"
     )
     with st.expander("runtime detection", expanded=False):
         st.json(summary)
