@@ -462,7 +462,9 @@ SWING_SELECTION_CONFIG = {
     "sector_confidence_bonus_high_1m": 0.30,
     "sector_confidence_bonus_mid_1m": 0.12,
 }
-VIEWER_ONLY_SNAPSHOT_MODES = ("0915", "1130", "1530", "now")
+CLOUD_VIEWER_MODES = ("0915", "1130", "1530", "now")
+VIEWER_ONLY_SNAPSHOT_MODES = CLOUD_VIEWER_MODES
+DEFAULT_CONTROL_PLANE_REQUEST_MODE = "1130"
 DEFAULT_GITHUB_REPOSITORY = "sagres3904-spec/sector-strength-app"
 DEFAULT_GITHUB_CONTROL_BRANCH = "control-plane"
 DEFAULT_GITHUB_DEPLOY_BRANCH = "deploy/streamlit-live"
@@ -473,6 +475,18 @@ DEFAULT_GITHUB_DEPLOY_SNAPSHOT_MD_PATH = "data/snapshots/latest_1130.md"
 GITHUB_CONTROL_TOKEN_SECRET_NAME = "GITHUB_CONTROL_TOKEN"
 DEFAULT_VIEWER_AUTO_REFRESH_SECONDS = 60
 SNAPSHOT_VIEWER_CACHE_TTL_SECONDS = 120
+
+
+def normalize_cloud_viewer_mode(mode: Any, *, default: str | None = None, allow_blank: bool = False) -> str:
+    normalized = str(mode or "").strip()
+    if not normalized:
+        fallback = str(default or DEFAULT_CONTROL_PLANE_REQUEST_MODE)
+        return "" if allow_blank else fallback
+    if normalized not in CLOUD_VIEWER_MODES:
+        raise ValueError(f"Unsupported mode: {normalized}")
+    return normalized
+
+
 MASTER_PRODUCT_ATTRIBUTE_SOURCES = {
     "security_type": ["SecurityType", "TypeOfInstrument", "SecurityTypeName", "IssueType"],
     "instrument_type": ["InstrumentType", "InstrumentCategory", "InstrumentTypeName"],
@@ -567,6 +581,7 @@ UI_COLUMN_LABELS = {
     "price_block_score": "価格の強さ",
     "flow_block_score": "資金流入の強さ",
     "participation_block_score": "ランキング広がり",
+    "ranking_breadth_display": "ランキング広がり",
     "intraday_total_score": "intraday総合",
     "scan_member_count": "scan銘柄数",
     "scan_participation_rate": "scan参加率",
@@ -850,7 +865,17 @@ def _github_deploy_snapshot_json_path(mode: str, settings: dict[str, Any] | None
     config = get_github_control_config(settings)
     base_path = str(config["deploy_snapshot_json_path"]).strip().replace("\\", "/")
     parent_dir, _, _ = base_path.rpartition("/")
-    file_name = f"latest_{mode}.json"
+    normalized_mode = normalize_cloud_viewer_mode(mode)
+    file_name = f"latest_{normalized_mode}.json"
+    return f"{parent_dir}/{file_name}" if parent_dir else file_name
+
+
+def _github_deploy_snapshot_md_path(mode: str, settings: dict[str, Any] | None = None) -> str:
+    config = get_github_control_config(settings)
+    base_path = str(config["deploy_snapshot_md_path"]).strip().replace("\\", "/")
+    parent_dir, _, _ = base_path.rpartition("/")
+    normalized_mode = normalize_cloud_viewer_mode(mode)
+    file_name = f"latest_{normalized_mode}.md"
     return f"{parent_dir}/{file_name}" if parent_dir else file_name
 
 
@@ -1313,13 +1338,13 @@ def submit_control_plane_update_request(
     settings: dict[str, Any] | None = None,
     *,
     requested_by: str = "streamlit-viewer",
-    requested_mode: str = "1130",
+    requested_mode: str = DEFAULT_CONTROL_PLANE_REQUEST_MODE,
     session: requests.sessions.Session | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     payload, sha = read_control_plane_request(token, settings, session=session)
     if bool(payload.get("request_update")):
         return False, payload
-    mode = str(requested_mode or "1130").strip() or "1130"
+    mode = normalize_cloud_viewer_mode(requested_mode)
     updated_payload = dict(payload)
     updated_payload.update(
         {
@@ -4705,14 +4730,13 @@ def _build_earnings_candidate_table_note(base_meta: dict[str, Any] | None) -> st
 TODAY_SECTOR_DISPLAY_COLUMNS = [
     "today_rank",
     "sector_name",
-    "leaders",
+    "representative_stock",
     "sector_confidence",
     "sector_caution",
-    "industry_up_anchor_rank",
     "industry_rank_live",
     "price_block_score",
     "flow_block_score",
-    "participation_block_score",
+    "ranking_breadth_display",
     "scan_member_count",
 ]
 
@@ -4771,6 +4795,67 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
         else:
             prepared[column] = _coerce_numeric(prepared[column])
     return prepared.reindex(columns=columns), compatibility_notes
+
+
+def _summarize_representative_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        names: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                name = str(item.get("name", "") or item.get("code", "")).strip()
+            else:
+                name = str(item).strip()
+            if name:
+                names.append(name)
+        return " / ".join(names[:3])
+    return ""
+
+
+def _stringify_snapshot_cell(value: Any) -> str:
+    if isinstance(value, list):
+        return _summarize_representative_value(value)
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _coalesce_snapshot_series(frame: pd.DataFrame, candidates: list[str], *, string_output: bool = False) -> pd.Series:
+    for column in candidates:
+        if column in frame.columns:
+            series = frame[column]
+            if string_output:
+                formatter = _summarize_representative_value if column == "representative_stocks" else _stringify_snapshot_cell
+                return series.apply(formatter)
+            return series
+    if string_output:
+        return pd.Series([""] * len(frame), index=frame.index, dtype="object")
+    return pd.Series([pd.NA] * len(frame), index=frame.index, dtype="object")
+
+
+def _prepare_today_sector_view(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    compatibility_notes: list[str] = []
+    if df is None or df.empty:
+        return pd.DataFrame(columns=TODAY_SECTOR_DISPLAY_COLUMNS), compatibility_notes
+    prepared = pd.DataFrame(index=df.index)
+    rank_column = "today_display_rank" if "today_display_rank" in df.columns else "today_rank"
+    if rank_column not in df.columns:
+        compatibility_notes.append("today_rank")
+    prepared["today_rank"] = _coalesce_snapshot_series(df, ["today_display_rank", "today_rank"])
+    prepared["sector_name"] = _coalesce_snapshot_series(df, ["sector_name"], string_output=True)
+    prepared["representative_stock"] = _coalesce_snapshot_series(df, ["representative_stock", "representative_stocks", "leaders"], string_output=True)
+    prepared["sector_confidence"] = _coalesce_snapshot_series(df, ["sector_confidence"], string_output=True)
+    prepared["sector_caution"] = _coalesce_snapshot_series(df, ["sector_caution"], string_output=True)
+    prepared["industry_rank_live"] = _coalesce_snapshot_series(df, ["industry_rank_live"])
+    prepared["price_block_score"] = _coalesce_snapshot_series(df, ["price_strength_display", "price_block_score"])
+    prepared["flow_block_score"] = _coalesce_snapshot_series(df, ["flow_strength_display", "flow_block_score"])
+    prepared["ranking_breadth_display"] = _coalesce_snapshot_series(df, ["ranking_breadth_display", "ranking_source_breadth_ex_basket", "participation_block_score"])
+    prepared["scan_member_count"] = _coalesce_snapshot_series(df, ["wide_scan_member_count", "scan_member_count"])
+    return _prepare_table_view(prepared, TODAY_SECTOR_DISPLAY_COLUMNS)
 
 
 def build_live_snapshot(
@@ -5363,7 +5448,7 @@ def load_saved_snapshot(
     mode: str,
     settings: dict[str, Any] | None = None,
     *,
-    allow_stale_content: bool = False,
+    allow_stale_content: bool = True,
 ) -> dict[str, Any]:
     settings = settings or get_settings()
     if _is_streamlit_cloud():
@@ -5374,7 +5459,18 @@ def load_saved_snapshot(
     payload = cached_payload["payload"]
     meta = normalize_snapshot_meta(payload.get("meta", {}))
     snapshot_guard = evaluate_snapshot_guard(mode, meta)
-    today_sector_summary = pd.DataFrame(payload.get("today_sector_leaderboard", payload.get("today_sector_summary", payload.get("sector_summary", []))))
+    compat_notes: list[str] = []
+    today_source_key = "today_sector_leaderboard"
+    if "today_sector_leaderboard" in payload:
+        today_sector_leaderboard = pd.DataFrame(payload.get("today_sector_leaderboard", []))
+    elif "today_sector_summary" in payload:
+        today_source_key = "today_sector_summary"
+        compat_notes.append("today表は旧 snapshot 互換表示です。today_sector_summary を表示しています。")
+        today_sector_leaderboard = pd.DataFrame(payload.get("today_sector_summary", []))
+    else:
+        today_source_key = "sector_summary"
+        compat_notes.append("today表は旧 snapshot 互換表示です。sector_summary を表示しています。")
+        today_sector_leaderboard = pd.DataFrame(payload.get("sector_summary", []))
     weekly_sector_summary = pd.DataFrame(payload.get("sector_persistence_1w", payload.get("weekly_sector_summary", [])))
     monthly_sector_summary = pd.DataFrame(payload.get("sector_persistence_1m", payload.get("monthly_sector_summary", [])))
     sector_persistence_3m = pd.DataFrame(payload.get("sector_persistence_3m", []))
@@ -5387,7 +5483,7 @@ def load_saved_snapshot(
     swing_watch_candidates_1m = pd.DataFrame(payload.get("swing_watch_candidates_1m", []))
     if bool(snapshot_guard.get("is_stale")) and not allow_stale_content:
         stale_reason = str(snapshot_guard.get("reason", "")).strip()
-        today_sector_summary = pd.DataFrame()
+        today_sector_leaderboard = pd.DataFrame()
         weekly_sector_summary = pd.DataFrame()
         monthly_sector_summary = pd.DataFrame()
         sector_persistence_3m = pd.DataFrame()
@@ -5424,11 +5520,11 @@ def load_saved_snapshot(
             frame["nikkei_search"] = frame.apply(lambda row: _make_nikkei_search_link(str(row.get("name", "")), str(row.get("code", ""))), axis=1)
     return {
         "meta": meta,
-        "sector_summary": today_sector_summary,
-        "today_sector_summary": today_sector_summary,
+        "sector_summary": today_sector_leaderboard,
+        "today_sector_summary": today_sector_leaderboard,
         "weekly_sector_summary": weekly_sector_summary,
         "monthly_sector_summary": monthly_sector_summary,
-        "today_sector_leaderboard": today_sector_summary,
+        "today_sector_leaderboard": today_sector_leaderboard,
         "sector_persistence_1w": weekly_sector_summary,
         "sector_persistence_1m": monthly_sector_summary,
         "sector_persistence_3m": sector_persistence_3m,
@@ -5447,6 +5543,8 @@ def load_saved_snapshot(
         "empty_reasons": payload.get("empty_reasons", {}),
         "diagnostics": payload.get("diagnostics", {}),
         "snapshot_guard": snapshot_guard,
+        "snapshot_compatibility_notes": compat_notes,
+        "today_sector_source_key": today_source_key,
         "paths": cached_payload["paths"],
         "snapshot_source_label": cached_payload["source_label"],
         "snapshot_backend_name": cached_payload["backend_name"],
@@ -5490,6 +5588,8 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     del source_label
     snapshot_source_label = str(bundle.get("snapshot_source_label", "")).strip()
     snapshot_warning_message = str(bundle.get("snapshot_warning_message", "")).strip()
+    snapshot_compatibility_notes = [str(note).strip() for note in bundle.get("snapshot_compatibility_notes", []) if str(note).strip()]
+    today_sector_source_key = str(bundle.get("today_sector_source_key", "")).strip()
     meta = bundle.get("meta", {})
     generated_at_jst = str(meta.get("generated_at_jst", "") or meta.get("generated_at", ""))
     mode = str(meta.get("mode", ""))
@@ -5498,7 +5598,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     empty_reasons = bundle.get("empty_reasons", {})
     snapshot_guard = bundle.get("snapshot_guard", {})
     warning_text = saved_snapshot_timing_warning(meta) if is_saved_snapshot else ""
-    today_sector_view, today_sector_notes = _prepare_table_view(bundle.get("today_sector_leaderboard", bundle.get("today_sector_summary", bundle["sector_summary"])), TODAY_SECTOR_DISPLAY_COLUMNS)
+    today_sector_view, today_sector_notes = _prepare_today_sector_view(bundle.get("today_sector_leaderboard", pd.DataFrame()))
     weekly_sector_view, weekly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1w", bundle.get("weekly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
     monthly_sector_view, monthly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1m", bundle.get("monthly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
     quarter_sector_view, quarter_sector_notes = _prepare_table_view(bundle.get("sector_persistence_3m", pd.DataFrame()), PERSISTENCE_DISPLAY_COLUMNS)
@@ -5525,10 +5625,15 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
                 st.json(bundle["paths"])
             if warning_text:
                 st.caption(warning_text)
-            if sector_compat_notes:
+            if snapshot_compatibility_notes:
+                for note in snapshot_compatibility_notes:
+                    st.caption(note)
+            elif sector_compat_notes:
                 st.caption("不足列があるので旧スナップショット互換で補完表示しています。")
     if bool(snapshot_guard.get("is_stale")):
         st.warning(str(snapshot_guard.get("reason", "")).strip() or f"{mode} は本日データなし / stale です。")
+    if is_saved_snapshot and today_sector_source_key and today_sector_source_key != "today_sector_leaderboard":
+        st.caption(f"today表は `{today_sector_source_key}` からの旧 snapshot 互換表示です。")
     _render_dataframe_or_reason(
         "今日の本命セクター",
         today_sector_view,
@@ -5577,7 +5682,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
             st.json(diagnostics)
 
 
-def _render_control_plane_status(settings: dict[str, Any]) -> None:
+def _render_control_plane_status(settings: dict[str, Any], *, current_mode: str = "") -> None:
     if st.button("状態を再読込", key="refresh-control-plane-status"):
         st.rerun()
     token = _github_control_token(use_streamlit_secrets=True)
@@ -5601,39 +5706,54 @@ def _render_control_plane_status(settings: dict[str, Any]) -> None:
     message = str(status_payload.get("message", "")).strip()
     if message:
         st.caption(f"message: {message}")
-    status_request_mode = str(status_payload.get("request_mode", "")).strip()
+    try:
+        status_request_mode = normalize_cloud_viewer_mode(status_payload.get("request_mode", ""), allow_blank=True)
+    except ValueError:
+        status_request_mode = str(status_payload.get("request_mode", "")).strip()
     if status_request_mode:
         st.caption(f"status request_mode: {status_request_mode}")
     requested_at = str(request_payload.get("requested_at", "")).strip()
     requested_by = str(request_payload.get("requested_by", "")).strip()
-    request_mode = str(request_payload.get("request_mode", "") or "1130").strip() or "1130"
+    try:
+        request_mode = normalize_cloud_viewer_mode(
+            request_payload.get("request_mode", ""),
+            allow_blank=not bool(request_payload.get("request_update")),
+        )
+    except ValueError:
+        request_mode = DEFAULT_CONTROL_PLANE_REQUEST_MODE
+    try:
+        current_mode_normalized = normalize_cloud_viewer_mode(current_mode, allow_blank=True)
+    except ValueError:
+        current_mode_normalized = ""
     if request_payload.get("request_update"):
         st.warning(f"更新依頼は受付中です。request_mode={request_mode} requested_at={requested_at or '-'} requested_by={requested_by or '-'}")
-        pending_cols = st.columns(2)
-        pending_cols[0].button("1130を更新", disabled=True, key="request-1130-disabled", help="すでに依頼済みです")
-        pending_cols[1].button("nowを更新", disabled=True, key="request-now-disabled", help="すでに依頼済みです")
+        pending_cols = st.columns(len(CLOUD_VIEWER_MODES))
+        for index, mode in enumerate(CLOUD_VIEWER_MODES):
+            pending_cols[index].button(f"{mode}を更新", disabled=True, key=f"request-{mode}-disabled", help="すでに依頼済みです")
         return
-    action_cols = st.columns(2)
-    if action_cols[0].button("1130を更新", type="primary", key="request-1130", help="control-plane branch に 1130 更新依頼を書き込みます"):
-        try:
-            submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="1130")
-            if submitted:
-                st.success(f"1130 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
-            else:
-                st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"1130 更新依頼の送信に失敗しました: {exc}")
-    if action_cols[1].button("nowを更新", key="request-now", help="control-plane branch に now 更新依頼を書き込みます"):
-        try:
-            submitted, updated_request = submit_control_plane_update_request(token, settings, requested_by="streamlit-cloud-viewer", requested_mode="now")
-            if submitted:
-                st.success(f"now 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
-            else:
-                st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"now 更新依頼の送信に失敗しました: {exc}")
+    action_cols = st.columns(len(CLOUD_VIEWER_MODES))
+    for index, mode in enumerate(CLOUD_VIEWER_MODES):
+        button_type = "primary" if current_mode_normalized and mode == current_mode_normalized else "secondary"
+        if action_cols[index].button(
+            f"{mode}を更新",
+            type=button_type,
+            key=f"request-{mode}",
+            help=f"control-plane branch に {mode} 更新依頼を書き込みます",
+        ):
+            try:
+                submitted, updated_request = submit_control_plane_update_request(
+                    token,
+                    settings,
+                    requested_by="streamlit-cloud-viewer",
+                    requested_mode=mode,
+                )
+                if submitted:
+                    st.success(f"{mode} 更新依頼を送信しました。requested_at={updated_request.get('requested_at', '')}")
+                else:
+                    st.info("すでに更新依頼が入っているため、二重依頼は行いませんでした。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"{mode} 更新依頼の送信に失敗しました: {exc}")
 
 
 def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str, Any] | None = None) -> None:
@@ -5661,12 +5781,12 @@ def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str,
         except Exception as exc:
             st.warning(f"{mode} の snapshot 読み込みに失敗したため、この mode は unavailable 扱いにします: {exc}")
             with st.expander("更新依頼 / control-plane", expanded=False):
-                _render_control_plane_status(settings)
+                _render_control_plane_status(settings, current_mode=mode)
             _render_runtime_detection_diagnostics(runtime_context)
             return
         _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
         with st.expander("更新依頼 / control-plane", expanded=False):
-            _render_control_plane_status(settings)
+            _render_control_plane_status(settings, current_mode=mode)
         _render_runtime_detection_diagnostics(runtime_context)
         return
     tabs = st.tabs([f"{mode}" for mode in available_modes])
@@ -5696,7 +5816,7 @@ def render_app() -> None:
     st.caption("J-Quants を土台に、kabu ステーション API のライブデータを重ねてスナップショットを作成・表示します。")
     st.info("過去の任意時点をあとから再取得することはできません。保存済みスナップショットのみ再表示できます。")
     view_mode = st.radio("表示方法", ["A: ライブでスナップショットを作成", "B: 保存済みスナップショットを表示"], index=0)
-    mode = st.selectbox("表示モード", ["0915", "1130", "1530", "now"], index=0)
+    mode = st.selectbox("表示モード", list(CLOUD_VIEWER_MODES), index=0)
     if view_mode.startswith("A:"):
         write_drive = st.checkbox("Google Drive 同期フォルダへも保存", value=False)
         fast_check = st.checkbox("簡易チェックで実行", value=False)
