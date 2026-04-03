@@ -2682,6 +2682,13 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
             "today_display_rank",
             "today_rank_mode",
             "rank_mode_reason",
+            "original_industry_rank_live",
+            "anchor_rank_source",
+            "present_in_live_industry_table",
+            "present_in_sector_summary_before_filter",
+            "present_in_today_display_universe",
+            "display_eligible",
+            "display_excluded_reason",
             "sector_name",
             "representative_stock",
             "representative_stocks",
@@ -2876,10 +2883,14 @@ def _sort_today_sector_leaderboard_for_display(frame: pd.DataFrame) -> pd.DataFr
         return frame.copy() if isinstance(frame, pd.DataFrame) else _empty_sector_leaderboard()
     working = _sort_today_sector_leaderboard_rows(frame)
     fallback_rank = pd.Series(range(1, len(working) + 1), index=working.index, dtype="int64")
-    working["today_display_rank"] = fallback_rank
+    existing_display_rank = _coerce_numeric(working.get("today_display_rank", pd.Series([pd.NA] * len(working), index=working.index)))
+    working["today_display_rank"] = existing_display_rank.fillna(fallback_rank).round().clip(lower=1.0).astype("int64")
     working["today_rank"] = working["today_display_rank"]
     if "industry_anchor_rank" in working.columns:
         working["final_rank_delta"] = _coerce_numeric(working["today_display_rank"]).fillna(0.0) - _coerce_numeric(working["industry_anchor_rank"]).fillna(_coerce_numeric(working["today_display_rank"]).fillna(0.0))
+    anchor_only_mask = working.get("today_rank_mode", pd.Series(dtype=str)).astype(str).eq("anchor_only")
+    if anchor_only_mask.any():
+        working.loc[anchor_only_mask, "final_rank_delta"] = 0.0
     return working
 
 
@@ -2944,6 +2955,15 @@ def _build_intraday_sector_leaderboard(
         on="sector_name",
         how="left",
     )
+    sector_base["industry_rank_live"] = _coerce_numeric(sector_base["industry_rank_live"]).fillna(pd.Series(range(1, len(sector_base) + 1), index=sector_base.index, dtype="float64"))
+    sector_base["original_industry_rank_live"] = sector_base["industry_rank_live"]
+    sector_base["industry_anchor_rank"] = sector_base["original_industry_rank_live"]
+    sector_base["anchor_rank_source"] = "industry_up.rank_position"
+    sector_base["present_in_live_industry_table"] = True
+    sector_base["present_in_sector_summary_before_filter"] = True
+    sector_base["present_in_today_display_universe"] = False
+    sector_base["display_eligible"] = True
+    sector_base["display_excluded_reason"] = ""
     market_scan_member_count = 0.0
     ranking_union_total_count = 0.0
     source_totals: dict[str, float] = {}
@@ -3038,11 +3058,7 @@ def _build_intraday_sector_leaderboard(
     if "sector_constituent_count_scan" in sector_base.columns:
         sector_base["sector_constituent_count"] = _coerce_numeric(sector_base["sector_constituent_count"]).fillna(_coerce_numeric(sector_base["sector_constituent_count_scan"]))
     sector_base["sector_constituent_count"] = _coerce_numeric(sector_base["sector_constituent_count"]).fillna(sector_base["wide_scan_member_count"]).clip(lower=1.0)
-    sector_base = sector_base[sector_base["sector_constituent_count"] >= 3].copy()
-    if sector_base.empty:
-        return _empty_sector_leaderboard()
-    sector_base = sector_base.sort_values(["industry_rank_live", "sector_name"], ascending=[True, True], kind="mergesort").reset_index(drop=True)
-    sector_base["industry_anchor_rank"] = pd.Series(range(1, len(sector_base) + 1), index=sector_base.index, dtype="int64")
+    sector_base = sector_base.sort_values(["original_industry_rank_live", "sector_name"], ascending=[True, True], kind="mergesort").reset_index(drop=True)
     sector_base["wide_scan_member_count"] = _coerce_numeric(sector_base["wide_scan_member_count"]).fillna(0.0)
     sector_base["scan_member_count"] = sector_base["wide_scan_member_count"]
     sector_base["wide_scan_coverage"] = _safe_ratio(sector_base["wide_scan_member_count"], sector_base["sector_constituent_count"]).fillna(0.0)
@@ -3219,6 +3235,7 @@ def _build_intraday_sector_leaderboard(
         ),
         axis=1,
     )
+    sector_base["present_in_today_display_universe"] = True
     sector_base = sector_base.sort_values(
         ["intraday_sector_score", "price_block_score", "flow_block_score", "participation_block_score"],
         ascending=[False, False, False, False],
@@ -3228,6 +3245,21 @@ def _build_intraday_sector_leaderboard(
     sector_base["industry_up_anchor_rank"] = _rank_display_series(sector_base["industry_anchor_rank"], fallback=sector_base["industry_up_rank"])
     sector_base["industry_up"] = _coerce_numeric(sector_base["industry_up_value"]).fillna(_coerce_numeric(sector_base["industry_up_rank"]))
     sector_base["tethered_rank"] = _coerce_numeric(sector_base["industry_anchor_rank"]).fillna(0.0)
+    anchor_only_mask = sector_base["today_rank_mode"].astype(str).eq("anchor_only")
+    if anchor_only_mask.any():
+        sector_base = sector_base.sort_values(["industry_anchor_rank", "sector_name"], ascending=[True, True], kind="mergesort").reset_index(drop=True)
+        sector_base["score_rank"] = _coerce_numeric(sector_base["industry_anchor_rank"]).fillna(pd.Series(range(1, len(sector_base) + 1), index=sector_base.index, dtype="float64")).round().astype(int)
+        sector_base["tethered_rank"] = _coerce_numeric(sector_base["industry_anchor_rank"]).fillna(0.0)
+        sector_base["today_display_rank"] = _coerce_numeric(sector_base["original_industry_rank_live"]).fillna(_coerce_numeric(sector_base["industry_anchor_rank"])).round().clip(lower=1.0).astype("int64")
+        sector_base["today_rank"] = sector_base["today_display_rank"]
+        sector_base["final_rank_delta"] = 0.0
+        sector_base["max_upshift"] = 0
+        sector_base["max_downshift"] = 0
+        sector_base["allowed_shift"] = 0
+        sector_base["rank_shift_limit"] = 0
+        sector_base["rank_constraint_applied"] = False
+        sector_base["upshift_blocked_reason"] = ""
+        return _sort_today_sector_leaderboard_for_display(sector_base)
     sector_base = _apply_true_rank_shift_limits(sector_base)
     return _sort_today_sector_leaderboard_for_display(sector_base)
 
@@ -3463,6 +3495,8 @@ def _summarize_industry_anchor_positions(industry_df: pd.DataFrame, today_sector
                 "industry_up_value": float(industry_row.get("industry_up_value", 0.0) or 0.0) if pd.notna(industry_row.get("industry_up_value")) else None,
                 "today_rank": current_today_rank,
                 "today_display_rank": current_today_rank,
+                "original_industry_rank_live": int(current_row.get("original_industry_rank_live", anchor_rank) or 0) if current_row is not None and pd.notna(current_row.get("original_industry_rank_live")) else int(anchor_rank),
+                "anchor_rank_source": str(current_row.get("anchor_rank_source", "industry_up.rank_position") or "") if current_row is not None else "industry_up.rank_position",
                 "rank_delta_vs_industry": (current_today_rank - int(anchor_rank)) if current_today_rank is not None else None,
                 "tethered_rank": float(current_row.get("tethered_rank", 0.0) or 0.0) if current_row is not None and pd.notna(current_row.get("tethered_rank")) else None,
                 "score_rank": int(current_row.get("score_rank", 0) or 0) if current_row is not None and pd.notna(current_row.get("score_rank")) else None,
@@ -3479,6 +3513,11 @@ def _summarize_industry_anchor_positions(industry_df: pd.DataFrame, today_sector
                 "wide_scan_member_count": int(current_row.get("wide_scan_member_count", 0) or 0) if current_row is not None else 0,
                 "ranking_confirmed_count": int(current_row.get("ranking_confirmed_count", 0) or 0) if current_row is not None else 0,
                 "ranking_source_breadth_ex_basket": int(current_row.get("ranking_source_breadth_ex_basket", 0) or 0) if current_row is not None else 0,
+                "present_in_live_industry_table": bool(current_row.get("present_in_live_industry_table", False)) if current_row is not None else False,
+                "present_in_sector_summary_before_filter": bool(current_row.get("present_in_sector_summary_before_filter", False)) if current_row is not None else False,
+                "present_in_today_display_universe": bool(current_row.get("present_in_today_display_universe", False)) if current_row is not None else False,
+                "display_eligible": bool(current_row.get("display_eligible", False)) if current_row is not None else False,
+                "display_excluded_reason": str(current_row.get("display_excluded_reason", "") or "") if current_row is not None else "",
                 "scan_sample_warning_level": str(current_row.get("scan_sample_warning_level", "") or "") if current_row is not None else "",
                 "scan_sample_warning_reason": str(current_row.get("scan_sample_warning_reason", "") or "") if current_row is not None else "",
             }
@@ -4141,6 +4180,7 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
     today_sector_scan_mode = str(today_market_scan_quality["mode"])
     industry_anchor_watch_before = _summarize_industry_anchor_positions(industry_df, baseline_today_sector_leaderboard, anchor_ranks=[2, 3, 4])
     industry_anchor_watch_after = _summarize_industry_anchor_positions(industry_df, today_sector_leaderboard, anchor_ranks=[2, 3, 4])
+    industry_anchor_presence_watch = _summarize_industry_anchor_positions(industry_df, today_sector_leaderboard, anchor_ranks=[1, 3, 6, 7])
     tuning_compare = {
         "sectors_before": _summarize_sector_rank_table(baseline_today_sector_leaderboard, limit=10),
         "sectors_after": _summarize_sector_rank_table(today_sector_leaderboard, limit=10),
@@ -4188,6 +4228,10 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
             "today_sector_population_basis": "industry_up_full_universe_then_left_join_wide_scan_sector_aggregates",
             "today_sector_population_counts": {
                 "industry_universe_count": int(industry_df["sector_name"].astype(str).map(_normalize_industry_name).str.strip().replace("", pd.NA).dropna().nunique()) if not industry_df.empty and "sector_name" in industry_df.columns else 0,
+                "wide_scan_aggregated_sector_count": int(_coerce_numeric(today_sector_leaderboard.get("wide_scan_member_count", pd.Series(dtype="float64"))).fillna(0.0).gt(0.0).sum()) if not today_sector_leaderboard.empty else 0,
+                "sector_summary_before_filter_count": int(today_sector_leaderboard.get("present_in_sector_summary_before_filter", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if not today_sector_leaderboard.empty else 0,
+                "today_display_universe_count": int(today_sector_leaderboard.get("present_in_today_display_universe", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if not today_sector_leaderboard.empty else 0,
+                "display_topn_source_count": int(len(today_sector_leaderboard)),
                 "leaderboard_sector_count": int(len(today_sector_leaderboard)),
                 "scan_sector_count": int(filtered_ranking_df.get("sector_name", pd.Series(dtype=str)).astype(str).str.strip().replace("", pd.NA).dropna().map(_normalize_industry_name).nunique()) if not filtered_ranking_df.empty else 0,
                 "scan_zero_sector_count": int(_coerce_numeric(today_sector_leaderboard.get("scan_member_count", pd.Series(dtype="float64"))).fillna(0.0).eq(0.0).sum()) if not today_sector_leaderboard.empty else 0,
@@ -4215,6 +4259,7 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
             "today_top_sectors_basis": "today_sector_leaderboard_sorted_by_final_dense_display_rank_after_industry_anchor_overlay",
             "today_rank_rule": "today_display_rank_is_dense_final_rank_and_today_rank_equals_today_display_rank",
             "today_rank_absolute_constraint": "anchor_only_days_keep_industry_anchor_order; anchored_overlay_days_allow_max_upshift<=2_and_max_downshift<=2",
+            "today_display_universe_rule": "retain full live industry universe in collector; topN must be sliced only after today_display_rank is assigned",
             "today_sector_removed_live_inputs": [
                 "median_live_ret_norm",
                 "turnover_ratio_median_norm",
@@ -4262,6 +4307,7 @@ def build_live_snapshot(mode: str, ranking_df: pd.DataFrame, industry_df: pd.Dat
             },
             "industry_anchor_watch_before": industry_anchor_watch_before,
             "industry_anchor_watch_after": industry_anchor_watch_after,
+            "industry_anchor_presence_watch": industry_anchor_presence_watch,
             "top10_before_after_compare": {
                 "before": tuning_compare["sectors_before"],
                 "after": tuning_compare["sectors_after"],
