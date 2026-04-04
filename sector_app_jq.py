@@ -4925,6 +4925,134 @@ def _prepare_sector_representatives_display_view(frame: pd.DataFrame) -> tuple[p
     return _prepare_table_view(display_frame, SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
 
 
+def _trim_sector_summary_for_storage(frame: Any) -> Any:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    drop_columns = [
+        "wide_scan_member_codes",
+        "ranking_confirmed_codes",
+        "selected50_codes_in_sector",
+        "sector_center_candidate_codes",
+        "representative_candidate_codes",
+        "representative_excluded_reason_by_code",
+        "representative_trace_top10",
+    ]
+    keep_columns = [column for column in frame.columns if column not in drop_columns]
+    return frame[keep_columns].copy()
+
+
+def _trim_representatives_for_storage(frame: Any) -> Any:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    keep_columns = [
+        column
+        for column in [
+            "sector_name",
+            "representative_rank",
+            "code",
+            "name",
+            "live_price",
+            "live_ret_vs_prev_close",
+            "live_turnover",
+            "stock_turnover_share_of_sector",
+            "representative_score",
+            "rep_score_total",
+            "rep_score_centrality",
+            "rep_score_today_leadership",
+            "rep_score_sanity",
+            "representative_selected_reason",
+            "representative_quality_flag",
+            "representative_fallback_reason",
+            "was_in_selected50",
+            "was_in_must_have",
+            "nikkei_search",
+            "material_link",
+        ]
+        if column in frame.columns
+    ]
+    return frame[keep_columns].copy()
+
+
+def _trim_representatives_display_for_storage(frame: Any) -> Any:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    keep_columns = [column for column in SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS if column in frame.columns]
+    return frame[keep_columns].copy()
+
+
+def _trim_diagnostics_for_storage(diagnostics: Any) -> Any:
+    if not isinstance(diagnostics, dict):
+        return diagnostics
+    trimmed = dict(diagnostics)
+    for key in [
+        "representative_sector_trace_top10",
+        "tuning_compare",
+        "non_corporate_products",
+        "sector_basket_counts",
+        "industry_anchor_watch_before",
+        "industry_anchor_watch_after",
+        "industry_anchor_presence_watch",
+        "top10_before_after_compare",
+        "base_meta",
+        "ranking",
+        "deep_watch",
+        "board",
+    ]:
+        trimmed.pop(key, None)
+    return trimmed
+
+
+def _bundle_for_storage(source_bundle: dict[str, Any]) -> dict[str, Any]:
+    storage_bundle: dict[str, Any] = {}
+    for key, value in source_bundle.items():
+        if key in {
+            "today_sector_summary",
+            "weekly_sector_summary",
+            "monthly_sector_summary",
+            "leaders_by_sector",
+            "center_stocks",
+            "focus_candidates",
+            "watch_candidates",
+            "buy_candidates",
+            "swing_buy_candidates_1w",
+            "swing_watch_candidates_1w",
+            "swing_buy_candidates_1m",
+            "swing_watch_candidates_1m",
+            "paths",
+            "snapshot_source_label",
+            "snapshot_backend_name",
+            "snapshot_warning_message",
+            "snapshot_guard",
+            "snapshot_compatibility_notes",
+            "today_sector_source_key",
+        }:
+            continue
+        if key in {"sector_summary", "today_sector_leaderboard"}:
+            storage_bundle[key] = _trim_sector_summary_for_storage(value)
+            continue
+        if key == "sector_representatives":
+            storage_bundle[key] = _trim_representatives_for_storage(value)
+            continue
+        if key == "sector_representatives_display":
+            storage_bundle[key] = _trim_representatives_display_for_storage(value)
+            continue
+        if key == "diagnostics":
+            storage_bundle[key] = _trim_diagnostics_for_storage(value)
+            continue
+        storage_bundle[key] = value
+    if "today_sector_leaderboard" not in storage_bundle and "sector_summary" in storage_bundle:
+        storage_bundle["today_sector_leaderboard"] = _trim_sector_summary_for_storage(storage_bundle["sector_summary"])
+    if (
+        "sector_representatives_display" not in storage_bundle
+        and isinstance(source_bundle.get("sector_representatives"), pd.DataFrame)
+        and not source_bundle.get("sector_representatives").empty
+    ):
+        storage_bundle["sector_representatives_display"] = _trim_representatives_display_for_storage(
+            _build_sector_representatives_display_frame(source_bundle["sector_representatives"])
+        )
+    return storage_bundle
+
+
 def build_live_snapshot(
     mode: str,
     ranking_df: pd.DataFrame,
@@ -5391,117 +5519,6 @@ def build_live_snapshot(
 
 
 def write_snapshot_bundle(bundle: dict[str, Any], settings: dict[str, Any], *, write_drive: bool = False) -> dict[str, str]:
-    def _trim_sector_summary_for_storage(frame: Any) -> Any:
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return frame
-        drop_columns = [
-            "wide_scan_member_codes",
-            "ranking_confirmed_codes",
-            "selected50_codes_in_sector",
-            "sector_center_candidate_codes",
-            "representative_candidate_codes",
-            "representative_excluded_reason_by_code",
-            "representative_trace_top10",
-        ]
-        keep_columns = [column for column in frame.columns if column not in drop_columns]
-        return frame[keep_columns].copy()
-
-    def _trim_representatives_for_storage(frame: Any) -> Any:
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return frame
-        keep_columns = [
-            column
-            for column in [
-                "sector_name",
-                "representative_rank",
-                "code",
-                "name",
-                "live_price",
-                "live_ret_vs_prev_close",
-                "live_turnover",
-                "stock_turnover_share_of_sector",
-                "representative_score",
-                "rep_score_total",
-                "rep_score_centrality",
-                "rep_score_today_leadership",
-                "rep_score_sanity",
-                "representative_selected_reason",
-                "representative_quality_flag",
-                "representative_fallback_reason",
-                "was_in_selected50",
-                "was_in_must_have",
-                "nikkei_search",
-                "material_link",
-            ]
-            if column in frame.columns
-        ]
-        return frame[keep_columns].copy()
-
-    def _trim_representatives_display_for_storage(frame: Any) -> Any:
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return frame
-        keep_columns = [column for column in SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS if column in frame.columns]
-        return frame[keep_columns].copy()
-
-    def _trim_diagnostics_for_storage(diagnostics: Any) -> Any:
-        if not isinstance(diagnostics, dict):
-            return diagnostics
-        trimmed = dict(diagnostics)
-        for key in [
-            "representative_sector_trace_top10",
-            "tuning_compare",
-            "non_corporate_products",
-            "sector_basket_counts",
-            "industry_anchor_watch_before",
-            "industry_anchor_watch_after",
-            "industry_anchor_presence_watch",
-            "top10_before_after_compare",
-            "base_meta",
-            "ranking",
-            "deep_watch",
-            "board",
-        ]:
-            trimmed.pop(key, None)
-        return trimmed
-
-    def _bundle_for_storage(source_bundle: dict[str, Any]) -> dict[str, Any]:
-        storage_bundle: dict[str, Any] = {}
-        for key, value in source_bundle.items():
-            if key in {
-                "today_sector_summary",
-                "today_sector_leaderboard",
-                "weekly_sector_summary",
-                "monthly_sector_summary",
-                "leaders_by_sector",
-                "center_stocks",
-                "focus_candidates",
-                "watch_candidates",
-                "buy_candidates",
-                "swing_buy_candidates_1w",
-                "swing_watch_candidates_1w",
-                "swing_buy_candidates_1m",
-                "swing_watch_candidates_1m",
-                "paths",
-                "snapshot_source_label",
-                "snapshot_backend_name",
-                "snapshot_warning_message",
-            }:
-                continue
-            if key == "sector_summary":
-                storage_bundle[key] = _trim_sector_summary_for_storage(value)
-                continue
-            if key == "sector_representatives":
-                storage_bundle[key] = _trim_representatives_for_storage(value)
-                continue
-            if key == "sector_representatives_display":
-                storage_bundle[key] = _trim_representatives_display_for_storage(value)
-                continue
-            if key == "diagnostics":
-                storage_bundle[key] = _trim_diagnostics_for_storage(value)
-                continue
-            storage_bundle[key] = value.copy() if isinstance(value, pd.DataFrame) else value
-        return storage_bundle
-
     storage_bundle = _bundle_for_storage(bundle)
     markdown_text = bundle_to_markdown(bundle)
     result = write_snapshot_bundle_to_store(

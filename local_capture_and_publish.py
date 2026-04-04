@@ -8,9 +8,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sector_app_jq import (
+    CLOUD_VIEWER_MODES,
+    DEFAULT_CONTROL_PLANE_REQUEST_MODE,
     GITHUB_CONTROL_TOKEN_SECRET_NAME,
     ROOT_DIR,
     _short_body,
+    _bundle_for_storage,
+    _github_deploy_snapshot_json_path,
+    _github_deploy_snapshot_md_path,
     bundle_to_json_text,
     bundle_to_markdown,
     get_github_control_config,
@@ -18,6 +23,7 @@ from sector_app_jq import (
     github_read_json_file,
     github_read_text_file,
     github_write_text_file,
+    normalize_cloud_viewer_mode,
     read_control_plane_request,
     read_control_plane_status,
     run_cli,
@@ -178,21 +184,13 @@ def _load_local_snapshot_bundle(mode: str) -> dict[str, Any]:
 
 def _resolve_deploy_snapshot_paths(settings: dict[str, Any], mode: str) -> tuple[dict[str, str], str, str]:
     config = get_github_control_config(settings)
-    if mode == "1130":
-        return config, config["deploy_snapshot_json_path"], config["deploy_snapshot_md_path"]
-    if mode == "0915":
-        return config, "data/snapshots/latest_0915.json", "data/snapshots/latest_0915.md"
-    if mode == "1530":
-        return config, "data/snapshots/latest_1530.json", "data/snapshots/latest_1530.md"
-    if mode == "now":
-        return config, "data/snapshots/latest_now.json", "data/snapshots/latest_now.md"
-    raise ValueError(f"Unsupported publish mode: {mode}")
+    normalized_mode = normalize_cloud_viewer_mode(mode)
+    return config, _github_deploy_snapshot_json_path(normalized_mode, settings), _github_deploy_snapshot_md_path(normalized_mode, settings)
 
 
 def publish_snapshot_bundle(token: str, settings: dict[str, Any], bundle: dict[str, Any], *, mode: str | None = None, session: Any = None) -> dict[str, str]:
-    publish_mode = str(mode or bundle.get("meta", {}).get("mode", "")).strip()
-    if publish_mode not in {"0915", "1130", "1530", "now"}:
-        raise ValueError(f"Unsupported publish mode: {publish_mode}")
+    publish_mode = normalize_cloud_viewer_mode(mode or bundle.get("meta", {}).get("mode", ""))
+    storage_bundle = _bundle_for_storage(bundle)
     config, json_path, md_path = _resolve_deploy_snapshot_paths(settings, publish_mode)
     logger.info("publishing deploy snapshot mode=%s branch=%s json_path=%s md_path=%s", publish_mode, config["deploy_branch"], json_path, md_path)
 
@@ -212,7 +210,7 @@ def publish_snapshot_bundle(token: str, settings: dict[str, Any], bundle: dict[s
         config["deploy_branch"],
         json_path,
         token,
-        bundle_to_json_text(bundle),
+        bundle_to_json_text(storage_bundle),
         f"Publish latest_{publish_mode} snapshot from local collector",
         sha=json_sha,
         session=session,
@@ -231,8 +229,7 @@ def publish_snapshot_bundle(token: str, settings: dict[str, Any], bundle: dict[s
 
 
 def _publish_local_snapshot_mode(mode: str, *, session: Any = None) -> None:
-    if mode not in {"0915", "1130", "1530", "now"}:
-        raise ValueError(f"Unsupported publish mode: {mode}")
+    mode = normalize_cloud_viewer_mode(mode)
     settings = get_settings()
     token = _github_token()
     if not token:
@@ -242,6 +239,7 @@ def _publish_local_snapshot_mode(mode: str, *, session: Any = None) -> None:
 
 
 def _run_cli_options(mode: str) -> tuple[bool, str]:
+    mode = normalize_cloud_viewer_mode(mode)
     if mode == "0915":
         return False, "0915 snapshot refresh is running."
     if mode == "1130":
@@ -269,7 +267,10 @@ def process_update_request(
     if not bool(request_payload.get("request_update")):
         logger.info("no pending update request")
         return {"handled": False, "reason": "no_request"}
-    request_mode = str(request_payload.get("request_mode", "") or "1130").strip() or "1130"
+    request_mode = normalize_cloud_viewer_mode(
+        request_payload.get("request_mode", ""),
+        default=DEFAULT_CONTROL_PLANE_REQUEST_MODE,
+    )
     try:
         fast_check, status_message = _run_cli_options(request_mode)
     except ValueError:
@@ -306,11 +307,11 @@ def process_update_request(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Poll control-plane update request and publish latest_1130 snapshot.")
+    parser = argparse.ArgumentParser(description="Poll control-plane update requests and publish the requested latest_<mode> snapshot.")
     exclusive = parser.add_mutually_exclusive_group()
-    exclusive.add_argument("--force", action="store_true", help="Ignore request flag and run once immediately.")
-    exclusive.add_argument("--force-mode", choices=["0915", "1130", "1530", "now"], help="Ignore request flag and run once immediately for the specified mode.")
-    exclusive.add_argument("--publish-local-mode", choices=["0915", "1130", "1530", "now"], help="Publish an existing local snapshot to the deploy branch without touching control-plane status.")
+    exclusive.add_argument("--force", action="store_true", help=f"Ignore request flag and run once immediately using the default mode ({DEFAULT_CONTROL_PLANE_REQUEST_MODE}).")
+    exclusive.add_argument("--force-mode", choices=list(CLOUD_VIEWER_MODES), help="Ignore request flag and run once immediately for the specified mode.")
+    exclusive.add_argument("--publish-local-mode", choices=list(CLOUD_VIEWER_MODES), help="Publish an existing local snapshot for the specified mode to the deploy branch without touching control-plane status.")
     args = parser.parse_args()
 
     try:
@@ -327,9 +328,9 @@ def main() -> int:
                     return 1
             force_mode = ""
             if args.force_mode:
-                force_mode = args.force_mode
+                force_mode = normalize_cloud_viewer_mode(args.force_mode)
             elif args.force:
-                force_mode = "1130"
+                force_mode = DEFAULT_CONTROL_PLANE_REQUEST_MODE
             if force_mode:
                 settings = get_settings()
                 token = _github_token()
