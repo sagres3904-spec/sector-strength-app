@@ -1,6 +1,6 @@
 # Sector Strength Snapshot
 
 - mode: 1530
-- generated_at_jst: 2026-04-07 15:36:23 JST
+- generated_at_jst: 2026-04-08 00:41:50 JST
 - is_true_timepoint: False
 - diagnostics_keys: base_meta, board, breadth_scope, buy_candidate_count, center_stock_count, deep_watch, generated_at, includes_kabu, industry_anchor_presence_watch, industry_anchor_watch_after, industry_anchor_watch_before, industry_basket_count, market_scan_quality_summary, mode, non_corporate_products, rank_mode_reason, ranking, ranking_candidate_count, ranking_union_count, representative_sector_trace_top10, scan_sample_warning_rules, sector_alias_normalization_basis, sector_basket_counts, sector_summary_scope, sectors_with_ranking_confirmed_ge5, sectors_with_source_breadth_ge2, today_display_universe_rule, today_rank_absolute_constraint, today_rank_mode, today_rank_rule, today_sector_display_rank_column, today_sector_participation_inputs, today_sector_population_basis, today_sector_population_counts, today_sector_primary_rank_column, today_sector_rank_tether, today_sector_removed_live_inputs, today_top_sectors_basis, today_upshift_block_rules, top10_before_after_compare, tuning_compare, watch_candidate_count, wide_scan_mode, wide_scan_total_count, write_completed
