@@ -624,8 +624,8 @@ UI_COLUMN_LABELS = {
     "representative_stock": "代表銘柄",
     "representative_rank": "代表順位",
     "representative_score": "代表銘柄スコア",
-    "representative_selected_reason": "代表選定理由",
-    "representative_quality_flag": "品質フラグ",
+    "representative_selected_reason": "選定理由",
+    "representative_quality_flag": "品質",
     "representative_fallback_reason": "fallback理由",
     "stock_turnover_share_of_sector": "セクター売買代金寄与率",
     "swing_score_1w": "1週間候補スコア",
@@ -644,7 +644,7 @@ UI_COLUMN_LABELS = {
     "breadth_penalty": "breadth軽減点",
     "earnings_proximity_flag": "決算接近除外(仮)",
     "atr_pct": "ATR%(土台)",
-    "nikkei_search": "日経で検索",
+    "nikkei_search": "日経リンク",
     "material_link": "材料リンク",
 }
 
@@ -2922,6 +2922,22 @@ def _score_rank_ascending(series: pd.Series) -> pd.Series:
     return 1.0 - numeric.rank(pct=True, ascending=True).fillna(1.0)
 
 
+def _score_percentile_within_group(series: pd.Series, groups: pd.Series) -> pd.Series:
+    numeric = _coerce_numeric(series)
+    if numeric.dropna().empty:
+        return pd.Series([0.0] * len(series), index=series.index)
+    grouped = pd.Series(groups, index=series.index)
+    return numeric.groupby(grouped).rank(pct=True, ascending=True).fillna(0.0)
+
+
+def _group_rank_desc(series: pd.Series, groups: pd.Series) -> pd.Series:
+    numeric = _coerce_numeric(series)
+    if numeric.dropna().empty:
+        return pd.Series([float("inf")] * len(series), index=series.index)
+    grouped = pd.Series(groups, index=series.index)
+    return numeric.groupby(grouped).rank(method="min", ascending=False).fillna(float("inf"))
+
+
 def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     return _coerce_numeric(numerator) / _coerce_numeric(denominator).replace(0, pd.NA)
 
@@ -3865,6 +3881,7 @@ def _empty_sector_representatives_frame() -> pd.DataFrame:
     return pd.DataFrame(
         columns=[
             "sector_name",
+            "today_rank",
             "representative_rank",
             "code",
             "name",
@@ -3942,6 +3959,7 @@ def _score_sector_center_candidates(
     working["sector_relative_live_ret"] = _coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) - working["sector_live_ret_median"]
     working["sector_positive_candidate_count"] = working.groupby(sector_key_col)["live_ret_vs_prev_close"].transform(lambda s: int((_coerce_numeric(s).fillna(-999.0) >= 0.0).sum()))
     working["sector_negative_candidate_count"] = working.groupby(sector_key_col)["live_ret_vs_prev_close"].transform(lambda s: int((_coerce_numeric(s).fillna(0.0) < 0.0).sum()))
+    working["sector_candidate_count"] = working.groupby(sector_key_col)["code"].transform("size").fillna(0).astype(int)
     working["exclude_spike"] = (
         (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) >= 12.0)
         & (_coerce_numeric(working["live_turnover_ratio_20d"]).fillna(0.0) >= 2.5)
@@ -3951,53 +3969,116 @@ def _score_sector_center_candidates(
             | (_coerce_numeric(working["avg_turnover_20d"]).fillna(0.0) < global_turnover_floor)
         )
     )
+    sector_groups = working[sector_key_col]
     working["rep_score_centrality"] = 0.0
-    working["rep_score_centrality"] += _score_percentile(working["sector_contribution_full"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["sector_contribution_full"]
+    working["rep_score_centrality"] += _score_percentile_within_group(working["sector_contribution_full"], sector_groups) * CENTER_LEADER_CENTRALITY_WEIGHTS["sector_contribution_full"]
     working["rep_score_centrality"] += _score_rank_ascending(working["contribution_rank_in_sector"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["contribution_rank_in_sector"]
     working["rep_score_centrality"] += _score_rank_ascending(working["turnover_rank_in_sector"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["turnover_rank_in_sector"]
-    working["rep_score_centrality"] += _score_percentile(working["avg_turnover_20d"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["avg_turnover_20d"]
-    working["rep_score_centrality"] += _score_percentile(working["avg_volume_20d"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["avg_volume_20d"]
-    working["rep_score_centrality"] += _score_percentile(working["stock_turnover_share_of_sector"]) * CENTER_LEADER_CENTRALITY_WEIGHTS["stock_turnover_share_of_sector"]
+    working["rep_score_centrality"] += _score_percentile_within_group(working["avg_turnover_20d"], sector_groups) * CENTER_LEADER_CENTRALITY_WEIGHTS["avg_turnover_20d"]
+    working["rep_score_centrality"] += _score_percentile_within_group(working["avg_volume_20d"], sector_groups) * CENTER_LEADER_CENTRALITY_WEIGHTS["avg_volume_20d"]
+    working["rep_score_centrality"] += _score_percentile_within_group(working["stock_turnover_share_of_sector"], sector_groups) * CENTER_LEADER_CENTRALITY_WEIGHTS["stock_turnover_share_of_sector"]
     working.loc[working["liquidity_ok"].fillna(False), "rep_score_centrality"] += CENTER_LEADER_CENTRALITY_WEIGHTS["liquidity_ok"]
+    working["rep_score_today_flow"] = 0.0
+    working["rep_score_today_flow"] += _score_percentile_within_group(working["live_turnover"], sector_groups) * 0.55
+    working["rep_score_today_flow"] += _score_percentile_within_group(working["stock_turnover_share_of_sector"], sector_groups) * 0.75
+    working["rep_score_today_flow"] += _score_percentile_within_group(working["live_turnover_ratio_20d"], sector_groups) * 0.80
+    working["rep_score_today_flow"] += _score_percentile_within_group(working["live_volume_ratio_20d"], sector_groups) * 0.55
     working["rep_score_today_leadership"] = 0.0
-    working["rep_score_today_leadership"] += _score_percentile(working["live_ret_vs_prev_close"]) * CENTER_LEADER_TODAY_WEIGHTS["live_ret_vs_prev_close"]
-    working["rep_score_today_leadership"] += _score_percentile(working["live_ret_from_open"]) * CENTER_LEADER_TODAY_WEIGHTS["live_ret_from_open"]
-    working["rep_score_today_leadership"] += _score_percentile(working["closing_strength_signal"]) * CENTER_LEADER_TODAY_WEIGHTS["closing_strength_signal"]
-    working["rep_score_today_leadership"] += _score_percentile(working["live_turnover_ratio_20d"]) * CENTER_LEADER_TODAY_WEIGHTS["live_turnover_ratio_20d"]
-    working["rep_score_today_leadership"] += _score_percentile(working["live_volume_ratio_20d"]) * CENTER_LEADER_TODAY_WEIGHTS["live_volume_ratio_20d"]
-    working["rep_score_today_leadership"] += _score_percentile(working["sector_relative_live_ret"]) * CENTER_LEADER_TODAY_WEIGHTS["sector_relative_live_ret"]
+    working["rep_score_today_leadership"] += _score_percentile_within_group(working["live_ret_vs_prev_close"], sector_groups) * CENTER_LEADER_TODAY_WEIGHTS["live_ret_vs_prev_close"]
+    working["rep_score_today_leadership"] += _score_percentile_within_group(working["live_ret_from_open"], sector_groups) * CENTER_LEADER_TODAY_WEIGHTS["live_ret_from_open"]
+    working["rep_score_today_leadership"] += _score_percentile_within_group(working["closing_strength_signal"], sector_groups) * CENTER_LEADER_TODAY_WEIGHTS["closing_strength_signal"]
+    working["rep_score_today_leadership"] += _score_percentile_within_group(working["live_turnover_ratio_20d"], sector_groups) * CENTER_LEADER_TODAY_WEIGHTS["live_turnover_ratio_20d"]
+    working["rep_score_today_leadership"] += _score_percentile_within_group(working["live_volume_ratio_20d"], sector_groups) * CENTER_LEADER_TODAY_WEIGHTS["live_volume_ratio_20d"]
+    working["rep_score_today_leadership"] += _score_percentile_within_group(working["sector_relative_live_ret"], sector_groups) * CENTER_LEADER_TODAY_WEIGHTS["sector_relative_live_ret"]
+    working["rep_score_today_leadership"] += working["rep_score_today_flow"] * 0.55
+    working["sector_live_ret_rank_desc"] = _group_rank_desc(working["live_ret_vs_prev_close"], sector_groups)
+    working["sector_live_ret_pct"] = _score_percentile_within_group(working["live_ret_vs_prev_close"], sector_groups)
+    working["sector_today_flow_pct"] = _score_percentile_within_group(working["rep_score_today_flow"], sector_groups)
+    working["sector_today_leadership_pct"] = _score_percentile_within_group(working["rep_score_today_leadership"], sector_groups)
+    working["sector_live_ret_top_band_cutoff"] = working["sector_candidate_count"].apply(lambda count: max(1, math.ceil(float(count or 0) * 0.35)))
     working["rep_score_sanity"] = 0.0
     working.loc[working["liquidity_ok"].fillna(False), "rep_score_sanity"] += 1.00
     working.loc[~working["exclude_spike"].fillna(False), "rep_score_sanity"] += 0.80
-    working.loc[_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(-999.0) >= 0.0, "rep_score_sanity"] += 0.60
+    working.loc[_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(-999.0) >= _coerce_numeric(working["sector_live_ret_median"]).fillna(0.0), "rep_score_sanity"] += 0.60
     working.loc[_coerce_numeric(working["closing_strength_signal"]).fillna(0.0) >= _coerce_numeric(working["sector_closing_strength_median"]).fillna(0.0), "rep_score_sanity"] += 0.45
+    working.loc[_coerce_numeric(working["sector_today_flow_pct"]).fillna(0.0) >= 0.67, "rep_score_sanity"] += 0.30
     weak_relative_close_mask = (
         _coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) < _coerce_numeric(working["sector_live_ret_median"]).fillna(0.0)
     ) & (
         _coerce_numeric(working["closing_strength_signal"]).fillna(0.0) < _coerce_numeric(working["sector_closing_strength_median"]).fillna(0.0)
     )
-    working.loc[weak_relative_close_mask, "rep_score_sanity"] -= 1.75
-    working.loc[(_coerce_numeric(working["live_turnover_ratio_20d"]).fillna(0.0) >= 1.20) & (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) < 0.0), "rep_score_sanity"] -= 1.50
-    working.loc[_coerce_numeric(working["live_ret_from_open"]).fillna(0.0) < 0.0, "rep_score_sanity"] -= 0.90
+    working.loc[weak_relative_close_mask, "rep_score_sanity"] -= 1.40
+    working.loc[
+        (_coerce_numeric(working["sector_live_ret_pct"]).fillna(0.0) <= 0.34)
+        & (_coerce_numeric(working["sector_today_flow_pct"]).fillna(0.0) <= 0.34),
+        "rep_score_sanity",
+    ] -= 1.15
+    working.loc[
+        (_coerce_numeric(working["live_ret_from_open"]).fillna(0.0) < 0.0)
+        & (_coerce_numeric(working["sector_today_leadership_pct"]).fillna(0.0) <= 0.50),
+        "rep_score_sanity",
+    ] -= 0.60
     working.loc[_coerce_numeric(working["high_close_score"]).fillna(1.0) < 0.88, "rep_score_sanity"] -= 0.80
     working["rep_score_total"] = working["rep_score_centrality"] + working["rep_score_today_leadership"] + working["rep_score_sanity"]
     working["rep_hard_block"] = False
     working["rep_excluded_reason"] = ""
     hard_block_liquidity = ~working["liquidity_ok"].fillna(False)
     hard_block_spike = working["exclude_spike"].fillna(False)
-    hard_block_negative = (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) < 0.0) & (_coerce_numeric(working["sector_positive_candidate_count"]).fillna(0.0) > 0.0)
     working.loc[hard_block_liquidity, "rep_hard_block"] = True
     working.loc[hard_block_liquidity, "rep_excluded_reason"] = "liquidity_not_ok"
     working.loc[hard_block_spike, "rep_hard_block"] = True
     working.loc[hard_block_spike, "rep_excluded_reason"] = working["rep_excluded_reason"].where(working["rep_excluded_reason"].astype(str) != "", "exclude_spike")
-    working.loc[hard_block_negative, "rep_hard_block"] = True
-    working.loc[hard_block_negative, "rep_excluded_reason"] = working["rep_excluded_reason"].where(working["rep_excluded_reason"].astype(str) != "", "negative_live_ret_while_positive_peer_exists")
+    working["rep_relative_leadership_pass"] = (
+        (_coerce_numeric(working["sector_live_ret_rank_desc"]).fillna(float("inf")) <= _coerce_numeric(working["sector_live_ret_top_band_cutoff"]).fillna(0.0))
+        | (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(-999.0) >= _coerce_numeric(working["sector_live_ret_median"]).fillna(0.0))
+        | (_coerce_numeric(working["sector_today_leadership_pct"]).fillna(0.0) >= 0.67)
+        | (_coerce_numeric(working["sector_today_flow_pct"]).fillna(0.0) >= 0.67)
+    )
+    working["rep_centrality_pass"] = (
+        (_coerce_numeric(working["rep_score_centrality"]).fillna(0.0) >= 1.70)
+        & (_score_percentile_within_group(working["rep_score_centrality"], sector_groups).fillna(0.0) >= 0.40)
+    )
+    working["rep_sanity_pass"] = _coerce_numeric(working["rep_score_sanity"]).fillna(0.0) >= 0.10
+    working["rep_relative_weak"] = (
+        (_coerce_numeric(working["sector_live_ret_pct"]).fillna(0.0) <= 0.34)
+        & (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) < _coerce_numeric(working["sector_live_ret_median"]).fillna(0.0))
+        & (_coerce_numeric(working["sector_today_leadership_pct"]).fillna(0.0) <= 0.34)
+        & (_coerce_numeric(working["sector_today_flow_pct"]).fillna(0.0) <= 0.45)
+    )
     working["rep_quality_pass"] = (
         ~working["rep_hard_block"].fillna(False)
-        & (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(-999.0) >= 0.0)
-        & (_coerce_numeric(working["rep_score_today_leadership"]).fillna(0.0) >= 1.35)
-        & (_coerce_numeric(working["rep_score_sanity"]).fillna(0.0) >= 0.0)
+        & working["rep_relative_leadership_pass"].fillna(False)
+        & working["rep_centrality_pass"].fillna(False)
+        & working["rep_sanity_pass"].fillna(False)
+        & (~working["rep_relative_weak"].fillna(False))
     )
+    working.loc[
+        (~working["rep_hard_block"].fillna(False))
+        & (~working["rep_quality_pass"].fillna(False))
+        & working["rep_relative_weak"].fillna(False),
+        "rep_excluded_reason",
+    ] = "relative_leadership_weak"
+    working.loc[
+        (~working["rep_hard_block"].fillna(False))
+        & (~working["rep_quality_pass"].fillna(False))
+        & (working["rep_excluded_reason"].astype(str) == "")
+        & (~working["rep_relative_leadership_pass"].fillna(False)),
+        "rep_excluded_reason",
+    ] = "relative_leadership_not_enough"
+    working.loc[
+        (~working["rep_hard_block"].fillna(False))
+        & (~working["rep_quality_pass"].fillna(False))
+        & (working["rep_excluded_reason"].astype(str) == "")
+        & (~working["rep_centrality_pass"].fillna(False)),
+        "rep_excluded_reason",
+    ] = "centrality_below_minimum"
+    working.loc[
+        (~working["rep_hard_block"].fillna(False))
+        & (~working["rep_quality_pass"].fillna(False))
+        & (working["rep_excluded_reason"].astype(str) == "")
+        & (~working["rep_sanity_pass"].fillna(False)),
+        "rep_excluded_reason",
+    ] = "sanity_below_minimum"
     working["rep_selected_reason"] = ""
     working["rep_fallback_reason"] = ""
     working["representative_selected_reason"] = ""
@@ -4015,41 +4096,45 @@ def _build_sector_representatives(scored_candidates: pd.DataFrame) -> pd.DataFra
     representative_frames: list[pd.DataFrame] = []
     for _, group in working.groupby(sector_key_col, dropna=False):
         sector_group = group.sort_values(
-            ["rep_score_total", "rep_score_centrality", "live_ret_vs_prev_close", "stock_turnover_share_of_sector", "avg_turnover_20d"],
+            ["rep_score_today_leadership", "rep_score_centrality", "rep_score_sanity", "live_ret_vs_prev_close", "stock_turnover_share_of_sector"],
             ascending=[False, False, False, False, False],
             kind="mergesort",
         ).copy()
         quality = sector_group[sector_group["rep_quality_pass"].fillna(False)].copy()
-        chosen_frames: list[pd.DataFrame] = []
+        chosen = pd.DataFrame()
         if not quality.empty:
-            quality = quality.head(3).copy()
-            quality["representative_quality_flag"] = "quality_pass"
-            chosen_frames.append(quality)
-        filled_codes = set(pd.concat(chosen_frames, ignore_index=True)["code"].astype(str).tolist()) if chosen_frames else set()
-        remaining_slots = max(3 - len(filled_codes), 0)
-        fallback_reason = ""
-        if remaining_slots > 0:
+            chosen = quality.head(3).copy()
+            chosen["representative_quality_flag"] = "quality_pass"
+        else:
+            fallback_reason = "fallback_no_clear_leader"
             fallback_pool = sector_group[
                 (~sector_group["rep_hard_block"].fillna(False))
-                & (~sector_group["code"].astype(str).isin(filled_codes))
+                & (sector_group["rep_centrality_pass"].fillna(False))
+                & (_coerce_numeric(sector_group["rep_score_sanity"]).fillna(0.0) >= -0.25)
             ].copy()
-            if not fallback_pool.empty:
-                if quality.empty:
-                    fallback_reason = "no_quality_candidate_met_center_leader_gate"
-                    if int(_coerce_numeric(fallback_pool["sector_positive_candidate_count"]).max() or 0) <= 0:
-                        fallback_reason = "no_positive_candidate_in_selected50"
-                else:
-                    fallback_reason = "filled_remaining_support_slots_with_best_available_nonblocked_candidates"
-                fallback_pool = fallback_pool.head(remaining_slots).copy()
-                fallback_pool["rep_fallback_reason"] = fallback_reason
-                fallback_pool["representative_fallback_reason"] = fallback_reason
-                fallback_pool["representative_quality_flag"] = "fallback"
-                chosen_frames.append(fallback_pool)
-        if not chosen_frames:
+            if fallback_pool.empty:
+                fallback_reason = "fallback_insufficient_candidates"
+                fallback_pool = sector_group[
+                    (~sector_group["rep_hard_block"].fillna(False))
+                    & (_coerce_numeric(sector_group["rep_score_sanity"]).fillna(0.0) >= -0.50)
+                ].copy()
+            if fallback_pool.empty:
+                fallback_pool = sector_group[(~sector_group["rep_hard_block"].fillna(False))].copy()
+            if fallback_pool.empty:
+                continue
+            chosen = fallback_pool.head(1).copy()
+            chosen["rep_selected_reason"] = "center_fallback_leader"
+            chosen["rep_fallback_reason"] = fallback_reason
+            chosen["representative_fallback_reason"] = fallback_reason
+            chosen["representative_quality_flag"] = "quality_warn"
+        if chosen.empty:
             continue
-        chosen = pd.concat(chosen_frames, ignore_index=True).head(3).copy()
+        chosen = chosen.reset_index(drop=True)
         chosen["representative_rank"] = range(1, len(chosen) + 1)
-        chosen["rep_selected_reason"] = chosen["representative_rank"].map(lambda rank: "center_leader" if int(rank) == 1 else "sector_support_leader")
+        if quality.empty:
+            chosen["rep_selected_reason"] = "center_fallback_leader"
+        else:
+            chosen["rep_selected_reason"] = chosen["representative_rank"].map(lambda rank: "center_leader" if int(rank) == 1 else "sector_support_leader")
         chosen["representative_selected_reason"] = chosen["rep_selected_reason"]
         chosen.loc[chosen["representative_quality_flag"].astype(str).isin(["", "excluded", "nan"]), "representative_quality_flag"] = "quality_pass"
         chosen.loc[chosen["rep_fallback_reason"].astype(str).eq(""), "rep_fallback_reason"] = chosen["representative_fallback_reason"]
@@ -4058,6 +4143,7 @@ def _build_sector_representatives(scored_candidates: pd.DataFrame) -> pd.DataFra
             chosen[
                 [
                     "sector_name",
+                    "today_rank",
                     "representative_rank",
                     "code",
                     "name",
@@ -4698,6 +4784,69 @@ def _timepoint_meaning(mode: str) -> str:
     }.get(str(mode), "")
 
 
+REPRESENTATIVE_SELECTED_REASON_LABELS = {
+    "center_leader": "中心株かつ当日牽引",
+    "sector_support_leader": "セクター内の当日牽引補完",
+    "center_fallback_leader": "中心性を優先した代替選出",
+}
+
+REPRESENTATIVE_QUALITY_FLAG_LABELS = {
+    "quality_pass": "品質基準を満たす",
+    "quality_warn": "品質要注意",
+    "quality_fail": "品質基準未達",
+    "fallback": "品質要注意",
+    "excluded": "品質基準未達",
+}
+
+REPRESENTATIVE_FALLBACK_REASON_LABELS = {
+    "fallback_no_clear_leader": "明確な当日牽引株がないため代替選出",
+    "fallback_insufficient_candidates": "適格候補不足のため代替選出",
+    "no_quality_candidate_met_center_leader_gate": "明確な当日牽引株がないため代替選出",
+    "no_positive_candidate_in_selected50": "明確な当日牽引株がないため代替選出",
+    "filled_remaining_support_slots_with_best_available_nonblocked_candidates": "適格候補不足のため代替選出",
+}
+
+
+def _representative_display_label(value: Any, mapping: dict[str, str]) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return mapping.get(raw, "未定義の判定")
+
+
+def _representative_selected_reason_label(value: Any) -> str:
+    return _representative_display_label(value, REPRESENTATIVE_SELECTED_REASON_LABELS)
+
+
+def _representative_quality_flag_label(value: Any) -> str:
+    return _representative_display_label(value, REPRESENTATIVE_QUALITY_FLAG_LABELS)
+
+
+def _representative_fallback_reason_label(value: Any) -> str:
+    return _representative_display_label(value, REPRESENTATIVE_FALLBACK_REASON_LABELS)
+
+
+def _format_display_rank_value(value: Any) -> str:
+    numeric = _coerce_numeric(pd.Series([value])).iloc[0]
+    if pd.isna(numeric):
+        return ""
+    return str(int(numeric))
+
+
+def _format_display_pct_1dp(value: Any) -> str:
+    numeric = _coerce_numeric(pd.Series([value])).iloc[0]
+    if pd.isna(numeric):
+        return ""
+    return f"{float(numeric):.1f}"
+
+
+def _format_display_turnover_value(value: Any) -> str:
+    numeric = _coerce_numeric(pd.Series([value])).iloc[0]
+    if pd.isna(numeric):
+        return ""
+    return f"{int(round(float(numeric))):,}"
+
+
 def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str, link_columns: bool = False) -> None:
     st.subheader(title)
     if frame.empty:
@@ -4707,6 +4856,7 @@ def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str,
     if link_columns:
         kwargs["column_config"] = {
             "日経で検索": st.column_config.LinkColumn("日経で検索", display_text="日経で検索"),
+            "日経リンク": st.column_config.LinkColumn("日経リンク", display_text="日経リンク"),
             "材料リンク": st.column_config.LinkColumn("材料リンク", display_text="リンクを開く"),
         }
     st.dataframe(frame.rename(columns=UI_COLUMN_LABELS), **kwargs)
@@ -4744,18 +4894,17 @@ TODAY_SECTOR_DISPLAY_COLUMNS = [
 ]
 
 SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS = [
+    "today_rank",
     "sector_name",
     "representative_rank",
     "code",
     "name",
-    "live_price",
     "live_ret_vs_prev_close",
     "live_turnover",
-    "stock_turnover_share_of_sector",
-    "representative_score",
     "representative_selected_reason",
     "representative_quality_flag",
     "representative_fallback_reason",
+    "nikkei_search",
 ]
 
 PERSISTENCE_DISPLAY_COLUMNS = [
@@ -4820,6 +4969,7 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
         "representative_selected_reason",
         "representative_quality_flag",
         "representative_fallback_reason",
+        "nikkei_search",
     }
     for column in columns:
         if column not in prepared.columns:
@@ -4898,31 +5048,54 @@ def _build_sector_representatives_display_frame(sector_representatives: pd.DataF
     if sector_representatives is None or sector_representatives.empty:
         return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
     working = sector_representatives.copy()
-    if "representative_score" not in working.columns and "rep_score_total" in working.columns:
-        working["representative_score"] = working["rep_score_total"]
     for column in [
+        "today_rank",
         "sector_name",
         "representative_rank",
         "code",
         "name",
-        "live_price",
         "live_ret_vs_prev_close",
         "live_turnover",
-        "stock_turnover_share_of_sector",
-        "representative_score",
         "representative_selected_reason",
         "representative_quality_flag",
         "representative_fallback_reason",
+        "nikkei_search",
     ]:
         if column not in working.columns:
-            working[column] = "" if column in {"sector_name", "code", "name", "representative_selected_reason", "representative_quality_flag", "representative_fallback_reason"} else pd.NA
-    working = working.sort_values(["sector_name", "representative_rank"], ascending=[True, True], kind="mergesort").copy()
+            working[column] = "" if column in {"sector_name", "code", "name", "representative_selected_reason", "representative_quality_flag", "representative_fallback_reason", "nikkei_search"} else pd.NA
+    working["_today_rank_sort"] = _coerce_numeric(working["today_rank"]).fillna(9999)
+    working["_representative_rank_sort"] = _coerce_numeric(working["representative_rank"]).fillna(9999)
+    working = working.sort_values(
+        ["_today_rank_sort", "sector_name", "_representative_rank_sort"],
+        ascending=[True, True, True],
+        kind="mergesort",
+    ).copy()
+    working["today_rank"] = working["today_rank"].apply(_format_display_rank_value)
+    working["representative_rank"] = working["representative_rank"].apply(_format_display_rank_value)
+    working["code"] = working["code"].fillna("").astype(str)
+    working["name"] = working["name"].fillna("").astype(str)
+    working["live_ret_vs_prev_close"] = working["live_ret_vs_prev_close"].apply(_format_display_pct_1dp)
+    working["live_turnover"] = working["live_turnover"].apply(_format_display_turnover_value)
+    working["representative_selected_reason"] = working["representative_selected_reason"].apply(_representative_selected_reason_label)
+    working["representative_quality_flag"] = working["representative_quality_flag"].apply(_representative_quality_flag_label)
+    working["representative_fallback_reason"] = working["representative_fallback_reason"].apply(_representative_fallback_reason_label)
+    working["nikkei_search"] = working["nikkei_search"].fillna("").astype(str)
+    working = working.drop(columns=["_today_rank_sort", "_representative_rank_sort"], errors="ignore")
     return working[SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS].reset_index(drop=True)
 
 
 def _prepare_sector_representatives_display_view(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     display_frame = _build_sector_representatives_display_frame(frame)
-    return _prepare_table_view(display_frame, SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
+    compatibility_notes: list[str] = []
+    if display_frame is None or display_frame.empty:
+        return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS), compatibility_notes
+    prepared = display_frame.copy()
+    for column in SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS:
+        if column not in prepared.columns:
+            prepared[column] = ""
+            compatibility_notes.append(column)
+        prepared[column] = prepared[column].fillna("").astype(str)
+    return prepared.reindex(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS), compatibility_notes
 
 
 def _trim_sector_summary_for_storage(frame: Any) -> Any:
@@ -4947,6 +5120,7 @@ def _trim_representatives_for_storage(frame: Any) -> Any:
     keep_columns = [
         column
         for column in [
+            "today_rank",
             "sector_name",
             "representative_rank",
             "code",
@@ -5250,7 +5424,6 @@ def build_live_snapshot(
         .apply(lambda s: " / ".join(s.head(3).astype(str)))
         if not sector_representatives.empty else pd.Series(dtype=str)
     )
-    sector_representatives_display = _build_sector_representatives_display_frame(sector_representatives)
     if not today_sector_leaderboard.empty:
         today_sector_leaderboard = today_sector_leaderboard.copy()
         today_sector_leaderboard["representative_stock"] = today_sector_leaderboard["sector_name"].map(leaders_map).fillna("")
@@ -5279,6 +5452,11 @@ def build_live_snapshot(
             },
             axis=1,
         )
+        if not sector_representatives.empty:
+            sector_rank_map = today_sector_leaderboard[["sector_name", "today_rank"]].drop_duplicates("sector_name").set_index("sector_name")["today_rank"]
+            sector_representatives = sector_representatives.copy()
+            sector_representatives["today_rank"] = sector_representatives["sector_name"].map(sector_rank_map)
+    sector_representatives_display = _build_sector_representatives_display_frame(sector_representatives)
     baseline_persistence_tables = _build_sector_persistence_tables(base_df, display_base_df=stock_base_df)
     persistence_tables = _build_sector_persistence_tables(base_df, display_base_df=stock_base_df)
     rep_key_map = pd.Series(dtype=str)
@@ -5757,6 +5935,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
                 empty_reasons.get("sector_representatives", empty_reasons.get("center_stocks", "")),
             )
         ),
+        link_columns=True,
     )
     _render_dataframe_or_reason(
         "1週間主力セクター",
