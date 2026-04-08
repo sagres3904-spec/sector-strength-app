@@ -3994,7 +3994,7 @@ def _build_persistence_core_representatives(
             working["persistence_non_equity_reason"] = residual_non_equity_reason.fillna("").astype(str)
             working = working[working["persistence_non_equity_reason"].astype(str).str.strip().eq("")].copy()
     final_name_hard_block_pattern = re.compile(
-        r"ETF|ETN|上場投信|上場信託|指数連動|商品連動|投資口|REIT|リート|不動産投資法人|受益証券|純金|純銀|純プラチナ|金価格|銀価格|プラチナ価格",
+        r"ETF|ETN|上場投信|上場信託|指数連動|商品連動|投資口|REIT|リート|投資法人|不動産投資法人|受益証券|純金|純銀|純プラチナ|金価格|銀価格|プラチナ価格",
         re.IGNORECASE,
     )
 
