@@ -1,8 +1,8 @@
 {
   "meta": {
-    "generated_at": "2026-04-08T06:41:44.103207+00:00",
-    "generated_at_utc": "2026-04-08T06:41:44.103207+00:00",
-    "generated_at_jst": "2026-04-08 15:41:44 JST",
+    "generated_at": "2026-04-08T06:50:12.201026+00:00",
+    "generated_at_utc": "2026-04-08T06:50:12.201026+00:00",
+    "generated_at_jst": "2026-04-08 15:50:12 JST",
     "mode": "1530",
     "is_true_timepoint": false,
     "expected_time_label": "15:30",
@@ -18735,7 +18735,7 @@
         "candidate_quality_score_1m": 4.0
       },
       "selected_flag": false,
-      "unselected_reason": "",
+      "unselected_reason": "not_selected_after_ranking",
       "display_reason_raw": "1か月トレンド継続 / 中期の資金流入継続 / セクター上昇と整合"
     },
     {
@@ -18967,7 +18967,7 @@
   },
   "diagnostics": {
     "mode": "1530",
-    "generated_at": "2026-04-08T06:41:44.103207+00:00",
+    "generated_at": "2026-04-08T06:50:12.201026+00:00",
     "watch_candidate_count": 2,
     "buy_candidate_count": 5,
     "center_stock_count": 23,
