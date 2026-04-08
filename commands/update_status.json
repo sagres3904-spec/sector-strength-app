@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-04-08T04:48:38.983878+00:00",
-  "status": "running",
-  "message": "Forced 1530 snapshot refresh is running.",
+  "last_run_at": "2026-04-08T04:52:15.252787+00:00",
+  "status": "failed",
+  "message": "float() argument must be a string or a real number, not 'NAType'",
   "request_mode": "1530"
 }
