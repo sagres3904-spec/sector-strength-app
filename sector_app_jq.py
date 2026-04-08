@@ -532,6 +532,14 @@ UI_COLUMN_LABELS = {
     "median_ret": "当日中央値騰落率",
     "median_live_ret": "当日中央値騰落率",
     "turnover_ratio_median": "売買代金倍率",
+    "live_turnover_total": "セクター売買代金合計",
+    "leader_live_turnover": "最大売買代金",
+    "live_aggregate_observed_count": "live観測件数",
+    "live_aggregate_ret_count": "騰落率観測件数",
+    "live_aggregate_turnover_count": "売買代金観測件数",
+    "live_aggregate_turnover_ratio_count": "売買代金倍率観測件数",
+    "live_aggregate_status": "live集計状態",
+    "live_aggregate_reason": "live集計理由",
     "industry_up": "東証業種順位/上昇率",
     "industry_up_value": "東証業種上昇率",
     "industry_up_rank": "東証業種順位",
@@ -3297,6 +3305,285 @@ def _ensure_scan_source_type(scan_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _empty_sector_live_aggregate_audit_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=SECTOR_LIVE_AGGREGATE_AUDIT_COLUMNS)
+
+
+def _build_sector_live_aggregate_frame(merged: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if merged is None or merged.empty:
+        return pd.DataFrame(
+            columns=[
+                "code",
+                "sector_name",
+                "normalized_sector_name",
+                "current_price",
+                "live_ret_vs_prev_close",
+                "live_turnover_value",
+                "turnover_ratio_20d",
+            ]
+        ), {
+            "source_frame": "stock_merged_observed_live_rows",
+            "turnover_ratio_source_column": "live_turnover_ratio_20d",
+            "has_turnover_ratio_source": False,
+            "observed_row_count": 0,
+        }
+    working = merged.copy()
+    if "code" not in working.columns:
+        working["code"] = ""
+    working["code"] = working["code"].astype(str)
+    if "sector_name" not in working.columns:
+        working["sector_name"] = ""
+    working["sector_name"] = working["sector_name"].map(_normalize_industry_name)
+    working["normalized_sector_name"] = working.get("normalized_sector_name", working["sector_name"].map(_normalize_industry_key))
+    working = working[working["code"].map(_is_code4)].copy()
+    working = working[working["normalized_sector_name"].astype(str).str.strip() != ""].copy()
+    if working.empty:
+        return pd.DataFrame(
+            columns=[
+                "code",
+                "sector_name",
+                "normalized_sector_name",
+                "current_price",
+                "live_ret_vs_prev_close",
+                "live_turnover_value",
+                "turnover_ratio_20d",
+            ]
+        ), {
+            "source_frame": "stock_merged_observed_live_rows",
+            "turnover_ratio_source_column": "live_turnover_ratio_20d",
+            "has_turnover_ratio_source": False,
+            "observed_row_count": 0,
+        }
+    working["current_price"] = _coerce_numeric(working.get("current_price", working.get("live_price", pd.Series(pd.NA, index=working.index))))
+    working["live_ret_vs_prev_close"] = _coerce_numeric(working.get("live_ret_vs_prev_close", pd.Series(pd.NA, index=working.index)))
+    working["live_turnover_value"] = _coerce_numeric(working.get("live_turnover_value", working.get("live_turnover", pd.Series(pd.NA, index=working.index))))
+    turnover_ratio_source_column = "live_turnover_ratio_20d" if "live_turnover_ratio_20d" in working.columns else ""
+    if turnover_ratio_source_column:
+        working["turnover_ratio_20d"] = _coerce_numeric(working[turnover_ratio_source_column])
+    else:
+        working["turnover_ratio_20d"] = pd.Series([math.nan] * len(working), index=working.index, dtype="float64")
+    keep_columns = [
+        "code",
+        "sector_name",
+        "normalized_sector_name",
+        "current_price",
+        "live_ret_vs_prev_close",
+        "live_turnover_value",
+        "turnover_ratio_20d",
+    ]
+    live_frame = working[keep_columns].drop_duplicates("code").reset_index(drop=True)
+    return live_frame, {
+        "source_frame": "stock_merged_observed_live_rows",
+        "turnover_ratio_source_column": turnover_ratio_source_column or "",
+        "has_turnover_ratio_source": bool(turnover_ratio_source_column),
+        "observed_row_count": int(len(live_frame)),
+    }
+
+
+def _resolve_live_aggregate_status(
+    *,
+    observed_count: int,
+    ret_count: int,
+    turnover_count: int,
+    turnover_ratio_count: int,
+    has_turnover_ratio_source: bool,
+) -> tuple[str, str]:
+    if observed_count <= 0:
+        return "no_live_rows", "observed live rows がありません。"
+    if ret_count <= 0 and turnover_count <= 0:
+        return "partial_missing_multiple", f"observed={observed_count}, ret=0, turnover=0, turnover_ratio={turnover_ratio_count}"
+    if ret_count <= 0:
+        return "partial_missing_ret", f"observed={observed_count}, ret=0, turnover={turnover_count}, turnover_ratio={turnover_ratio_count}"
+    if turnover_count <= 0:
+        return "partial_missing_turnover", f"observed={observed_count}, ret={ret_count}, turnover=0, turnover_ratio={turnover_ratio_count}"
+    if not has_turnover_ratio_source:
+        return "no_turnover_ratio_source", f"observed={observed_count}, ret={ret_count}, turnover={turnover_count}, turnover_ratio_source=missing"
+    if turnover_ratio_count <= 0:
+        return "no_turnover_ratio_source", f"observed={observed_count}, ret={ret_count}, turnover={turnover_count}, turnover_ratio=0"
+    missing_parts: list[str] = []
+    if ret_count < observed_count:
+        missing_parts.append(f"ret={ret_count}/{observed_count}")
+    if turnover_count < observed_count:
+        missing_parts.append(f"turnover={turnover_count}/{observed_count}")
+    if turnover_ratio_count < observed_count:
+        missing_parts.append(f"turnover_ratio={turnover_ratio_count}/{observed_count}")
+    if missing_parts:
+        if ret_count < observed_count and turnover_count >= observed_count and turnover_ratio_count >= observed_count:
+            return "partial_missing_ret", ", ".join(missing_parts)
+        if turnover_count < observed_count and ret_count >= observed_count and turnover_ratio_count >= observed_count:
+            return "partial_missing_turnover", ", ".join(missing_parts)
+        return "partial_missing_multiple", ", ".join(missing_parts)
+    return "observed", f"observed={observed_count}, ret={ret_count}, turnover={turnover_count}, turnover_ratio={turnover_ratio_count}"
+
+
+def _apply_sector_live_aggregates(
+    sector_base: pd.DataFrame,
+    live_frame: pd.DataFrame,
+    *,
+    sector_key_col: str = "normalized_sector_name",
+    source_meta: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if sector_base is None or sector_base.empty:
+        return sector_base.copy() if isinstance(sector_base, pd.DataFrame) else _empty_sector_leaderboard(), _empty_sector_live_aggregate_audit_frame()
+    source_meta = source_meta or {}
+    working = sector_base.copy()
+    for column in [
+        "live_turnover_total",
+        "leader_live_turnover",
+        "median_live_ret",
+        "turnover_ratio_median",
+        "live_aggregate_observed_count",
+        "live_aggregate_ret_count",
+        "live_aggregate_turnover_count",
+        "live_aggregate_turnover_ratio_count",
+        "live_aggregate_status",
+        "live_aggregate_reason",
+        "live_aggregate_use_for_score",
+    ]:
+        if column not in working.columns:
+            working[column] = pd.NA
+    if live_frame is None or live_frame.empty or sector_key_col not in working.columns:
+        working["live_turnover_total"] = pd.NA
+        working["leader_live_turnover"] = pd.NA
+        working["median_live_ret"] = pd.NA
+        working["turnover_ratio_median"] = pd.NA
+        working["live_aggregate_observed_count"] = 0
+        working["live_aggregate_ret_count"] = 0
+        working["live_aggregate_turnover_count"] = 0
+        working["live_aggregate_turnover_ratio_count"] = 0
+        working["live_aggregate_status"] = "no_live_rows"
+        working["live_aggregate_reason"] = "observed live rows がありません。"
+        working["live_aggregate_use_for_score"] = False
+        audit_rows = [
+            {
+                "today_rank": int(row.get("today_rank", 0) or 0) if pd.notna(row.get("today_rank")) else None,
+                "sector_name": str(row.get("sector_name", "") or ""),
+                "normalized_sector_name": str(row.get(sector_key_col, "") or ""),
+                "live_aggregate_observed_count": 0,
+                "live_aggregate_ret_count": 0,
+                "live_aggregate_turnover_count": 0,
+                "live_aggregate_turnover_ratio_count": 0,
+                "live_turnover_total_raw": None,
+                "leader_live_turnover_raw": None,
+                "median_live_ret_raw": None,
+                "turnover_ratio_median_raw": None,
+                "live_aggregate_status": "no_live_rows",
+                "live_aggregate_reason": "observed live rows がありません。",
+                "sample_codes": [],
+            }
+            for _, row in working.iterrows()
+        ]
+        return working, pd.DataFrame(audit_rows, columns=SECTOR_LIVE_AGGREGATE_AUDIT_COLUMNS)
+    observed = live_frame.copy()
+    observed[sector_key_col] = observed.get(sector_key_col, pd.Series(dtype=str)).astype(str)
+    observed = observed[observed[sector_key_col].str.strip() != ""].copy()
+    observed["live_ret_vs_prev_close"] = _coerce_numeric(observed["live_ret_vs_prev_close"])
+    observed["live_turnover_value"] = _coerce_numeric(observed["live_turnover_value"])
+    observed["turnover_ratio_20d"] = _coerce_numeric(observed["turnover_ratio_20d"])
+    observed["current_price"] = _coerce_numeric(observed["current_price"])
+    has_turnover_ratio_source = bool(source_meta.get("has_turnover_ratio_source", False))
+    audit_rows: list[dict[str, Any]] = []
+    for idx, sector_row in working.iterrows():
+        sector_key = str(sector_row.get(sector_key_col, "") or "")
+        sector_rows = observed[observed[sector_key_col] == sector_key].copy()
+        observed_count = int(len(sector_rows))
+        ret_count = int(sector_rows["live_ret_vs_prev_close"].notna().sum()) if not sector_rows.empty else 0
+        turnover_count = int(sector_rows["live_turnover_value"].notna().sum()) if not sector_rows.empty else 0
+        turnover_ratio_count = int(sector_rows["turnover_ratio_20d"].notna().sum()) if not sector_rows.empty else 0
+        status, reason = _resolve_live_aggregate_status(
+            observed_count=observed_count,
+            ret_count=ret_count,
+            turnover_count=turnover_count,
+            turnover_ratio_count=turnover_ratio_count,
+            has_turnover_ratio_source=has_turnover_ratio_source,
+        )
+        live_turnover_total = float(sector_rows["live_turnover_value"].dropna().sum()) if turnover_count > 0 else None
+        leader_live_turnover = float(sector_rows["live_turnover_value"].dropna().max()) if turnover_count > 0 else None
+        median_live_ret = float(sector_rows["live_ret_vs_prev_close"].dropna().median()) if ret_count > 0 else None
+        turnover_ratio_median = float(sector_rows["turnover_ratio_20d"].dropna().median()) if turnover_ratio_count > 0 else None
+        working.at[idx, "live_turnover_total"] = live_turnover_total if live_turnover_total is not None else pd.NA
+        working.at[idx, "leader_live_turnover"] = leader_live_turnover if leader_live_turnover is not None else pd.NA
+        working.at[idx, "median_live_ret"] = median_live_ret if median_live_ret is not None else pd.NA
+        working.at[idx, "turnover_ratio_median"] = turnover_ratio_median if turnover_ratio_median is not None else pd.NA
+        working.at[idx, "live_aggregate_observed_count"] = observed_count
+        working.at[idx, "live_aggregate_ret_count"] = ret_count
+        working.at[idx, "live_aggregate_turnover_count"] = turnover_count
+        working.at[idx, "live_aggregate_turnover_ratio_count"] = turnover_ratio_count
+        working.at[idx, "live_aggregate_status"] = status
+        working.at[idx, "live_aggregate_reason"] = reason
+        working.at[idx, "live_aggregate_use_for_score"] = bool(status == "observed")
+        sample_codes = (
+            sector_rows.sort_values(["live_turnover_value", "code"], ascending=[False, True], kind="mergesort")["code"].astype(str).head(5).tolist()
+            if not sector_rows.empty
+            else []
+        )
+        audit_rows.append(
+            {
+                "today_rank": int(sector_row.get("today_rank", 0) or 0) if pd.notna(sector_row.get("today_rank")) else None,
+                "sector_name": str(sector_row.get("sector_name", "") or ""),
+                "normalized_sector_name": sector_key,
+                "live_aggregate_observed_count": observed_count,
+                "live_aggregate_ret_count": ret_count,
+                "live_aggregate_turnover_count": turnover_count,
+                "live_aggregate_turnover_ratio_count": turnover_ratio_count,
+                "live_turnover_total_raw": live_turnover_total,
+                "leader_live_turnover_raw": leader_live_turnover,
+                "median_live_ret_raw": median_live_ret,
+                "turnover_ratio_median_raw": turnover_ratio_median,
+                "live_aggregate_status": status,
+                "live_aggregate_reason": reason,
+                "sample_codes": sample_codes,
+            }
+        )
+    for column in [
+        "live_aggregate_observed_count",
+        "live_aggregate_ret_count",
+        "live_aggregate_turnover_count",
+        "live_aggregate_turnover_ratio_count",
+    ]:
+        working[column] = _coerce_numeric(working[column]).fillna(0.0).astype(int)
+    working["live_aggregate_use_for_score"] = working["live_aggregate_use_for_score"].fillna(False).astype(bool)
+    return working, pd.DataFrame(audit_rows, columns=SECTOR_LIVE_AGGREGATE_AUDIT_COLUMNS)
+
+
+def _finalize_sector_live_aggregate_audit(
+    audit_frame: pd.DataFrame,
+    today_sector_leaderboard: pd.DataFrame,
+    *,
+    sector_key_col: str = "normalized_sector_name",
+) -> pd.DataFrame:
+    if not isinstance(audit_frame, pd.DataFrame) or audit_frame.empty:
+        return _empty_sector_live_aggregate_audit_frame()
+    working = audit_frame.copy()
+    if isinstance(today_sector_leaderboard, pd.DataFrame) and not today_sector_leaderboard.empty:
+        lookup_columns = [column for column in ["normalized_sector_name", "sector_name", "today_rank"] if column in today_sector_leaderboard.columns]
+        if lookup_columns:
+            lookup = today_sector_leaderboard[lookup_columns].copy()
+            existing_today_rank = working.get("today_rank", pd.Series(pd.NA, index=working.index))
+            if "normalized_sector_name" in lookup.columns and "normalized_sector_name" in working.columns and "today_rank" in lookup.columns:
+                normalized_lookup = lookup.drop_duplicates("normalized_sector_name").set_index("normalized_sector_name")
+                working["today_rank"] = working["normalized_sector_name"].map(normalized_lookup["today_rank"]).fillna(existing_today_rank)
+                if "sector_name" in normalized_lookup.columns:
+                    working["sector_name"] = working["sector_name"].where(
+                        working["sector_name"].astype(str).str.strip() != "",
+                        working["normalized_sector_name"].map(normalized_lookup["sector_name"]).fillna(""),
+                    )
+                existing_today_rank = working["today_rank"]
+            if "sector_name" in lookup.columns and "today_rank" in lookup.columns:
+                sector_lookup = lookup.drop_duplicates("sector_name").set_index("sector_name")
+                working["today_rank"] = working["sector_name"].map(sector_lookup["today_rank"]).fillna(existing_today_rank)
+    for column in SECTOR_LIVE_AGGREGATE_AUDIT_COLUMNS:
+        if column not in working.columns:
+            working[column] = pd.NA
+    working["_today_rank_sort"] = _coerce_numeric(working["today_rank"]).fillna(9999.0)
+    working = working.sort_values(
+        ["_today_rank_sort", "sector_name", "normalized_sector_name"],
+        ascending=[True, True, True],
+        kind="mergesort",
+    )
+    return working.drop(columns=["_today_rank_sort"], errors="ignore")[SECTOR_LIVE_AGGREGATE_AUDIT_COLUMNS].reset_index(drop=True)
+
+
 def _build_sector_summary_bundle(ranking_df: pd.DataFrame, industry_df: pd.DataFrame, base_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     del ranking_df, industry_df, base_df
     empty = pd.DataFrame()
@@ -3324,10 +3611,22 @@ def _empty_sector_leaderboard() -> pd.DataFrame:
             "display_eligible",
             "display_excluded_reason",
             "sector_name",
+            "normalized_sector_name",
             "representative_stock",
             "representative_stocks",
             "leaders",
             "n",
+            "live_turnover_total",
+            "leader_live_turnover",
+            "median_live_ret",
+            "turnover_ratio_median",
+            "live_aggregate_observed_count",
+            "live_aggregate_ret_count",
+            "live_aggregate_turnover_count",
+            "live_aggregate_turnover_ratio_count",
+            "live_aggregate_status",
+            "live_aggregate_reason",
+            "live_aggregate_use_for_score",
             "price_block_score",
             "flow_block_score",
             "participation_block_score",
@@ -3705,15 +4004,18 @@ def _build_intraday_sector_leaderboard(
     sector_base["max_scan_source_count"] = _coerce_numeric(sector_base[scan_source_columns].max(axis=1)).fillna(0.0)
     sector_base["breadth_up"] = _coerce_numeric(sector_base["price_up_count"]).fillna(0.0)
     sector_base["breadth_down"] = 0.0
-    sector_base["live_turnover_total"] = 0.0
-    sector_base["leader_live_turnover"] = 0.0
-    sector_base["median_live_ret"] = pd.NA
-    sector_base["turnover_ratio_median"] = pd.NA
     if "sector_constituent_count_scan" in sector_base.columns:
         sector_base["sector_constituent_count"] = _coerce_numeric(sector_base.get("sector_constituent_count_after_normalization", pd.Series(dtype="float64"))).fillna(_coerce_numeric(sector_base["sector_constituent_count_scan"]))
     else:
         sector_base["sector_constituent_count"] = _coerce_numeric(sector_base.get("sector_constituent_count_after_normalization", pd.Series(dtype="float64")))
     sector_base["sector_constituent_count"] = _coerce_numeric(sector_base["sector_constituent_count"]).fillna(sector_base["wide_scan_member_count"]).clip(lower=1.0)
+    sector_live_aggregate_frame, sector_live_aggregate_meta = _build_sector_live_aggregate_frame(merged)
+    sector_base, sector_live_aggregate_audit = _apply_sector_live_aggregates(
+        sector_base,
+        sector_live_aggregate_frame,
+        sector_key_col="normalized_sector_name",
+        source_meta=sector_live_aggregate_meta,
+    )
     sector_base = sector_base.sort_values(["original_industry_rank_live", "sector_name"], ascending=[True, True], kind="mergesort").reset_index(drop=True)
     sector_base["wide_scan_member_count"] = _coerce_numeric(sector_base["wide_scan_member_count"]).fillna(0.0)
     sector_base["scan_member_count"] = sector_base["wide_scan_member_count"]
@@ -3744,7 +4046,7 @@ def _build_intraday_sector_leaderboard(
         pd.Series([float(breadth_settings["reliability_k"])] * len(sector_base), index=sector_base.index),
     ).fillna(0.0).clip(lower=0.0, upper=1.0)
     sector_base["breadth"] = sector_base.apply(lambda row: f"{int(row.get('ranking_source_breadth_ex_basket', 0) or 0)}src/{int(row.get('ranking_confirmed_count', 0) or 0)}rk", axis=1)
-    sector_base["median_ret"] = _coerce_numeric(sector_base["median_live_ret"])
+    sector_base["median_ret"] = _coerce_numeric(sector_base["median_live_ret"]).where(sector_base["live_aggregate_use_for_score"].fillna(False).astype(bool), pd.NA)
     sector_base["scan_member_share_of_market_scan"] = _safe_ratio(sector_base["scan_member_count"], pd.Series([market_scan_member_count] * len(sector_base), index=sector_base.index)).fillna(0.0)
     sector_base["scan_member_count_norm"] = _score_percentile(sector_base["scan_member_count"])
     sector_base["wide_scan_member_count_norm"] = sector_base["scan_member_count_norm"]
@@ -3915,9 +4217,15 @@ def _build_intraday_sector_leaderboard(
         sector_base["rank_shift_limit"] = 0
         sector_base["rank_constraint_applied"] = False
         sector_base["upshift_blocked_reason"] = ""
-        return _sort_today_sector_leaderboard_for_display(sector_base)
+        result = _sort_today_sector_leaderboard_for_display(sector_base)
+        result.attrs["sector_live_aggregate_audit"] = sector_live_aggregate_audit
+        result.attrs["sector_live_aggregate_source_meta"] = sector_live_aggregate_meta
+        return result
     sector_base = _apply_true_rank_shift_limits(sector_base)
-    return _sort_today_sector_leaderboard_for_display(sector_base)
+    result = _sort_today_sector_leaderboard_for_display(sector_base)
+    result.attrs["sector_live_aggregate_audit"] = sector_live_aggregate_audit
+    result.attrs["sector_live_aggregate_source_meta"] = sector_live_aggregate_meta
+    return result
 
 
 def _build_sector_persistence_tables(base_df: pd.DataFrame, *, display_base_df: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
@@ -5119,6 +5427,23 @@ SECTOR_REPRESENTATIVES_AUDIT_COLUMNS = [
     "was_in_must_have",
 ]
 
+SECTOR_LIVE_AGGREGATE_AUDIT_COLUMNS = [
+    "today_rank",
+    "sector_name",
+    "normalized_sector_name",
+    "live_aggregate_observed_count",
+    "live_aggregate_ret_count",
+    "live_aggregate_turnover_count",
+    "live_aggregate_turnover_ratio_count",
+    "live_turnover_total_raw",
+    "leader_live_turnover_raw",
+    "median_live_ret_raw",
+    "turnover_ratio_median_raw",
+    "live_aggregate_status",
+    "live_aggregate_reason",
+    "sample_codes",
+]
+
 PERSISTENCE_DISPLAY_COLUMNS = [
     "persistence_rank",
     "sector_name",
@@ -5646,6 +5971,33 @@ def _trim_representatives_audit_for_storage(frame: Any) -> Any:
     return frame[keep_columns].copy()
 
 
+def _trim_sector_live_aggregate_audit_for_storage(frame: Any) -> Any:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    keep_columns = [column for column in SECTOR_LIVE_AGGREGATE_AUDIT_COLUMNS if column in frame.columns]
+    trimmed = frame[keep_columns].copy()
+    for column in [
+        "today_rank",
+        "live_aggregate_observed_count",
+        "live_aggregate_ret_count",
+        "live_aggregate_turnover_count",
+        "live_aggregate_turnover_ratio_count",
+    ]:
+        if column in trimmed.columns:
+            numeric = _coerce_numeric(trimmed[column])
+            trimmed[column] = numeric.where(numeric.notna(), None)
+    for column in [
+        "live_turnover_total_raw",
+        "leader_live_turnover_raw",
+        "median_live_ret_raw",
+        "turnover_ratio_median_raw",
+    ]:
+        if column in trimmed.columns:
+            numeric = _coerce_numeric(trimmed[column])
+            trimmed[column] = numeric.astype(object).where(numeric.notna(), None)
+    return trimmed
+
+
 def _trim_diagnostics_for_storage(diagnostics: Any) -> Any:
     if not isinstance(diagnostics, dict):
         return diagnostics
@@ -5704,6 +6056,9 @@ def _bundle_for_storage(source_bundle: dict[str, Any]) -> dict[str, Any]:
             continue
         if key == "sector_representatives_audit":
             storage_bundle[key] = _trim_representatives_audit_for_storage(value)
+            continue
+        if key == "sector_live_aggregate_audit":
+            storage_bundle[key] = _trim_sector_live_aggregate_audit_for_storage(value)
             continue
         if key == "diagnostics":
             storage_bundle[key] = _trim_diagnostics_for_storage(value)
@@ -5798,8 +6153,16 @@ def build_live_snapshot(
         concentration_settings_map=INTRADAY_CONCENTRATION_PENALTY_SETTINGS_BASELINE,
     )
     today_sector_leaderboard = _build_intraday_sector_leaderboard(mode, filtered_ranking_df, industry_df, stock_merged, stock_base_df)
+    baseline_sector_live_aggregate_audit = baseline_today_sector_leaderboard.attrs.get("sector_live_aggregate_audit", _empty_sector_live_aggregate_audit_frame())
+    baseline_sector_live_aggregate_source_meta = dict(baseline_today_sector_leaderboard.attrs.get("sector_live_aggregate_source_meta", {}))
+    sector_live_aggregate_audit = today_sector_leaderboard.attrs.get("sector_live_aggregate_audit", _empty_sector_live_aggregate_audit_frame())
+    sector_live_aggregate_source_meta = dict(today_sector_leaderboard.attrs.get("sector_live_aggregate_source_meta", {}))
     baseline_today_sector_leaderboard = _sort_today_sector_leaderboard_for_display(baseline_today_sector_leaderboard)
     today_sector_leaderboard = _sort_today_sector_leaderboard_for_display(today_sector_leaderboard)
+    baseline_today_sector_leaderboard.attrs["sector_live_aggregate_audit"] = baseline_sector_live_aggregate_audit
+    baseline_today_sector_leaderboard.attrs["sector_live_aggregate_source_meta"] = baseline_sector_live_aggregate_source_meta
+    today_sector_leaderboard.attrs["sector_live_aggregate_audit"] = sector_live_aggregate_audit
+    today_sector_leaderboard.attrs["sector_live_aggregate_source_meta"] = sector_live_aggregate_source_meta
     baseline_representative_pool = _score_sector_center_candidates(stock_merged, baseline_today_sector_leaderboard, stock_base_df)
     representative_pool = _score_sector_center_candidates(stock_merged, today_sector_leaderboard, stock_base_df)
     baseline_sector_representatives = _build_sector_representatives(baseline_representative_pool)
@@ -6026,6 +6389,11 @@ def build_live_snapshot(
             sector_rank_map = today_sector_leaderboard[["sector_name", "today_rank"]].drop_duplicates("sector_name").set_index("sector_name")["today_rank"]
             sector_representatives = sector_representatives.copy()
             sector_representatives["today_rank"] = sector_representatives["sector_name"].map(sector_rank_map)
+    sector_live_aggregate_audit = _finalize_sector_live_aggregate_audit(
+        sector_live_aggregate_audit,
+        today_sector_leaderboard,
+        sector_key_col=leaderboard_sector_key_col if leaderboard_sector_key_col in today_sector_leaderboard.columns else "normalized_sector_name",
+    )
     sector_representatives_audit = _build_sector_representatives_audit_frame(
         today_sector_leaderboard,
         representative_pool_with_selection,
@@ -6161,6 +6529,7 @@ def build_live_snapshot(
         "sector_representatives": sector_representatives,
         "sector_representatives_display": sector_representatives_display,
         "sector_representatives_audit": sector_representatives_audit,
+        "sector_live_aggregate_audit": sector_live_aggregate_audit,
         "focus_candidates": swing_candidates["1w"],
         "watch_candidates": swing_candidates["1w"],
         "buy_candidates": swing_candidates["1m"],
@@ -6177,6 +6546,8 @@ def build_live_snapshot(
             "watch_candidate_count": int(len(swing_candidates["1w"])),
             "buy_candidate_count": int(len(swing_candidates["1m"])),
             "center_stock_count": int(len(sector_representatives)),
+            "sector_live_aggregate_source_of_truth": sector_live_aggregate_source_meta or {"source_frame": "stock_merged_observed_live_rows"},
+            "sector_live_aggregate_fail_closed_rule": "live_aggregate_status must be observed before any live aggregate is eligible for score usage",
             "representative_candidate_pool_basis": "representative_pool is built from stock_merged = base_df inner board_df, and board_df is limited to the deep_watch selected universe",
             "ranking_candidate_count": int(len(filtered_ranking_df)),
             "sector_summary_scope": "full_tse_industry_universe_left_join_wide_scan_adjustments",
@@ -6332,6 +6703,7 @@ def load_saved_snapshot(
     sector_representatives = pd.DataFrame(payload.get("sector_representatives", payload.get("center_stocks", payload.get("leaders_by_sector", []))))
     sector_representatives_display = pd.DataFrame(payload.get("sector_representatives_display", []))
     sector_representatives_audit = pd.DataFrame(payload.get("sector_representatives_audit", []))
+    sector_live_aggregate_audit = pd.DataFrame(payload.get("sector_live_aggregate_audit", []))
     if sector_representatives_display.empty and not sector_representatives.empty:
         compat_notes.append("代表銘柄表は旧 snapshot 互換表示です。raw sector_representatives から表示列だけ抽出しています。")
         sector_representatives_display = _build_sector_representatives_display_frame(
@@ -6353,6 +6725,7 @@ def load_saved_snapshot(
         sector_representatives = pd.DataFrame()
         sector_representatives_display = pd.DataFrame()
         sector_representatives_audit = pd.DataFrame()
+        sector_live_aggregate_audit = pd.DataFrame()
         swing_candidates_1w = pd.DataFrame()
         swing_candidates_1m = pd.DataFrame()
         swing_buy_candidates_1w = pd.DataFrame()
@@ -6399,6 +6772,7 @@ def load_saved_snapshot(
         "sector_representatives": sector_representatives,
         "sector_representatives_display": sector_representatives_display,
         "sector_representatives_audit": sector_representatives_audit,
+        "sector_live_aggregate_audit": sector_live_aggregate_audit,
         "focus_candidates": swing_candidates_1w,
         "watch_candidates": swing_candidates_1w,
         "buy_candidates": swing_candidates_1m,
