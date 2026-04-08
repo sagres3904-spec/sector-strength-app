@@ -422,9 +422,9 @@ REPRESENTATIVE_SORT_COLUMNS_BASELINE = ["sector_name", "representative_score", "
 REPRESENTATIVE_SORT_ASCENDING_BASELINE = [True, False, False, False, False]
 REPRESENTATIVE_SORT_COLUMNS = ["sector_name", "stock_turnover_share_of_sector", "representative_score", "avg_turnover_20d", "live_turnover", "live_ret_vs_prev_close"]
 REPRESENTATIVE_SORT_ASCENDING = [True, False, False, False, False, False]
-DEEP_WATCH_MUST_HAVE_TOP_SECTORS = 8
+DEEP_WATCH_MUST_HAVE_TOP_SECTORS = 10
 DEEP_WATCH_MUST_HAVE_PER_SECTOR = 2
-DEEP_WATCH_MUST_HAVE_MAX = 16
+DEEP_WATCH_MUST_HAVE_MAX = 20
 CENTER_LEADER_TRACE_LIMIT = 10
 CENTER_LEADER_CENTRALITY_WEIGHTS = {
     "sector_contribution_full": 1.55,
@@ -2610,7 +2610,64 @@ def _unregister_all(settings: dict[str, Any], token: str) -> None:
         raise PipelineFailClosed(f"fail-closed: unregister all failed status={response.status_code} body={_short_body(response.text)}")
 
 
-def _build_deep_watch_must_have_pool(market_scan_df: pd.DataFrame, base_df: pd.DataFrame) -> pd.DataFrame:
+def _select_deep_watch_protected_sectors(
+    market_scan_df: pd.DataFrame,
+    fallback_frame: pd.DataFrame,
+    *,
+    pre_today_sector_leaderboard: pd.DataFrame | None = None,
+) -> tuple[list[str], dict[str, int]]:
+    if pre_today_sector_leaderboard is not None and not pre_today_sector_leaderboard.empty:
+        sorted_proxy = _sort_today_sector_leaderboard_for_display(pre_today_sector_leaderboard)
+        proxy = sorted_proxy.copy()
+        proxy["sector_name"] = proxy.get("sector_name", pd.Series(dtype=str)).map(_normalize_industry_name)
+        proxy = proxy[proxy["sector_name"].astype(str).str.strip() != ""].copy()
+        if not proxy.empty:
+            top_proxy = proxy.head(DEEP_WATCH_MUST_HAVE_TOP_SECTORS).copy()
+            sector_names = top_proxy["sector_name"].astype(str).tolist()
+            sector_rank_map = {
+                _normalize_industry_key(row.get("sector_name", "")): int(_coerce_numeric(pd.Series([row.get("today_rank", pd.NA)])).fillna(pd.Series([9999])).iloc[0] or 9999)
+                for _, row in top_proxy.iterrows()
+            }
+            return sector_names, sector_rank_map
+    fallback = fallback_frame.copy()
+    fallback["sector_name"] = fallback.get("sector_name", pd.Series(dtype=str)).map(_normalize_industry_name)
+    fallback = fallback[fallback["sector_name"].astype(str).str.strip() != ""].copy()
+    if fallback.empty:
+        return [], {}
+    top_sector_rows = (
+        fallback[["sector_name", "sector_rank_1w"]]
+        .dropna()
+        .drop_duplicates()
+        .sort_values(["sector_rank_1w", "sector_name"])
+        .head(DEEP_WATCH_MUST_HAVE_TOP_SECTORS)
+        .copy()
+    )
+    sector_names = top_sector_rows["sector_name"].astype(str).tolist()
+    sector_rank_map = {
+        _normalize_industry_key(row.get("sector_name", "")): int(_coerce_numeric(pd.Series([row.get("sector_rank_1w", pd.NA)])).fillna(pd.Series([9999])).iloc[0] or 9999)
+        for _, row in top_sector_rows.iterrows()
+    }
+    return sector_names, sector_rank_map
+
+
+def _build_pre_deep_watch_sector_proxy(
+    market_scan_df: pd.DataFrame,
+    industry_df: pd.DataFrame,
+    base_df: pd.DataFrame,
+    mode: str,
+) -> pd.DataFrame:
+    if market_scan_df is None or market_scan_df.empty or industry_df is None or industry_df.empty or base_df is None or base_df.empty:
+        return _empty_sector_leaderboard()
+    proxy = _build_intraday_sector_leaderboard(mode, market_scan_df, industry_df, market_scan_df, base_df)
+    return _sort_today_sector_leaderboard_for_display(proxy)
+
+
+def _build_deep_watch_must_have_pool(
+    market_scan_df: pd.DataFrame,
+    base_df: pd.DataFrame,
+    *,
+    pre_today_sector_leaderboard: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     if base_df.empty:
         return pd.DataFrame()
     market_scan_cols = [column for column in ["code", "ranking_combo_score", "ranking_union_member", "industry_basket_member"] if column in market_scan_df.columns]
@@ -2641,18 +2698,17 @@ def _build_deep_watch_must_have_pool(market_scan_df: pd.DataFrame, base_df: pd.D
     ) & (
         _coerce_numeric(working["avg_volume_20d"]).fillna(0.0) >= volume_floor
     )
-    top_sector_names = (
-        working[["sector_name", "sector_rank_1w"]]
-        .dropna()
-        .drop_duplicates()
-        .sort_values(["sector_rank_1w", "sector_name"])
-        .head(DEEP_WATCH_MUST_HAVE_TOP_SECTORS)["sector_name"]
-        .astype(str)
-        .tolist()
+    top_sector_names, protected_sector_rank_map = _select_deep_watch_protected_sectors(
+        market_scan_df,
+        working,
+        pre_today_sector_leaderboard=pre_today_sector_leaderboard,
     )
-    working = working[working["sector_name"].astype(str).isin(top_sector_names)].copy()
+    working["normalized_sector_name"] = working["sector_name"].map(_normalize_industry_key)
+    protected_sector_keys = {str(key or "") for key in protected_sector_rank_map.keys() if str(key or "").strip()}
+    working = working[working["normalized_sector_name"].astype(str).isin(protected_sector_keys)].copy()
     if working.empty:
         return working
+    working["protected_sector_rank"] = working["normalized_sector_name"].map(lambda value: float(protected_sector_rank_map.get(str(value or ""), 9999)))
     working["must_have_priority"] = 0.0
     working["must_have_priority"] += _score_percentile(working["sector_contribution_full"]) * 1.60
     working["must_have_priority"] += _score_rank_ascending(working["contribution_rank_in_sector"]) * 1.10
@@ -2665,8 +2721,9 @@ def _build_deep_watch_must_have_pool(market_scan_df: pd.DataFrame, base_df: pd.D
     working.loc[working["ranking_union_member"], "must_have_priority"] += 0.45
     working.loc[working["industry_basket_member"], "must_have_priority"] += 0.20
     working.loc[working["liquidity_ok"], "must_have_priority"] += 0.55
+    working["must_have_priority"] += _score_rank_ascending(working["protected_sector_rank"]) * 0.55
     working = working.sort_values(
-        ["sector_rank_1w", "must_have_priority", "ranking_combo_score", "TradingValue_latest", "avg_turnover_20d"],
+        ["protected_sector_rank", "must_have_priority", "ranking_combo_score", "TradingValue_latest", "avg_turnover_20d"],
         ascending=[True, False, False, False, False],
         kind="mergesort",
     ).copy()
@@ -2674,23 +2731,62 @@ def _build_deep_watch_must_have_pool(market_scan_df: pd.DataFrame, base_df: pd.D
     return working
 
 
-def select_deep_watch_universe(market_scan_df: pd.DataFrame, base_df: pd.DataFrame, settings: dict[str, Any], mode: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+def select_deep_watch_universe(
+    market_scan_df: pd.DataFrame,
+    industry_df: pd.DataFrame,
+    base_df: pd.DataFrame,
+    settings: dict[str, Any],
+    mode: str,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Select the 50-name deep-watch universe for board enrichment."""
     logger.info("select_deep_watch_universe start mode=%s", mode)
     register_limit = int(settings.get("KABU_REGISTER_LIMIT", 50))
     diagnostics: dict[str, Any] = {"non_corporate_products": {}}
     market_scan_df = _exclude_non_corporate_products(market_scan_df, diagnostics, context="deep_watch_market_scan")
     deep_candidates = _exclude_non_corporate_products(base_df, diagnostics, context="deep_watch_base")
+    if "sector_name" in deep_candidates.columns:
+        deep_candidates["sector_name"] = deep_candidates["sector_name"].map(_normalize_industry_name)
+        deep_candidates["normalized_sector_name"] = deep_candidates["sector_name"].map(_normalize_industry_key)
+    pre_today_sector_leaderboard = _build_pre_deep_watch_sector_proxy(market_scan_df, industry_df, deep_candidates, mode)
+    protected_sector_names, protected_sector_rank_map = _select_deep_watch_protected_sectors(
+        market_scan_df,
+        deep_candidates,
+        pre_today_sector_leaderboard=pre_today_sector_leaderboard,
+    )
+    protected_sector_keys = {str(key or "") for key in protected_sector_rank_map.keys() if str(key or "").strip()}
     deep_candidates["candidate_seed_score"] = 0.0
     deep_candidates.loc[deep_candidates["rel_1w"].rank(ascending=False, method="min") <= 80, "candidate_seed_score"] += 1.0
     deep_candidates.loc[deep_candidates["ret_1w"].rank(ascending=False, method="min") <= 80, "candidate_seed_score"] += 1.0
     deep_candidates.loc[deep_candidates["TradingValue_latest"].rank(ascending=False, method="min") <= 100, "candidate_seed_score"] += 1.2
     deep_candidates.loc[deep_candidates["reversal_candidates"].fillna(False), "candidate_seed_score"] += 0.8
     deep_candidates.loc[deep_candidates["is_near_52w_high"].fillna(False), "candidate_seed_score"] += 0.8
-    top_sector_names = base_df[["sector_name", "sector_rank_1w"]].dropna().drop_duplicates().sort_values("sector_rank_1w").head(8)["sector_name"].tolist()
-    deep_candidates.loc[deep_candidates["sector_name"].isin(top_sector_names), "candidate_seed_score"] += 0.7
-    combined = pd.concat([market_scan_df.head(80).merge(base_df, on="code", how="left"), deep_candidates], ignore_index=True, sort=False)
+    if protected_sector_names:
+        deep_candidates["protected_sector_rank"] = deep_candidates["normalized_sector_name"].map(lambda value: float(protected_sector_rank_map.get(str(value or ""), 9999)))
+        deep_candidates.loc[deep_candidates["normalized_sector_name"].astype(str).isin(protected_sector_keys), "candidate_seed_score"] += 1.05
+        deep_candidates["candidate_seed_score"] += _score_rank_ascending(deep_candidates["protected_sector_rank"]).fillna(0.0) * 0.45
+    top_ranked_candidates = market_scan_df.head(80).merge(base_df, on="code", how="left", suffixes=("", "_base"))
+    for column in ["name", "sector_name", "exchange_name"]:
+        base_column = f"{column}_base"
+        if base_column in top_ranked_candidates.columns:
+            current = top_ranked_candidates.get(column, pd.Series(pd.NA, index=top_ranked_candidates.index))
+            fallback_mask = current.isna() | current.astype(str).str.strip().eq("")
+            top_ranked_candidates[column] = current.where(~fallback_mask, top_ranked_candidates[base_column])
+    if "sector_name" in top_ranked_candidates.columns:
+        top_ranked_candidates["sector_name"] = top_ranked_candidates["sector_name"].map(_normalize_industry_name)
+        top_ranked_candidates["normalized_sector_name"] = top_ranked_candidates["sector_name"].map(_normalize_industry_key)
+    combined = pd.concat([top_ranked_candidates, deep_candidates], ignore_index=True, sort=False)
+    if "sector_name" in combined.columns:
+        combined["sector_name"] = combined["sector_name"].map(_normalize_industry_name)
+        combined["normalized_sector_name"] = combined["sector_name"].map(_normalize_industry_key)
     combined["combined_priority"] = combined.get("ranking_combo_score", 0).fillna(0) + combined["candidate_seed_score"].fillna(0)
+    if protected_sector_names:
+        combined["protected_sector_rank"] = combined.get(
+            "protected_sector_rank",
+            combined["normalized_sector_name"].map(lambda value: float(protected_sector_rank_map.get(str(value or ""), 9999))),
+        )
+        protected_sector_bonus = _score_rank_ascending(combined["protected_sector_rank"]).fillna(0.0) * 0.60
+        combined.loc[combined["normalized_sector_name"].astype(str).isin(protected_sector_keys), "combined_priority"] += 0.45
+        combined["combined_priority"] += protected_sector_bonus
     combined["code"] = combined["code"].astype(str)
     pre_count = len(combined)
     invalid_code_count = int((~combined["code"].map(_is_code4)).sum())
@@ -2701,7 +2797,11 @@ def select_deep_watch_universe(market_scan_df: pd.DataFrame, base_df: pd.DataFra
     combined["was_in_must_have"] = False
     combined["deep_watch_selected_reason"] = ""
     combined["deep_watch_combined_priority"] = _coerce_numeric(combined["combined_priority"]).fillna(0.0)
-    must_have_pool = _build_deep_watch_must_have_pool(market_scan_df, deep_candidates)
+    must_have_pool = _build_deep_watch_must_have_pool(
+        market_scan_df,
+        deep_candidates,
+        pre_today_sector_leaderboard=pre_today_sector_leaderboard,
+    )
     must_have_selected = pd.DataFrame(columns=combined.columns.tolist() + ["must_have_priority", "must_have_rank_in_sector"])
     if not must_have_pool.empty:
         must_have_selected = (
@@ -2755,6 +2855,8 @@ def select_deep_watch_universe(market_scan_df: pd.DataFrame, base_df: pd.DataFra
         "selected_count": int(len(selected)),
         "must_have_selected_count": int(selected.get("was_in_must_have", pd.Series(dtype=bool)).fillna(False).sum()) if not selected.empty else 0,
         "must_have_selected_codes": selected.loc[selected.get("was_in_must_have", pd.Series(False, index=selected.index)).fillna(False), "code"].astype(str).tolist()[:20] if not selected.empty else [],
+        "protected_top_sector_names": protected_sector_names,
+        "pre_today_sector_proxy_top10": _summarize_sector_rank_table(pre_today_sector_leaderboard, limit=10),
         "excluded_invalid_code": invalid_code_count,
         "excluded_duplicate": duplicate_count,
         "excluded_market_unknown": 0,
@@ -4825,6 +4927,7 @@ REPRESENTATIVE_FALLBACK_REASON_LABELS = {
     "no_positive_candidate_in_selected50": "明確な当日牽引株がないため代替選出",
     "filled_remaining_support_slots_with_best_available_nonblocked_candidates": "適格候補不足のため代替選出",
 }
+DISPLAY_UNAVAILABLE_MARK = "—"
 
 
 def _representative_display_label(value: Any, mapping: dict[str, str]) -> str:
@@ -4846,6 +4949,34 @@ def _representative_fallback_reason_label(value: Any) -> str:
     return _representative_display_label(value, REPRESENTATIVE_FALLBACK_REASON_LABELS)
 
 
+def _is_missing_display_value(value: Any) -> bool:
+    if value is None or value is pd.NA:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    text = str(value).strip()
+    return text == "" or text.lower() in {"none", "nan", "null", "<na>", "nat"}
+
+
+def _normalize_display_text(value: Any, *, missing: str = "") -> str:
+    if _is_missing_display_value(value):
+        return missing
+    return str(value).strip()
+
+
+def _normalize_saved_representative_label(value: Any, formatter: Any) -> str:
+    raw = _normalize_display_text(value, missing="")
+    if not raw:
+        return ""
+    formatted = formatter(raw)
+    if formatted and formatted != "未定義の判定":
+        return formatted
+    return raw
+
+
 def _format_display_rank_value(value: Any) -> str:
     numeric = _coerce_numeric(pd.Series([value])).iloc[0]
     if pd.isna(numeric):
@@ -4856,23 +4987,23 @@ def _format_display_rank_value(value: Any) -> str:
 def _format_display_pct_1dp(value: Any) -> str:
     numeric = _coerce_numeric(pd.Series([value])).iloc[0]
     if pd.isna(numeric):
-        return ""
+        return DISPLAY_UNAVAILABLE_MARK
     return f"{float(numeric):.1f}"
 
 
 def _format_display_turnover_value(value: Any) -> str:
     numeric = _coerce_numeric(pd.Series([value])).iloc[0]
     if pd.isna(numeric):
-        return ""
+        return DISPLAY_UNAVAILABLE_MARK
     return f"{int(round(float(numeric))):,}"
 
 
 def _format_display_price_value(value: Any, *, unavailable: bool = False) -> str:
     if unavailable:
-        return "取得不可"
+        return DISPLAY_UNAVAILABLE_MARK
     numeric = _coerce_numeric(pd.Series([value])).iloc[0]
     if pd.isna(numeric):
-        return "取得不可"
+        return DISPLAY_UNAVAILABLE_MARK
     numeric_float = float(numeric)
     if math.isclose(numeric_float, round(numeric_float), abs_tol=1e-9):
         return f"{int(round(numeric_float)):,}"
@@ -4881,10 +5012,10 @@ def _format_display_price_value(value: Any, *, unavailable: bool = False) -> str
 
 def _format_display_value_or_unavailable(value: Any, *, unavailable: bool = False, formatter: Any | None = None) -> str:
     if unavailable:
-        return "取得不可"
+        return DISPLAY_UNAVAILABLE_MARK
     numeric = _coerce_numeric(pd.Series([value])).iloc[0]
     if pd.isna(numeric):
-        return "取得不可"
+        return DISPLAY_UNAVAILABLE_MARK
     if callable(formatter):
         return str(formatter(numeric))
     return str(numeric)
@@ -4954,6 +5085,18 @@ SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS = [
 SECTOR_REPRESENTATIVES_AUDIT_COLUMNS = [
     "today_rank",
     "sector_name",
+    "rep_candidate_pool_count",
+    "rep_with_live_ret_count",
+    "rep_with_current_price_count",
+    "rep_with_live_turnover_count",
+    "rep_pass_relative_leadership_count",
+    "rep_pass_centrality_count",
+    "rep_pass_sanity_count",
+    "rep_selected_count",
+    "deep_watch_selected_count",
+    "deep_watch_observed_live_count",
+    "rep_candidate_pool_status",
+    "rep_candidate_pool_reason",
     "code",
     "name",
     "candidate_in_universe",
@@ -5013,6 +5156,77 @@ SWING_1M_DISPLAY_COLUMNS = [
     "earnings_buffer_days",
     "finance_health_flag",
 ]
+
+
+def _sort_sector_representatives_display_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
+    working = frame.copy()
+    working["_today_rank_sort"] = _coerce_numeric(working.get("today_rank", pd.Series(pd.NA, index=working.index))).fillna(9999)
+    working["_representative_rank_sort"] = _coerce_numeric(working.get("representative_rank", pd.Series(pd.NA, index=working.index))).fillna(9999)
+    if "sector_name" not in working.columns:
+        working["sector_name"] = ""
+    if "code" not in working.columns:
+        working["code"] = ""
+    working = working.sort_values(
+        ["_today_rank_sort", "_representative_rank_sort", "sector_name", "code"],
+        ascending=[True, True, True, True],
+        kind="mergesort",
+    ).copy()
+    return working.drop(columns=["_today_rank_sort", "_representative_rank_sort"], errors="ignore")
+
+
+def _build_empty_representative_display_rows(today_sector_leaderboard: pd.DataFrame, present_sector_names: set[str]) -> pd.DataFrame:
+    if today_sector_leaderboard is None or today_sector_leaderboard.empty:
+        return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
+    missing = today_sector_leaderboard.copy()
+    missing["sector_name"] = missing.get("sector_name", pd.Series(dtype=str)).astype(str)
+    missing = missing[~missing["sector_name"].isin(present_sector_names)].copy()
+    missing = missing[_coerce_numeric(missing.get("rep_selected_count", pd.Series(dtype="float64"))).fillna(0.0).le(0.0)].copy()
+    if missing.empty:
+        return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
+    rows: list[dict[str, Any]] = []
+    for _, row in missing.iterrows():
+        reason = _normalize_display_text(row.get("rep_candidate_pool_reason"), missing="候補母集団なし")
+        rows.append(
+            {
+                "today_rank": _format_display_rank_value(row.get("today_rank")),
+                "sector_name": _normalize_display_text(row.get("sector_name"), missing=DISPLAY_UNAVAILABLE_MARK),
+                "representative_rank": DISPLAY_UNAVAILABLE_MARK,
+                "code": DISPLAY_UNAVAILABLE_MARK,
+                "name": DISPLAY_UNAVAILABLE_MARK,
+                "live_ret_vs_prev_close": DISPLAY_UNAVAILABLE_MARK,
+                "current_price": DISPLAY_UNAVAILABLE_MARK,
+                "live_turnover_value": DISPLAY_UNAVAILABLE_MARK,
+                "representative_selected_reason": "",
+                "representative_quality_flag": "",
+                "representative_fallback_reason": reason,
+                "nikkei_search": "",
+            }
+        )
+    return pd.DataFrame(rows, columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
+
+
+def _resolve_rep_candidate_pool_status(
+    *,
+    wide_scan_member_count: Any,
+    deep_watch_selected_count: Any,
+    deep_watch_observed_live_count: Any,
+    rep_candidate_pool_count: Any,
+) -> tuple[str, str]:
+    pool_count = int(_coerce_numeric(pd.Series([rep_candidate_pool_count])).fillna(0.0).iloc[0] or 0)
+    selected_count = int(_coerce_numeric(pd.Series([deep_watch_selected_count])).fillna(0.0).iloc[0] or 0)
+    live_count = int(_coerce_numeric(pd.Series([deep_watch_observed_live_count])).fillna(0.0).iloc[0] or 0)
+    scan_count = int(_coerce_numeric(pd.Series([wide_scan_member_count])).fillna(0.0).iloc[0] or 0)
+    if pool_count > 0:
+        return "observed", ""
+    if selected_count <= 0:
+        if scan_count > 0:
+            return "outside_deep_watch", "候補母集団なし（監視ユニバース外）"
+        return "no_scan_candidates", "候補母集団なし"
+    if live_count <= 0:
+        return "missing_live_data", "候補母集団なし（板データ未取得）"
+    return "empty_after_filtering", "候補母集団なし"
 
 
 def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFrame, list[str]]:
@@ -5113,8 +5327,18 @@ def _prepare_today_sector_view(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str
     return _prepare_table_view(prepared, TODAY_SECTOR_DISPLAY_COLUMNS)
 
 
-def _build_sector_representatives_display_frame(sector_representatives: pd.DataFrame) -> pd.DataFrame:
+def _build_sector_representatives_display_frame(
+    sector_representatives: pd.DataFrame,
+    *,
+    today_sector_leaderboard: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     if sector_representatives is None or sector_representatives.empty:
+        empty_rows = _build_empty_representative_display_rows(
+            today_sector_leaderboard if isinstance(today_sector_leaderboard, pd.DataFrame) else pd.DataFrame(),
+            set(),
+        )
+        if not empty_rows.empty:
+            return _sort_sector_representatives_display_rows(empty_rows)[SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS].reset_index(drop=True)
         return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
     working = sector_representatives.copy()
     for column in [
@@ -5144,17 +5368,10 @@ def _build_sector_representatives_display_frame(sector_representatives: pd.DataF
     working["live_turnover_value"] = working.get("live_turnover_value", working.get("live_turnover", pd.Series(pd.NA, index=working.index)))
     working["current_price_unavailable"] = working.get("current_price_unavailable", working["current_price"].isna()).fillna(True).astype(bool)
     working["live_turnover_unavailable"] = working.get("live_turnover_unavailable", working["live_turnover_value"].isna()).fillna(True).astype(bool)
-    working["_today_rank_sort"] = _coerce_numeric(working["today_rank"]).fillna(9999)
-    working["_representative_rank_sort"] = _coerce_numeric(working["representative_rank"]).fillna(9999)
-    working = working.sort_values(
-        ["_today_rank_sort", "sector_name", "_representative_rank_sort"],
-        ascending=[True, True, True],
-        kind="mergesort",
-    ).copy()
     working["today_rank"] = working["today_rank"].apply(_format_display_rank_value)
     working["representative_rank"] = working["representative_rank"].apply(_format_display_rank_value)
-    working["code"] = working["code"].fillna("").astype(str)
-    working["name"] = working["name"].fillna("").astype(str)
+    working["code"] = working["code"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+    working["name"] = working["name"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
     working["live_ret_vs_prev_close"] = working["live_ret_vs_prev_close"].apply(_format_display_pct_1dp)
     working["current_price"] = [
         _format_display_price_value(value, unavailable=bool(unavailable))
@@ -5172,8 +5389,17 @@ def _build_sector_representatives_display_frame(sector_representatives: pd.DataF
     working["representative_quality_flag"] = working["representative_quality_flag"].apply(_representative_quality_flag_label)
     working["representative_fallback_reason"] = working["representative_fallback_reason"].apply(_representative_fallback_reason_label)
     working["nikkei_search"] = working["nikkei_search"].fillna("").astype(str)
-    working = working.drop(columns=["_today_rank_sort", "_representative_rank_sort", "current_price_unavailable", "live_turnover_unavailable"], errors="ignore")
-    return working[SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS].reset_index(drop=True)
+    working = working.drop(columns=["current_price_unavailable", "live_turnover_unavailable"], errors="ignore")
+    display = working[SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS].copy()
+    if isinstance(today_sector_leaderboard, pd.DataFrame) and not today_sector_leaderboard.empty:
+        empty_rows = _build_empty_representative_display_rows(
+            today_sector_leaderboard,
+            set(display.get("sector_name", pd.Series(dtype=str)).astype(str).tolist()),
+        )
+        if not empty_rows.empty:
+            display = pd.concat([display, empty_rows], ignore_index=True, sort=False)
+    display = _sort_sector_representatives_display_rows(display)
+    return display[SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS].reset_index(drop=True)
 
 
 def _empty_sector_representatives_audit_frame() -> pd.DataFrame:
@@ -5189,7 +5415,24 @@ def _build_sector_representatives_audit_frame(
 ) -> pd.DataFrame:
     if today_sector_leaderboard is None or today_sector_leaderboard.empty:
         return _empty_sector_representatives_audit_frame()
-    leaderboard = today_sector_leaderboard[[column for column in [sector_key_col, "sector_name", "today_rank"] if column in today_sector_leaderboard.columns]].drop_duplicates()
+    leaderboard_columns = [
+        sector_key_col,
+        "sector_name",
+        "today_rank",
+        "rep_candidate_pool_count",
+        "rep_with_live_ret_count",
+        "rep_with_current_price_count",
+        "rep_with_live_turnover_count",
+        "rep_pass_relative_leadership_count",
+        "rep_pass_centrality_count",
+        "rep_pass_sanity_count",
+        "rep_selected_count",
+        "deep_watch_selected_count",
+        "deep_watch_observed_live_count",
+        "rep_candidate_pool_status",
+        "rep_candidate_pool_reason",
+    ]
+    leaderboard = today_sector_leaderboard[[column for column in leaderboard_columns if column in today_sector_leaderboard.columns]].drop_duplicates()
     selected_lookup = (
         sector_representatives[["sector_name", "code", "representative_selected_reason", "representative_quality_flag", "representative_fallback_reason"]].drop_duplicates(["sector_name", "code"])
         if sector_representatives is not None and not sector_representatives.empty
@@ -5214,12 +5457,27 @@ def _build_sector_representatives_audit_frame(
         sector_key = str(sector_row.get(sector_key_col, "") or "")
         sector_name = str(sector_row.get("sector_name", "") or "")
         today_rank = sector_row.get("today_rank", pd.NA)
+        sector_meta = {
+            "rep_candidate_pool_count": int(sector_row.get("rep_candidate_pool_count", 0) or 0),
+            "rep_with_live_ret_count": int(sector_row.get("rep_with_live_ret_count", 0) or 0),
+            "rep_with_current_price_count": int(sector_row.get("rep_with_current_price_count", 0) or 0),
+            "rep_with_live_turnover_count": int(sector_row.get("rep_with_live_turnover_count", 0) or 0),
+            "rep_pass_relative_leadership_count": int(sector_row.get("rep_pass_relative_leadership_count", 0) or 0),
+            "rep_pass_centrality_count": int(sector_row.get("rep_pass_centrality_count", 0) or 0),
+            "rep_pass_sanity_count": int(sector_row.get("rep_pass_sanity_count", 0) or 0),
+            "rep_selected_count": int(sector_row.get("rep_selected_count", 0) or 0),
+            "deep_watch_selected_count": int(sector_row.get("deep_watch_selected_count", 0) or 0),
+            "deep_watch_observed_live_count": int(sector_row.get("deep_watch_observed_live_count", 0) or 0),
+            "rep_candidate_pool_status": str(sector_row.get("rep_candidate_pool_status", "") or ""),
+            "rep_candidate_pool_reason": str(sector_row.get("rep_candidate_pool_reason", "") or ""),
+        }
         sector_pool = representative_pool[representative_pool[sector_key_col].astype(str) == sector_key].copy() if not representative_pool.empty else pd.DataFrame()
         if sector_pool.empty:
             audit_rows.append(
                 {
                     "today_rank": int(today_rank) if pd.notna(today_rank) else None,
                     "sector_name": sector_name,
+                    **sector_meta,
                     "code": "",
                     "name": "",
                     "candidate_in_universe": False,
@@ -5256,6 +5514,7 @@ def _build_sector_representatives_audit_frame(
                 {
                     "today_rank": int(today_rank) if pd.notna(today_rank) else None,
                     "sector_name": sector_name,
+                    **sector_meta,
                     "code": str(row.get("code", "") or ""),
                     "name": str(row.get("name", "") or ""),
                     "candidate_in_universe": bool(row.get("candidate_in_universe", True)),
@@ -5294,8 +5553,12 @@ def _build_sector_representatives_audit_frame(
     return audit.drop(columns=["_today_rank_sort", "_selected_sort"], errors="ignore")[SECTOR_REPRESENTATIVES_AUDIT_COLUMNS].reset_index(drop=True)
 
 
-def _prepare_sector_representatives_display_view(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    display_frame = _build_sector_representatives_display_frame(frame)
+def _prepare_sector_representatives_display_view(
+    frame: pd.DataFrame,
+    *,
+    display_is_source_of_truth: bool = False,
+) -> tuple[pd.DataFrame, list[str]]:
+    display_frame = frame.copy() if display_is_source_of_truth else _build_sector_representatives_display_frame(frame)
     compatibility_notes: list[str] = []
     if display_frame is None or display_frame.empty:
         return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS), compatibility_notes
@@ -5304,7 +5567,15 @@ def _prepare_sector_representatives_display_view(frame: pd.DataFrame) -> tuple[p
         if column not in prepared.columns:
             prepared[column] = ""
             compatibility_notes.append(column)
-        prepared[column] = prepared[column].fillna("").astype(str)
+    prepared["today_rank"] = prepared["today_rank"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+    prepared["representative_rank"] = prepared["representative_rank"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+    for column in ["sector_name", "code", "name", "live_ret_vs_prev_close", "current_price", "live_turnover_value"]:
+        prepared[column] = prepared[column].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+    prepared["representative_selected_reason"] = prepared["representative_selected_reason"].apply(lambda value: _normalize_saved_representative_label(value, _representative_selected_reason_label))
+    prepared["representative_quality_flag"] = prepared["representative_quality_flag"].apply(lambda value: _normalize_saved_representative_label(value, _representative_quality_flag_label))
+    prepared["representative_fallback_reason"] = prepared["representative_fallback_reason"].apply(lambda value: _normalize_saved_representative_label(value, _representative_fallback_reason_label))
+    prepared["nikkei_search"] = prepared["nikkei_search"].apply(lambda value: _normalize_display_text(value, missing=""))
+    prepared = _sort_sector_representatives_display_rows(prepared.reindex(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS))
     return prepared.reindex(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS), compatibility_notes
 
 
@@ -5446,7 +5717,10 @@ def _bundle_for_storage(source_bundle: dict[str, Any]) -> dict[str, Any]:
         and not source_bundle.get("sector_representatives").empty
     ):
         storage_bundle["sector_representatives_display"] = _trim_representatives_display_for_storage(
-            _build_sector_representatives_display_frame(source_bundle["sector_representatives"])
+            _build_sector_representatives_display_frame(
+                source_bundle["sector_representatives"],
+                today_sector_leaderboard=source_bundle.get("today_sector_leaderboard", pd.DataFrame()),
+            )
         )
     return storage_bundle
 
@@ -5460,6 +5734,7 @@ def build_live_snapshot(
     now_ts: datetime,
     deep_watch_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
+    deep_watch_sector_frame = deep_watch_df.copy() if isinstance(deep_watch_df, pd.DataFrame) else pd.DataFrame()
     merged = base_df.merge(board_df, on="code", how="inner")
     if deep_watch_df is not None and not deep_watch_df.empty:
         deep_watch_meta_cols = [
@@ -5507,7 +5782,7 @@ def build_live_snapshot(
     filtered_ranking_df = _exclude_non_corporate_products(ranking_df, product_filter_diag, context="today_market_scan")
     stock_base_df = _exclude_non_corporate_products(base_df, product_filter_diag, context="display_stock_base")
     stock_merged = _exclude_non_corporate_products(merged, product_filter_diag, context="live_stock_pool")
-    for frame in [filtered_ranking_df, stock_base_df, stock_merged]:
+    for frame in [filtered_ranking_df, stock_base_df, stock_merged, deep_watch_sector_frame]:
         if not frame.empty and "sector_name" in frame.columns:
             frame["original_sector_name"] = frame.get("sector_name", pd.Series(dtype=str)).astype(str).map(str.strip)
             frame["normalized_sector_name"] = frame["original_sector_name"].map(_normalize_industry_key)
@@ -5531,6 +5806,16 @@ def build_live_snapshot(
     sector_representatives = _build_sector_representatives(representative_pool)
     leaderboard_sector_key_col = _sector_key_column(today_sector_leaderboard, stock_merged)
     selected50_codes_by_sector = _group_sector_codes(stock_merged, sector_col=leaderboard_sector_key_col)
+    deep_watch_selected_count_by_sector = (
+        deep_watch_sector_frame.groupby(leaderboard_sector_key_col)["code"].size().to_dict()
+        if not deep_watch_sector_frame.empty and leaderboard_sector_key_col in deep_watch_sector_frame.columns
+        else {}
+    )
+    deep_watch_observed_live_count_by_sector = (
+        stock_merged.groupby(leaderboard_sector_key_col)["code"].size().to_dict()
+        if not stock_merged.empty and leaderboard_sector_key_col in stock_merged.columns
+        else {}
+    )
     sector_center_candidate_pool = representative_pool[representative_pool.get("is_sector_center_candidate", pd.Series(False, index=representative_pool.index)).fillna(False)].copy() if not representative_pool.empty else pd.DataFrame()
     representative_candidate_codes_by_sector = _group_sector_codes(sector_center_candidate_pool, sector_col=leaderboard_sector_key_col)
     representative_pool_with_selection = representative_pool.copy()
@@ -5706,6 +5991,19 @@ def build_live_snapshot(
         today_sector_leaderboard["rep_pass_centrality_count"] = today_sector_leaderboard[leaderboard_sector_key_col].map(rep_pass_centrality_count_by_sector).fillna(0).astype(int)
         today_sector_leaderboard["rep_pass_sanity_count"] = today_sector_leaderboard[leaderboard_sector_key_col].map(rep_pass_sanity_count_by_sector).fillna(0).astype(int)
         today_sector_leaderboard["rep_selected_count"] = today_sector_leaderboard["sector_name"].map(rep_selected_count_by_sector).fillna(0).astype(int)
+        today_sector_leaderboard["deep_watch_selected_count"] = today_sector_leaderboard[leaderboard_sector_key_col].map(deep_watch_selected_count_by_sector).fillna(0).astype(int)
+        today_sector_leaderboard["deep_watch_observed_live_count"] = today_sector_leaderboard[leaderboard_sector_key_col].map(deep_watch_observed_live_count_by_sector).fillna(0).astype(int)
+        rep_pool_status = today_sector_leaderboard.apply(
+            lambda row: _resolve_rep_candidate_pool_status(
+                wide_scan_member_count=row.get("wide_scan_member_count", 0),
+                deep_watch_selected_count=row.get("deep_watch_selected_count", 0),
+                deep_watch_observed_live_count=row.get("deep_watch_observed_live_count", 0),
+                rep_candidate_pool_count=row.get("rep_candidate_pool_count", 0),
+            ),
+            axis=1,
+        )
+        today_sector_leaderboard["rep_candidate_pool_status"] = rep_pool_status.apply(lambda value: value[0])
+        today_sector_leaderboard["rep_candidate_pool_reason"] = rep_pool_status.apply(lambda value: value[1])
         today_sector_leaderboard["representative_trace_top10"] = today_sector_leaderboard[leaderboard_sector_key_col].map(representative_trace_by_sector).apply(lambda value: value if isinstance(value, list) else [])
         today_sector_leaderboard["representative_excluded_reason_by_code"] = today_sector_leaderboard.apply(
             lambda row: {
@@ -5734,7 +6032,10 @@ def build_live_snapshot(
         sector_representatives,
         sector_key_col=leaderboard_sector_key_col,
     )
-    sector_representatives_display = _build_sector_representatives_display_frame(sector_representatives)
+    sector_representatives_display = _build_sector_representatives_display_frame(
+        sector_representatives,
+        today_sector_leaderboard=today_sector_leaderboard,
+    )
     baseline_persistence_tables = _build_sector_persistence_tables(base_df, display_base_df=stock_base_df)
     persistence_tables = _build_sector_persistence_tables(base_df, display_base_df=stock_base_df)
     rep_key_map = pd.Series(dtype=str)
@@ -6033,7 +6334,10 @@ def load_saved_snapshot(
     sector_representatives_audit = pd.DataFrame(payload.get("sector_representatives_audit", []))
     if sector_representatives_display.empty and not sector_representatives.empty:
         compat_notes.append("代表銘柄表は旧 snapshot 互換表示です。raw sector_representatives から表示列だけ抽出しています。")
-        sector_representatives_display = _build_sector_representatives_display_frame(sector_representatives)
+        sector_representatives_display = _build_sector_representatives_display_frame(
+            sector_representatives,
+            today_sector_leaderboard=today_sector_leaderboard,
+        )
     swing_candidates_1w = pd.DataFrame(payload.get("swing_candidates_1w", payload.get("watch_candidates", payload.get("focus_candidates", []))))
     swing_candidates_1m = pd.DataFrame(payload.get("swing_candidates_1m", payload.get("buy_candidates", [])))
     swing_buy_candidates_1w = pd.DataFrame(payload.get("swing_buy_candidates_1w", []))
@@ -6127,7 +6431,7 @@ def run_cli(mode: str, write_drive: bool = False, fast_check: bool = False) -> d
         with safe_spinner("Building market scan", enabled=False):
             token = kabu_get_token(settings)
             ranking_df, industry_df, ranking_diag = build_market_scan_universe(base_df, settings, token)
-        deep_watch_df, deep_watch_diag = select_deep_watch_universe(ranking_df, base_df, settings, mode)
+        deep_watch_df, deep_watch_diag = select_deep_watch_universe(ranking_df, industry_df, base_df, settings, mode)
         board_df, board_diag = enrich_with_board_snapshot(deep_watch_df, base_df, settings, token, mode=mode)
         bundle = build_live_snapshot(mode, ranking_df, industry_df, board_df, base_df, datetime.now(timezone.utc), deep_watch_df=deep_watch_df)
         bundle["diagnostics"].update({"base_meta": base_meta, "ranking": ranking_diag, "deep_watch": deep_watch_diag, "board": board_diag, "write_completed": False})
@@ -6163,11 +6467,13 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     snapshot_guard = bundle.get("snapshot_guard", {})
     warning_text = saved_snapshot_timing_warning(meta) if is_saved_snapshot else ""
     today_sector_view, today_sector_notes = _prepare_today_sector_view(bundle.get("today_sector_leaderboard", pd.DataFrame()))
+    saved_representatives_display = bundle.get("sector_representatives_display", pd.DataFrame())
     sector_representatives_view, sector_representatives_notes = _prepare_sector_representatives_display_view(
-        bundle.get(
-            "sector_representatives_display",
-            bundle.get("sector_representatives", bundle.get("center_stocks", bundle.get("leaders_by_sector", pd.DataFrame()))),
-        )
+        saved_representatives_display if isinstance(saved_representatives_display, pd.DataFrame) and not saved_representatives_display.empty else bundle.get(
+            "sector_representatives",
+            bundle.get("center_stocks", bundle.get("leaders_by_sector", pd.DataFrame())),
+        ),
+        display_is_source_of_truth=isinstance(saved_representatives_display, pd.DataFrame) and not saved_representatives_display.empty,
     )
     weekly_sector_view, weekly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1w", bundle.get("weekly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
     monthly_sector_view, monthly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1m", bundle.get("monthly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
