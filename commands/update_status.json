@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-04-08T00:22:02.217745+00:00",
-  "status": "running",
-  "message": "Forced 1530 snapshot refresh is running.",
+  "last_run_at": "2026-04-08T00:27:00.203819+00:00",
+  "status": "success",
+  "message": "Forced latest_1530.json updated at 2026-04-08T00:27:00.203819+00:00",
   "request_mode": "1530"
 }
