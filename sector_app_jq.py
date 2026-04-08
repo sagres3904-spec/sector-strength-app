@@ -3993,6 +3993,15 @@ def _build_persistence_core_representatives(
             working = working.copy()
             working["persistence_non_equity_reason"] = residual_non_equity_reason.fillna("").astype(str)
             working = working[working["persistence_non_equity_reason"].astype(str).str.strip().eq("")].copy()
+    final_name_hard_block_pattern = re.compile(
+        r"ETF|ETN|上場投信|上場信託|指数連動|商品連動|投資口|REIT|リート|不動産投資法人|受益証券|純金|純銀|純プラチナ|金価格|銀価格|プラチナ価格",
+        re.IGNORECASE,
+    )
+
+    def _final_name_hard_block(value: Any) -> bool:
+        normalized_name = _normalize_security_text(value)
+        return bool(normalized_name) and bool(final_name_hard_block_pattern.search(normalized_name))
+
     target_sector_names = set(result["sector_name"].tolist())
     for sector_key in result["sector_name"].tolist():
         sector_key = str(sector_key or "").strip()
@@ -4039,6 +4048,7 @@ def _build_persistence_core_representatives(
                 eligible = eligible[eligible[column].gt(0.0)]
             else:
                 eligible = eligible[eligible[column].notna()]
+        eligible = eligible[~eligible["name"].apply(_final_name_hard_block)].copy()
         if "code" in eligible.columns:
             eligible = eligible.drop_duplicates("code")
         else:
@@ -4047,6 +4057,8 @@ def _build_persistence_core_representatives(
             sector_reason: list[str] = []
             if raw_group["name"].fillna("").astype(str).str.strip().eq("").all():
                 sector_reason.append("blank_name_only")
+            elif raw_group["name"].apply(_final_name_hard_block).all():
+                sector_reason.append("non_corporate_products_only")
             for column in numeric_columns:
                 if column == "avg_turnover_20d":
                     if not _coerce_numeric(raw_group[column]).fillna(0.0).gt(0.0).any():
@@ -4057,11 +4069,22 @@ def _build_persistence_core_representatives(
                 sector_reason.append("no_eligible_candidates")
             result.loc[result["sector_name"].eq(sector_key), "core_representatives_reason"] = "|".join(sector_reason)
             continue
-        chosen = eligible.sort_values(
+        sorted_eligible = eligible.sort_values(
             horizon_config["sort_columns"],
             ascending=[False] * (len(horizon_config["sort_columns"]) - 1) + [True],
             kind="mergesort",
-        ).head(3)
+        )
+        chosen_rows: list[pd.Series] = []
+        for _, candidate_row in sorted_eligible.iterrows():
+            if _final_name_hard_block(candidate_row.get("name", "")):
+                continue
+            chosen_rows.append(candidate_row)
+            if len(chosen_rows) >= 3:
+                break
+        chosen = pd.DataFrame(chosen_rows)
+        if chosen.empty:
+            result.loc[result["sector_name"].eq(sector_key), "core_representatives_reason"] = "non_corporate_products_only"
+            continue
         chosen_names = chosen["name"].astype(str).tolist()
         result.loc[result["sector_name"].eq(sector_key), "core_representatives"] = " / ".join(chosen_names)
         result.loc[result["sector_name"].eq(sector_key), "core_representatives_count"] = int(len(chosen_names))
