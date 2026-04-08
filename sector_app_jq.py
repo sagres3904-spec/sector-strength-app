@@ -3959,17 +3959,79 @@ def _build_persistence_core_representatives(
         reason = f"missing_columns:{','.join(missing_columns)}"
         result["core_representatives_reason"] = reason
         return result
-    working = display_base_df.copy()
-    working["sector_name"] = working["sector_name"].fillna("").astype(str)
-    working["name"] = working["name"].fillna("").astype(str).str.strip()
+    raw_working = display_base_df.copy()
+    raw_working["sector_name"] = raw_working["sector_name"].fillna("").astype(str)
+    raw_working["name"] = raw_working["name"].fillna("").astype(str).str.strip()
     numeric_columns = ["avg_turnover_20d", "TradingValue_latest"] + list(horizon_config["required"])
     for column in numeric_columns:
-        working[column] = _coerce_numeric(working[column])
-    if "code" in working.columns:
-        working["code"] = working["code"].fillna("").astype(str)
-    for sector_name, group in working.groupby("sector_name", dropna=False):
-        sector_key = str(sector_name or "").strip()
-        if sector_key == "" or sector_key not in set(result["sector_name"].tolist()):
+        raw_working[column] = _coerce_numeric(raw_working[column])
+    if "code" in raw_working.columns:
+        raw_working["code"] = raw_working["code"].fillna("").astype(str)
+    working = _exclude_non_corporate_products(raw_working, context=f"persistence_core_representatives_{horizon}")
+    residual_non_equity_pattern = re.compile(
+        r"上場信託|商品連動|投資口|受益証券|純金|純銀|純プラチナ|金価格|銀価格|プラチナ価格|REIT|リート|不動産投資法人",
+        re.IGNORECASE,
+    )
+    if not working.empty:
+        residual_non_equity_reason = working.apply(
+            lambda row: (
+                "residual_non_equity_pattern"
+                if residual_non_equity_pattern.search(
+                    _pick_first_non_empty_text(
+                        row.get("name", ""),
+                        row.get("instrument_type", ""),
+                        row.get("product_category", ""),
+                        row.get("listing_category", ""),
+                        row.get("underlying_index", ""),
+                    )
+                )
+                else ""
+            ),
+            axis=1,
+        )
+        if residual_non_equity_reason.astype(str).str.strip().ne("").any():
+            working = working.copy()
+            working["persistence_non_equity_reason"] = residual_non_equity_reason.fillna("").astype(str)
+            working = working[working["persistence_non_equity_reason"].astype(str).str.strip().eq("")].copy()
+    target_sector_names = set(result["sector_name"].tolist())
+    for sector_key in result["sector_name"].tolist():
+        sector_key = str(sector_key or "").strip()
+        if sector_key == "" or sector_key not in target_sector_names:
+            continue
+        raw_group = raw_working[raw_working["sector_name"].eq(sector_key)].copy()
+        group = working[working["sector_name"].eq(sector_key)].copy()
+        if group.empty:
+            sector_reason: list[str] = []
+            if raw_group.empty:
+                sector_reason.append("no_sector_rows")
+            else:
+                if raw_group["name"].fillna("").astype(str).str.strip().eq("").all():
+                    sector_reason.append("blank_name_only")
+                annotated_raw_group = _annotate_non_corporate_products(raw_group)
+                if not annotated_raw_group.empty and annotated_raw_group.get("is_non_corporate_product", pd.Series(False, index=annotated_raw_group.index)).fillna(False).all():
+                    sector_reason.append("non_corporate_products_only")
+                elif not raw_group.empty:
+                    residual_text = raw_group.apply(
+                        lambda row: _pick_first_non_empty_text(
+                            row.get("name", ""),
+                            row.get("instrument_type", ""),
+                            row.get("product_category", ""),
+                            row.get("listing_category", ""),
+                            row.get("underlying_index", ""),
+                        ),
+                        axis=1,
+                    )
+                    if residual_text.astype(str).apply(lambda value: bool(residual_non_equity_pattern.search(_normalize_security_text(value)))).all():
+                        sector_reason.append("residual_non_equity_only")
+                for column in numeric_columns:
+                    if column == "avg_turnover_20d":
+                        if not _coerce_numeric(raw_group[column]).fillna(0.0).gt(0.0).any():
+                            sector_reason.append("avg_turnover_20d_unavailable")
+                    elif not _coerce_numeric(raw_group[column]).notna().any():
+                        sector_reason.append(f"{column}_missing")
+            if not sector_reason:
+                sector_reason.append("no_eligible_candidates")
+            result.loc[result["sector_name"].eq(sector_key), "core_representatives_reason"] = "|".join(dict.fromkeys(sector_reason))
             continue
         eligible = group[group["name"].ne("")].copy()
         for column in numeric_columns:
@@ -3983,13 +4045,13 @@ def _build_persistence_core_representatives(
             eligible = eligible.drop_duplicates("name")
         if eligible.empty:
             sector_reason: list[str] = []
-            if group["name"].fillna("").astype(str).str.strip().eq("").all():
+            if raw_group["name"].fillna("").astype(str).str.strip().eq("").all():
                 sector_reason.append("blank_name_only")
             for column in numeric_columns:
                 if column == "avg_turnover_20d":
-                    if not _coerce_numeric(group[column]).fillna(0.0).gt(0.0).any():
+                    if not _coerce_numeric(raw_group[column]).fillna(0.0).gt(0.0).any():
                         sector_reason.append("avg_turnover_20d_unavailable")
-                elif not _coerce_numeric(group[column]).notna().any():
+                elif not _coerce_numeric(raw_group[column]).notna().any():
                     sector_reason.append(f"{column}_missing")
             if not sector_reason:
                 sector_reason.append("no_eligible_candidates")
