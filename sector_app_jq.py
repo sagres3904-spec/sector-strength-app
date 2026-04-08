@@ -668,6 +668,12 @@ UI_COLUMN_LABELS = {
     "candidate_commentary": "コメント",
     "sector_confidence": "信頼度",
     "sector_caution": "注意点",
+    "quality_pass": "品質OK",
+    "quality_warn": "品質注意",
+    "quality_fail_reason": "品質理由",
+    "core_representatives": "主力3銘柄",
+    "core_representatives_count": "代表数",
+    "core_representatives_reason": "代表抽出理由",
     "scan_sample_warning_level": "scan母数警告レベル",
     "scan_sample_warning_reason": "scan母数警告理由",
     "representative_stock": "代表銘柄",
@@ -3876,10 +3882,130 @@ def _empty_persistence_table() -> pd.DataFrame:
             "sector_rs_vs_topix_1m",
             "sector_rs_vs_topix_3m",
             "representative_stock",
+            "core_representatives",
+            "core_representatives_count",
+            "core_representatives_reason",
             "sector_confidence",
+            "quality_pass",
+            "quality_warn",
+            "quality_fail_reason",
             "sector_caution",
         ]
     )
+
+
+def _build_persistence_quality_payload(row: pd.Series) -> dict[str, Any]:
+    required_columns = [
+        "sector_rs_vs_topix",
+        "sector_constituent_count",
+        "sector_positive_ratio",
+        "leader_concentration_share",
+    ]
+    missing_columns = [column for column in required_columns if column not in row.index or pd.isna(row.get(column))]
+    warn_tags: list[str] = []
+    fail_reasons: list[str] = []
+    if missing_columns:
+        warn_tags.append("品質列欠損")
+        fail_reasons.append(f"missing:{','.join(missing_columns)}")
+        return {
+            "quality_pass": False,
+            "quality_warn": ", ".join(warn_tags),
+            "quality_fail_reason": "|".join(fail_reasons),
+        }
+    sector_rs_vs_topix = float(row.get("sector_rs_vs_topix", 0.0) or 0.0)
+    sector_constituent_count = float(row.get("sector_constituent_count", 0.0) or 0.0)
+    sector_positive_ratio = float(row.get("sector_positive_ratio", 0.0) or 0.0)
+    leader_concentration_share = float(row.get("leader_concentration_share", 0.0) or 0.0)
+    if sector_rs_vs_topix <= 0.0:
+        warn_tags.append("RS<=0")
+        fail_reasons.append("rs_non_positive")
+    if sector_constituent_count < 6.0:
+        warn_tags.append("構成少")
+        fail_reasons.append("constituents_lt_6")
+    if sector_positive_ratio < 0.55:
+        warn_tags.append("広がり弱い")
+        fail_reasons.append("positive_ratio_lt_0.55")
+    if leader_concentration_share > 0.40:
+        warn_tags.append("偏重高い")
+        fail_reasons.append("leader_concentration_gt_0.40")
+    return {
+        "quality_pass": not fail_reasons,
+        "quality_warn": ", ".join(warn_tags),
+        "quality_fail_reason": "|".join(fail_reasons),
+    }
+
+
+def _build_persistence_core_representatives(
+    sector_names: pd.Series,
+    display_base_df: pd.DataFrame,
+    *,
+    horizon: str,
+) -> pd.DataFrame:
+    result = pd.DataFrame({"sector_name": pd.Series(sector_names, dtype=str).fillna("").astype(str)})
+    result = result[result["sector_name"].str.strip() != ""].drop_duplicates("sector_name").reset_index(drop=True)
+    result["core_representatives"] = ""
+    result["core_representatives_count"] = 0
+    result["core_representatives_reason"] = ""
+    if result.empty:
+        return result
+    horizon_config = {
+        "1w": {"required": ["rs_vs_topix_1w", "ret_1w"], "sort_columns": ["rs_vs_topix_1w", "ret_1w", "avg_turnover_20d", "TradingValue_latest", "name"]},
+        "1m": {"required": ["rs_vs_topix_1m", "ret_1m", "rs_vs_topix_3m"], "sort_columns": ["rs_vs_topix_1m", "ret_1m", "rs_vs_topix_3m", "avg_turnover_20d", "TradingValue_latest", "name"]},
+        "3m": {"required": ["rs_vs_topix_3m", "ret_3m"], "sort_columns": ["rs_vs_topix_3m", "ret_3m", "avg_turnover_20d", "TradingValue_latest", "name"]},
+    }.get(str(horizon), {"required": [], "sort_columns": ["avg_turnover_20d", "TradingValue_latest", "name"]})
+    required_columns = ["sector_name", "name", "avg_turnover_20d", "TradingValue_latest"] + list(horizon_config["required"])
+    missing_columns = [column for column in required_columns if column not in display_base_df.columns]
+    if missing_columns:
+        reason = f"missing_columns:{','.join(missing_columns)}"
+        result["core_representatives_reason"] = reason
+        return result
+    working = display_base_df.copy()
+    working["sector_name"] = working["sector_name"].fillna("").astype(str)
+    working["name"] = working["name"].fillna("").astype(str).str.strip()
+    numeric_columns = ["avg_turnover_20d", "TradingValue_latest"] + list(horizon_config["required"])
+    for column in numeric_columns:
+        working[column] = _coerce_numeric(working[column])
+    if "code" in working.columns:
+        working["code"] = working["code"].fillna("").astype(str)
+    for sector_name, group in working.groupby("sector_name", dropna=False):
+        sector_key = str(sector_name or "").strip()
+        if sector_key == "" or sector_key not in set(result["sector_name"].tolist()):
+            continue
+        eligible = group[group["name"].ne("")].copy()
+        for column in numeric_columns:
+            if column == "avg_turnover_20d":
+                eligible = eligible[eligible[column].gt(0.0)]
+            else:
+                eligible = eligible[eligible[column].notna()]
+        if "code" in eligible.columns:
+            eligible = eligible.drop_duplicates("code")
+        else:
+            eligible = eligible.drop_duplicates("name")
+        if eligible.empty:
+            sector_reason: list[str] = []
+            if group["name"].fillna("").astype(str).str.strip().eq("").all():
+                sector_reason.append("blank_name_only")
+            for column in numeric_columns:
+                if column == "avg_turnover_20d":
+                    if not _coerce_numeric(group[column]).fillna(0.0).gt(0.0).any():
+                        sector_reason.append("avg_turnover_20d_unavailable")
+                elif not _coerce_numeric(group[column]).notna().any():
+                    sector_reason.append(f"{column}_missing")
+            if not sector_reason:
+                sector_reason.append("no_eligible_candidates")
+            result.loc[result["sector_name"].eq(sector_key), "core_representatives_reason"] = "|".join(sector_reason)
+            continue
+        chosen = eligible.sort_values(
+            horizon_config["sort_columns"],
+            ascending=[False] * (len(horizon_config["sort_columns"]) - 1) + [True],
+            kind="mergesort",
+        ).head(3)
+        chosen_names = chosen["name"].astype(str).tolist()
+        result.loc[result["sector_name"].eq(sector_key), "core_representatives"] = " / ".join(chosen_names)
+        result.loc[result["sector_name"].eq(sector_key), "core_representatives_count"] = int(len(chosen_names))
+        if len(chosen_names) < 3:
+            result.loc[result["sector_name"].eq(sector_key), "core_representatives_reason"] = f"insufficient_candidates:{len(chosen_names)}"
+    return result
 
 
 def _build_intraday_sector_leaderboard(
@@ -4289,6 +4415,11 @@ def _build_sector_persistence_tables(base_df: pd.DataFrame, *, display_base_df: 
 
     def _build(rs_label: str, rank_col: str) -> pd.DataFrame:
         rs_column = f"rs_vs_topix_{rs_label}"
+        core_representatives = _build_persistence_core_representatives(
+            base_df.get("sector_name", pd.Series(dtype=str)),
+            display_base_df,
+            horizon=rs_label,
+        )
         frame = (
             base_df.groupby("sector_name", as_index=False)
             .agg(
@@ -4301,6 +4432,7 @@ def _build_sector_persistence_tables(base_df: pd.DataFrame, *, display_base_df: 
             )
             .merge(representative, on="sector_name", how="left")
             .merge(liquidity_by_sector, on="sector_name", how="left")
+            .merge(core_representatives, on="sector_name", how="left")
             .sort_values(["persistence_rank", f"sector_rs_vs_topix_{rs_label}"], ascending=[True, False])
             .reset_index(drop=True)
         )
@@ -4322,6 +4454,13 @@ def _build_sector_persistence_tables(base_df: pd.DataFrame, *, display_base_df: 
             ),
             axis=1,
         )
+        quality_payload = frame.apply(_build_persistence_quality_payload, axis=1, result_type="expand")
+        frame["quality_pass"] = quality_payload["quality_pass"].fillna(False).astype(bool)
+        frame["quality_warn"] = quality_payload["quality_warn"].fillna("").astype(str)
+        frame["quality_fail_reason"] = quality_payload["quality_fail_reason"].fillna("").astype(str)
+        frame["core_representatives"] = frame.get("core_representatives", pd.Series("", index=frame.index)).fillna("").astype(str)
+        frame["core_representatives_count"] = _coerce_numeric(frame.get("core_representatives_count", pd.Series(0, index=frame.index))).fillna(0).astype(int)
+        frame["core_representatives_reason"] = frame.get("core_representatives_reason", pd.Series("", index=frame.index)).fillna("").astype(str)
         frame["persistence_rank"] = range(1, len(frame) + 1)
         return frame
 
@@ -6438,8 +6577,9 @@ PERSISTENCE_DISPLAY_COLUMNS = [
     "persistence_rank",
     "sector_name",
     "sector_rs_vs_topix",
-    "representative_stock",
+    "core_representatives",
     "sector_confidence",
+    "quality_warn",
     "sector_caution",
 ]
 SWING_1W_DISPLAY_COLUMNS = [
@@ -6566,6 +6706,8 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
         "breadth",
         "leaders",
         "representative_stock",
+        "core_representatives",
+        "core_representatives_reason",
         "code",
         "name",
         "candidate_quality",
@@ -6579,11 +6721,16 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
         "finance_health_flag",
         "sector_confidence",
         "sector_caution",
+        "quality_warn",
+        "quality_fail_reason",
         "representative_selected_reason",
         "representative_quality_flag",
         "representative_fallback_reason",
         "nikkei_search",
     }
+    if "core_representatives" in columns and "core_representatives" not in prepared.columns and "representative_stock" in prepared.columns:
+        prepared["core_representatives"] = prepared["representative_stock"]
+        compatibility_notes.append("core_representatives")
     for column in columns:
         if column not in prepared.columns:
             prepared[column] = "" if column in string_columns else pd.NA
