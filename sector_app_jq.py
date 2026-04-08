@@ -452,6 +452,16 @@ SWING_SELECTION_CONFIG_BASELINE = {
     "sector_confidence_bonus_mid_1w": 0.0,
     "sector_confidence_bonus_high_1m": 0.0,
     "sector_confidence_bonus_mid_1m": 0.0,
+    "top_today_sector_limit_1w": 6,
+    "top_persistence_sector_limit_1m": 8,
+    "earnings_hard_block_days_1w": 7,
+    "earnings_hard_block_days_1m": 7,
+    "flow_ratio_gate_1w": 1.20,
+    "volume_ratio_gate_1w": 1.20,
+    "flow_ratio_gate_1m": 0.90,
+    "volume_ratio_gate_1m": 0.90,
+    "score_gate_1w": 2.60,
+    "score_gate_1m": 3.10,
 }
 SWING_SELECTION_CONFIG = {
     "extension_threshold_1w": 10.0,
@@ -461,6 +471,16 @@ SWING_SELECTION_CONFIG = {
     "sector_confidence_bonus_mid_1w": 0.15,
     "sector_confidence_bonus_high_1m": 0.30,
     "sector_confidence_bonus_mid_1m": 0.12,
+    "top_today_sector_limit_1w": 8,
+    "top_persistence_sector_limit_1m": 10,
+    "earnings_hard_block_days_1w": 5,
+    "earnings_hard_block_days_1m": 7,
+    "flow_ratio_gate_1w": 1.05,
+    "volume_ratio_gate_1w": 1.10,
+    "flow_ratio_gate_1m": 0.85,
+    "volume_ratio_gate_1m": 0.90,
+    "score_gate_1w": 2.30,
+    "score_gate_1m": 2.90,
 }
 CLOUD_VIEWER_MODES = ("0915", "1130", "1530", "now")
 VIEWER_ONLY_SNAPSHOT_MODES = CLOUD_VIEWER_MODES
@@ -5196,6 +5216,672 @@ def _build_swing_candidate_tables(
     }
 
 
+def _entry_fit_1w_label_v2(
+    *,
+    candidate_quality: str,
+    belongs_today_sector: bool,
+    pass_live_gate: bool,
+    pass_trend_gate: bool,
+    pass_flow_gate: bool,
+    pass_quality_gate: bool,
+    hard_block_reason: str,
+    extension_flag: bool,
+    sector_confidence: str,
+) -> str:
+    if str(hard_block_reason).strip():
+        return "見送り"
+    if str(candidate_quality) == "低":
+        return "見送り"
+    if not (belongs_today_sector and pass_quality_gate and (pass_live_gate or pass_trend_gate)):
+        return "見送り"
+    if pass_live_gate and pass_trend_gate and pass_flow_gate and str(candidate_quality) == "高" and str(sector_confidence) in {"高", "中"} and not extension_flag:
+        return "買い候補"
+    if pass_quality_gate and (pass_live_gate or pass_trend_gate):
+        return "監視候補"
+    return "見送り"
+
+
+def _entry_fit_1m_label_v2(
+    *,
+    candidate_quality: str,
+    belongs_persistence_sector: bool,
+    pass_live_gate: bool,
+    pass_trend_gate: bool,
+    pass_flow_gate: bool,
+    pass_quality_gate: bool,
+    hard_block_reason: str,
+    extension_flag: bool,
+    sector_confidence: str,
+) -> str:
+    if str(hard_block_reason).strip():
+        return "見送り"
+    if str(candidate_quality) == "低":
+        return "見送り"
+    if not (belongs_persistence_sector and pass_quality_gate and pass_trend_gate):
+        return "見送り"
+    if pass_trend_gate and pass_flow_gate and str(candidate_quality) == "高" and str(sector_confidence) in {"高", "中"} and not extension_flag:
+        return "買い候補"
+    if pass_quality_gate and (pass_trend_gate or pass_live_gate):
+        return "監視候補"
+    return "見送り"
+
+
+def _join_reason_tags(tags: list[str], *, fallback: str = "") -> str:
+    text = _join_candidate_tags(tags)
+    return text or str(fallback or "").strip()
+
+
+def _hard_block_reason_1w_v2(row: pd.Series) -> str:
+    reasons: list[str] = []
+    if bool(row.get("earnings_risk_flag_1w")):
+        reasons.append("earnings_near")
+    if bool(row.get("current_price_unavailable")):
+        reasons.append("no_live_price")
+    return "|".join(reasons)
+
+
+def _hard_block_reason_1m_v2(row: pd.Series) -> str:
+    reasons: list[str] = []
+    if bool(row.get("earnings_risk_flag_1m")):
+        reasons.append("earnings_near")
+    if bool(row.get("finance_risk_flag")):
+        reasons.append("finance_risk")
+    if bool(row.get("current_price_unavailable")):
+        reasons.append("no_live_price")
+    return "|".join(reasons)
+
+
+def _swing_reason_1w_v2(row: pd.Series) -> str:
+    ret = float(_coerce_numeric(pd.Series([row.get("live_ret_vs_prev_close", pd.NA)])).fillna(0.0).iloc[0] or 0.0)
+    open_ret = float(_coerce_numeric(pd.Series([row.get("live_ret_from_open", pd.NA)])).fillna(0.0).iloc[0] or 0.0)
+    gap_pct = float(_coerce_numeric(pd.Series([row.get("gap_pct", pd.NA)])).fillna(0.0).iloc[0] or 0.0)
+    high_close = float(_coerce_numeric(pd.Series([row.get("high_close_score", pd.NA)])).fillna(0.0).iloc[0] or 0.0)
+    tags: list[str] = []
+    if bool(row.get("pass_trend_gate_1w")) and float(_coerce_numeric(pd.Series([row.get("rs_vs_topix_1w", pd.NA)])).fillna(0.0).iloc[0] or 0.0) > 0.0:
+        tags.append("短期上昇継続")
+    if bool(row.get("pass_live_gate_1w")) and bool(row.get("pass_flow_gate_1w")):
+        tags.append("当日資金流入を伴う追認")
+    elif bool(row.get("pass_live_gate_1w")):
+        tags.append("当日強さを確認")
+    if bool(row.get("belongs_today_sector")):
+        tags.append("セクター追い風あり")
+    if ret > 0.0 and open_ret > 0.0 and gap_pct <= 0.5:
+        tags.append("押し後の切り返し")
+    if ret > 0.0 and high_close >= 0.92:
+        tags.append("短期の値持ち良好")
+    return _join_reason_tags(tags, fallback="短期条件はあるが追認弱め")
+
+
+def _swing_reason_1m_v2(row: pd.Series) -> str:
+    rs_1m = float(_coerce_numeric(pd.Series([row.get("rs_vs_topix_1m", pd.NA)])).fillna(0.0).iloc[0] or 0.0)
+    rs_3m = float(_coerce_numeric(pd.Series([row.get("rs_vs_topix_3m", pd.NA)])).fillna(0.0).iloc[0] or 0.0)
+    price_vs_ma20_abs = float(_coerce_numeric(pd.Series([row.get("price_vs_ma20_abs", pd.NA)])).fillna(999.0).iloc[0] or 999.0)
+    live_ret = float(_coerce_numeric(pd.Series([row.get("live_ret_vs_prev_close", pd.NA)])).fillna(0.0).iloc[0] or 0.0)
+    tags: list[str] = []
+    if bool(row.get("pass_trend_gate_1m")) and rs_1m > 0.0 and rs_3m > 0.0:
+        tags.append("1か月トレンド継続")
+    elif bool(row.get("pass_trend_gate_1m")):
+        tags.append("中期トレンド維持")
+    if bool(row.get("pass_flow_gate_1m")):
+        tags.append("中期の資金流入継続")
+    if -5.0 <= float(_coerce_numeric(pd.Series([row.get("price_vs_ma20_pct", pd.NA)])).fillna(0.0).iloc[0] or 0.0) <= 6.0 and live_ret >= 0.0:
+        tags.append("押し目後の再加速")
+    if bool(row.get("belongs_persistence_sector")):
+        tags.append("セクター上昇と整合")
+    if price_vs_ma20_abs <= 8.0:
+        tags.append("中期の値崩れが小さい")
+    return _join_reason_tags(tags, fallback="中期条件はあるが押し待ち")
+
+
+def _swing_risk_note_1w_v2(row: pd.Series) -> str:
+    tags = [
+        "決算接近" if bool(row.get("earnings_risk_flag_1w")) else "",
+        "決算日不明" if bool(row.get("earnings_unknown_flag")) else "",
+        "短期過熱" if bool(row.get("extension_flag_1w")) else "",
+        "流動性注意" if not bool(row.get("liquidity_ok")) else "",
+        "当日資金追認弱め" if not bool(row.get("pass_flow_gate_1w")) else "",
+    ]
+    return _join_reason_tags(tags, fallback="")
+
+
+def _swing_risk_note_1m_v2(row: pd.Series) -> str:
+    tags = [
+        "決算接近" if bool(row.get("earnings_risk_flag_1m")) else "",
+        "決算日不明" if bool(row.get("earnings_unknown_flag")) else "",
+        "20日線乖離大" if bool(row.get("extension_flag_1m")) else "",
+        "財務注意" if bool(row.get("finance_risk_flag")) else "",
+        "流動性注意" if not bool(row.get("liquidity_ok")) else "",
+    ]
+    return _join_reason_tags(tags, fallback="")
+
+
+def _empty_swing_candidate_audit_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=SWING_CANDIDATE_AUDIT_COLUMNS)
+
+
+def _resolve_swing_empty_reason(
+    audit_frame: pd.DataFrame,
+    *,
+    target_sector_col: str,
+    hard_block_col: str,
+    live_col: str,
+    trend_col: str,
+    quality_col: str,
+    score_col: str,
+) -> tuple[str, str]:
+    if audit_frame is None or audit_frame.empty:
+        return "no_universe_rows", "候補なし（監視ユニバース行なし）"
+    target = audit_frame[audit_frame[target_sector_col].fillna(False).astype(bool)].copy() if target_sector_col in audit_frame.columns else audit_frame.copy()
+    if target.empty:
+        return "no_universe_rows", "候補なし（対象セクター内に観測行なし）"
+    hard_block_mask = target.get(hard_block_col, pd.Series([""] * len(target), index=target.index)).astype(str).str.strip() != ""
+    if hard_block_mask.all():
+        return "all_failed_hard_block", "候補なし（全候補が hard block）"
+    eligible = target[~hard_block_mask].copy()
+    if live_col in eligible.columns and not eligible[live_col].fillna(False).astype(bool).any():
+        return "no_live_support", "候補なし（当日追認が弱い）"
+    if trend_col in eligible.columns and not eligible[trend_col].fillna(False).astype(bool).any():
+        return "no_trend_support", "候補なし（継続性が弱い）"
+    if quality_col in eligible.columns and not eligible[quality_col].fillna(False).astype(bool).any():
+        return "all_failed_score_gate", "候補なし（品質 gate 未達）"
+    if score_col in eligible.columns and not eligible[score_col].fillna(False).astype(bool).any():
+        return "all_failed_score_gate", "候補なし（score gate 未達）"
+    return "all_failed_score_gate", "候補なし（最終選定に残りませんでした）"
+
+
+def _build_swing_candidate_audit_frame(
+    frame: pd.DataFrame,
+    *,
+    horizon: str,
+    target_sector_col: str,
+    live_col: str,
+    trend_col: str,
+    flow_col: str,
+    quality_col: str,
+    hard_block_col: str,
+    score_col: str,
+    score_total_col: str,
+    display_reason_col: str,
+    selected_codes: set[str],
+) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return _empty_swing_candidate_audit_frame()
+    working = frame.copy()
+    working["code"] = working.get("code", pd.Series(dtype=str)).astype(str)
+    working["selected_flag"] = working["code"].isin(selected_codes)
+    working["in_candidate_universe"] = True
+    working["unselected_reason"] = ""
+    working.loc[working[hard_block_col].astype(str).str.strip() != "", "unselected_reason"] = "all_failed_hard_block"
+    working.loc[(working["unselected_reason"] == "") & ~working[target_sector_col].fillna(False).astype(bool), "unselected_reason"] = "outside_target_sector"
+    working.loc[(working["unselected_reason"] == "") & ~working[live_col].fillna(False).astype(bool), "unselected_reason"] = "no_live_support"
+    working.loc[(working["unselected_reason"] == "") & ~working[trend_col].fillna(False).astype(bool), "unselected_reason"] = "no_trend_support"
+    working.loc[(working["unselected_reason"] == "") & ~working[flow_col].fillna(False).astype(bool), "unselected_reason"] = "no_flow_support"
+    working.loc[(working["unselected_reason"] == "") & ~working[quality_col].fillna(False).astype(bool), "unselected_reason"] = "failed_quality_gate"
+    working.loc[(working["unselected_reason"] == "") & ~working[score_col].fillna(False).astype(bool), "unselected_reason"] = "all_failed_score_gate"
+    working.loc[(working["unselected_reason"] == "") & ~working["selected_flag"], "unselected_reason"] = "not_selected_after_ranking"
+    working.loc[working["selected_flag"], "unselected_reason"] = ""
+    score_component_columns = [column for column in working.columns if column.endswith(f"_{horizon}") and ("component" in column or "score" in column)]
+    audit_rows: list[dict[str, Any]] = []
+    for _, row in working.iterrows():
+        component_payload = {column: (float(row.get(column)) if pd.notna(row.get(column)) else None) for column in score_component_columns}
+        audit_rows.append(
+            {
+                "code": str(row.get("code", "") or ""),
+                "name": str(row.get("name", "") or ""),
+                "sector_name": str(row.get("sector_name", "") or ""),
+                "in_candidate_universe": True,
+                "pass_live_gate": bool(row.get(live_col, False)),
+                "pass_trend_gate": bool(row.get(trend_col, False)),
+                "pass_flow_gate": bool(row.get(flow_col, False)),
+                "pass_quality_gate": bool(row.get(quality_col, False)),
+                "pass_score_gate": bool(row.get(score_col, False)),
+                "hard_block_reason_raw": str(row.get(hard_block_col, "") or ""),
+                "score_total_raw": float(row.get(score_total_col, 0.0) or 0.0) if pd.notna(row.get(score_total_col)) else None,
+                "score_subcomponents_raw": component_payload,
+                "selected_flag": bool(row.get("selected_flag", False)),
+                "unselected_reason": str(row.get("unselected_reason", "") or ""),
+                "display_reason_raw": str(row.get(display_reason_col, "") or ""),
+            }
+        )
+    return pd.DataFrame(audit_rows, columns=SWING_CANDIDATE_AUDIT_COLUMNS)
+
+
+def _build_swing_candidate_tables_v2(
+    merged: pd.DataFrame,
+    today_sector_leaderboard: pd.DataFrame,
+    persistence_tables: dict[str, pd.DataFrame],
+    *,
+    selection_config: dict[str, float] | None = None,
+) -> dict[str, pd.DataFrame]:
+    selection_config = selection_config or SWING_SELECTION_CONFIG
+    if merged is None or merged.empty:
+        empty = pd.DataFrame()
+        empty_audit = _empty_swing_candidate_audit_frame()
+        return {
+            "1w": empty,
+            "1m": empty,
+            "buy_1w": empty.copy(),
+            "watch_1w": empty.copy(),
+            "buy_1m": empty.copy(),
+            "watch_1m": empty.copy(),
+            "audit_1w": empty_audit,
+            "audit_1m": empty_audit.copy(),
+            "empty_reason_1w": "候補なし（監視ユニバース行なし）",
+            "empty_reason_1m": "候補なし（監視ユニバース行なし）",
+            "empty_status_1w": "no_universe_rows",
+            "empty_status_1m": "no_universe_rows",
+        }
+    sorted_today_sector_leaderboard = _sort_today_sector_leaderboard_for_display(today_sector_leaderboard)
+    working = merged.copy()
+    working["code"] = working.get("code", pd.Series(dtype=str)).astype(str)
+    working["name"] = working.get("name", pd.Series(dtype=str)).astype(str)
+    working["sector_name"] = working.get("sector_name", pd.Series(dtype=str)).astype(str)
+    working["current_price"] = _coerce_numeric(working.get("current_price", working.get("live_price", pd.Series(pd.NA, index=working.index))))
+    working["live_turnover_value"] = _coerce_numeric(working.get("live_turnover_value", working.get("live_turnover", pd.Series(pd.NA, index=working.index))))
+    working["current_price_unavailable"] = working["current_price"].isna()
+    working["live_turnover_unavailable"] = working["live_turnover_value"].isna()
+    earnings_days_raw = _coerce_numeric(working.get("earnings_buffer_days", pd.Series([pd.NA] * len(working), index=working.index)))
+    earnings_days = earnings_days_raw.fillna(999.0)
+    earnings_data_available = bool(earnings_days_raw.notna().any())
+    finance_score_raw = _coerce_numeric(working.get("finance_health_score", pd.Series([pd.NA] * len(working), index=working.index)))
+    finance_score = finance_score_raw.fillna(0.0)
+    working["earnings_unknown_flag"] = earnings_days_raw.isna() & earnings_data_available
+    working["earnings_risk_flag_1w"] = earnings_days.lt(float(selection_config.get("earnings_hard_block_days_1w", 7) or 7)).fillna(False)
+    working["earnings_risk_flag_1m"] = earnings_days.lt(float(selection_config.get("earnings_hard_block_days_1m", 7) or 7)).fillna(False)
+    working["finance_risk_flag"] = finance_score_raw.lt(-1.0).fillna(False)
+    working["finance_health_flag"] = finance_score_raw.apply(lambda value: "不明" if pd.isna(value) else ("無難" if float(value) >= -1.0 else "注意"))
+    turnover_floor = float(_coerce_numeric(working["avg_turnover_20d"]).median(skipna=True) or 0.0)
+    volume_floor = float(_coerce_numeric(working["avg_volume_20d"]).median(skipna=True) or 0.0)
+    working["liquidity_ok"] = (
+        _coerce_numeric(working["avg_turnover_20d"]).fillna(0.0) >= turnover_floor
+    ) & (
+        _coerce_numeric(working["avg_volume_20d"]).fillna(0.0) >= volume_floor
+    )
+    extension_threshold_1w = float(selection_config.get("extension_threshold_1w", 12.0) or 12.0)
+    extension_threshold_1m = float(selection_config.get("extension_threshold_1m", 12.0) or 12.0)
+    working["price_vs_ma20_abs"] = _coerce_numeric(working["price_vs_ma20_pct"]).abs()
+    working["extension_flag_1w"] = working["price_vs_ma20_abs"].gt(extension_threshold_1w).fillna(False)
+    working["extension_flag_1m"] = working["price_vs_ma20_abs"].gt(extension_threshold_1m).fillna(False)
+    working["live_ret_vs_prev_close"] = _coerce_numeric(working.get("live_ret_vs_prev_close", pd.Series(pd.NA, index=working.index)))
+    working["live_ret_from_open"] = _coerce_numeric(working.get("live_ret_from_open", pd.Series(pd.NA, index=working.index)))
+    working["gap_pct"] = _coerce_numeric(working.get("gap_pct", pd.Series(pd.NA, index=working.index)))
+    working["high_close_score"] = _coerce_numeric(working.get("high_close_score", pd.Series(pd.NA, index=working.index))).fillna(0.0)
+    working["live_turnover_ratio_20d"] = _coerce_numeric(working.get("live_turnover_ratio_20d", pd.Series(pd.NA, index=working.index)))
+    working["live_volume_ratio_20d"] = _coerce_numeric(working.get("live_volume_ratio_20d", pd.Series(pd.NA, index=working.index)))
+    working["live_turnover_rank_norm"] = _score_percentile(working["live_turnover_value"])
+    working["closing_hold_component_1w"] = _score_percentile(working["high_close_score"]) * 0.30
+    working["intraday_followthrough_component_1w"] = _score_percentile((working["live_ret_vs_prev_close"] - working["live_ret_from_open"]).fillna(0.0)) * 0.25
+    top_today_limit = int(selection_config.get("top_today_sector_limit_1w", 6) or 6)
+    top_persistence_limit = int(selection_config.get("top_persistence_sector_limit_1m", 8) or 8)
+    top_today_sectors = set(sorted_today_sector_leaderboard.head(top_today_limit)["sector_name"].astype(str).tolist()) if not sorted_today_sector_leaderboard.empty else set()
+    top_1m_sectors = set(persistence_tables.get("1m", pd.DataFrame()).head(top_persistence_limit)["sector_name"].astype(str).tolist())
+    top_3m_sectors = set(persistence_tables.get("3m", pd.DataFrame()).head(top_persistence_limit)["sector_name"].astype(str).tolist())
+    today_sector_conf_map = (
+        sorted_today_sector_leaderboard.set_index("sector_name")["sector_confidence"]
+        if not sorted_today_sector_leaderboard.empty and "sector_confidence" in sorted_today_sector_leaderboard.columns
+        else pd.Series(dtype=str)
+    )
+    persistence_conf_frames = [persistence_tables.get(key, pd.DataFrame()) for key in ["1m", "3m"]]
+    persistence_conf_source = (
+        pd.concat(
+            [frame[["sector_name", "sector_confidence"]] for frame in persistence_conf_frames if not frame.empty and "sector_confidence" in frame.columns],
+            ignore_index=True,
+        ).drop_duplicates("sector_name")
+        if any(not frame.empty and "sector_confidence" in frame.columns for frame in persistence_conf_frames)
+        else pd.DataFrame(columns=["sector_name", "sector_confidence"])
+    )
+    persistence_sector_conf_map = persistence_conf_source.set_index("sector_name")["sector_confidence"] if not persistence_conf_source.empty else pd.Series(dtype=str)
+    working["belongs_today_sector"] = working["sector_name"].isin(top_today_sectors)
+    working["belongs_persistence_sector"] = working["sector_name"].isin(top_1m_sectors | top_3m_sectors)
+    working["sector_confidence_1w"] = working["sector_name"].map(today_sector_conf_map).fillna("")
+    working["sector_confidence_1m"] = working["sector_name"].map(persistence_sector_conf_map).fillna("")
+    working["sector_confidence_priority_1w"] = working["sector_confidence_1w"].map(SECTOR_CONFIDENCE_PRIORITY).fillna(0).astype(int)
+    working["sector_confidence_priority_1m"] = working["sector_confidence_1m"].map(SECTOR_CONFIDENCE_PRIORITY).fillna(0).astype(int)
+    working["rs_ok"] = _coerce_numeric(working["rs_vs_topix_1w"]).gt(0.0).fillna(False)
+    working["medium_term_rs_ok"] = (
+        _coerce_numeric(working["rs_vs_topix_1m"]).gt(0.0)
+        & _coerce_numeric(working["rs_vs_topix_3m"]).gt(-1.0)
+    ).fillna(False)
+    flow_gate_1w = float(selection_config.get("flow_ratio_gate_1w", 1.2) or 1.2)
+    volume_gate_1w = float(selection_config.get("volume_ratio_gate_1w", 1.2) or 1.2)
+    flow_gate_1m = float(selection_config.get("flow_ratio_gate_1m", 0.9) or 0.9)
+    volume_gate_1m = float(selection_config.get("volume_ratio_gate_1m", 0.9) or 0.9)
+    working["pass_live_gate_1w"] = (
+        working["live_ret_vs_prev_close"].fillna(-999.0).ge(1.0)
+        | ((working["live_ret_vs_prev_close"].fillna(-999.0) >= 0.4) & (working["live_ret_from_open"].fillna(-999.0) >= 0.0))
+        | ((working["live_ret_vs_prev_close"].fillna(-999.0) > 0.0) & (working["live_turnover_ratio_20d"].fillna(0.0) >= flow_gate_1w))
+    )
+    working["pass_trend_gate_1w"] = (
+        working["rs_ok"]
+        | (
+            _coerce_numeric(working["rs_vs_topix_1w"]).fillna(-999.0).gt(-0.5)
+            & _coerce_numeric(working["price_vs_ma20_pct"]).fillna(-999.0).gt(-5.0)
+            & working["live_ret_vs_prev_close"].fillna(-999.0).gt(0.0)
+        )
+    )
+    working["pass_flow_gate_1w"] = (
+        (working["live_turnover_ratio_20d"].fillna(0.0) >= flow_gate_1w)
+        | (working["live_volume_ratio_20d"].fillna(0.0) >= volume_gate_1w)
+        | ((working["live_turnover_rank_norm"].fillna(0.0) >= 0.65) & working["live_ret_vs_prev_close"].fillna(-999.0).gt(0.0))
+    )
+    working["pass_quality_gate_1w"] = working["liquidity_ok"] & ~working["earnings_risk_flag_1w"]
+    working["hard_block_reason_raw_1w"] = working.apply(_hard_block_reason_1w_v2, axis=1)
+    working["pass_live_gate_1m"] = (
+        working["live_ret_vs_prev_close"].fillna(-999.0).ge(0.0)
+        | (working["live_turnover_ratio_20d"].fillna(0.0) >= flow_gate_1m)
+    )
+    working["pass_trend_gate_1m"] = working["medium_term_rs_ok"]
+    working["pass_flow_gate_1m"] = (
+        (working["live_turnover_ratio_20d"].fillna(0.0) >= flow_gate_1m)
+        | (working["live_volume_ratio_20d"].fillna(0.0) >= volume_gate_1m)
+        | (_score_percentile(working["avg_turnover_20d"]).fillna(0.0) >= 0.55)
+    )
+    working["pass_quality_gate_1m"] = working["liquidity_ok"] & ~working["earnings_risk_flag_1m"] & ~working["finance_risk_flag"]
+    working["hard_block_reason_raw_1m"] = working.apply(_hard_block_reason_1m_v2, axis=1)
+
+    working["candidate_sector_component_1w"] = working["belongs_today_sector"].astype(float) * 1.0
+    working["candidate_live_component_1w"] = _score_percentile(working["live_ret_vs_prev_close"]) * 1.05
+    working["candidate_flow_component_1w"] = _score_percentile(working["live_turnover_ratio_20d"].fillna(working["live_volume_ratio_20d"])) * 0.95
+    working["candidate_followthrough_component_1w"] = working["closing_hold_component_1w"] + working["intraday_followthrough_component_1w"]
+    working["candidate_rs_component_1w"] = _score_percentile(working["rs_vs_topix_1w"]) * 0.90
+    working["candidate_liquidity_component_1w"] = _score_percentile(working["avg_turnover_20d"]) * 0.45
+    working["candidate_earnings_component_1w"] = 0.0
+    working.loc[earnings_days >= 7.0, "candidate_earnings_component_1w"] = 0.15
+    working.loc[(earnings_days >= 3.0) & (earnings_days < 5.0), "candidate_earnings_component_1w"] = -0.35
+    working.loc[earnings_days < 3.0, "candidate_earnings_component_1w"] = -0.80
+    working["swing_score_1w"] = (
+        working["candidate_sector_component_1w"]
+        + working["candidate_live_component_1w"]
+        + working["candidate_flow_component_1w"]
+        + working["candidate_followthrough_component_1w"]
+        + working["candidate_rs_component_1w"]
+        + working["candidate_liquidity_component_1w"]
+        + working["candidate_earnings_component_1w"]
+    )
+    working.loc[working["sector_confidence_1w"].eq("高"), "swing_score_1w"] += float(selection_config.get("sector_confidence_bonus_high_1w", 0.0) or 0.0)
+    working.loc[working["sector_confidence_1w"].eq("中"), "swing_score_1w"] += float(selection_config.get("sector_confidence_bonus_mid_1w", 0.0) or 0.0)
+    working["pass_score_gate_1w"] = (
+        working["swing_score_1w"].fillna(-999.0).ge(float(selection_config.get("score_gate_1w", 2.3) or 2.3))
+        & (working["pass_live_gate_1w"] | working["pass_trend_gate_1w"])
+    )
+    working["candidate_quality_score_1w"] = 0.0
+    working.loc[working["belongs_today_sector"], "candidate_quality_score_1w"] += 1.0
+    working.loc[working["pass_live_gate_1w"], "candidate_quality_score_1w"] += 1.2
+    working.loc[working["pass_trend_gate_1w"], "candidate_quality_score_1w"] += 1.0
+    working.loc[working["pass_flow_gate_1w"], "candidate_quality_score_1w"] += 0.9
+    working.loc[working["liquidity_ok"], "candidate_quality_score_1w"] += 0.5
+    working.loc[working["extension_flag_1w"], "candidate_quality_score_1w"] -= 0.5
+    working.loc[working["earnings_unknown_flag"], "candidate_quality_score_1w"] -= 0.2
+    working.loc[working["earnings_risk_flag_1w"], "candidate_quality_score_1w"] -= 1.2
+    working["candidate_quality_1w"] = "低"
+    working.loc[working["candidate_quality_score_1w"] >= 4.1, "candidate_quality_1w"] = "高"
+    working.loc[(working["candidate_quality_score_1w"] >= 2.7) & (working["candidate_quality_score_1w"] < 4.1), "candidate_quality_1w"] = "中"
+
+    working["candidate_sector_component_1m"] = working["belongs_persistence_sector"].astype(float) * 1.0
+    working["candidate_rs_component_1m"] = _score_percentile(working["rs_vs_topix_1m"]) * 1.05
+    working["candidate_rs_component_3m"] = _score_percentile(working["rs_vs_topix_3m"]) * 0.80
+    working["candidate_ma20_component_1m"] = (1.0 - _score_percentile(working["price_vs_ma20_abs"])) * float(selection_config.get("candidate_ma20_weight_1m", 0.55) or 0.55)
+    working["candidate_flow_component_1m"] = _score_percentile(working["live_turnover_ratio_20d"].fillna(working["live_volume_ratio_20d"])) * 0.45
+    working["candidate_live_component_1m"] = _score_percentile(working["live_ret_vs_prev_close"]) * 0.20
+    working["candidate_liquidity_component_1m"] = _score_percentile(working["avg_turnover_20d"]) * 0.50
+    working["candidate_sector_rank_component_1m"] = _score_rank_ascending(working["sector_rank_1m"]) * 0.80
+    working["candidate_sector_rank_component_3m"] = _score_rank_ascending(working["sector_rank_3m"]) * 0.75
+    working["candidate_earnings_component_1m"] = 0.0
+    working.loc[earnings_days >= 10.0, "candidate_earnings_component_1m"] = 0.15
+    working.loc[(earnings_days >= 5.0) & (earnings_days < 7.0), "candidate_earnings_component_1m"] = -0.35
+    working.loc[earnings_days < 5.0, "candidate_earnings_component_1m"] = -0.80
+    working["candidate_finance_component_1m"] = 0.0
+    working.loc[finance_score >= 0.0, "candidate_finance_component_1m"] = 0.35
+    working.loc[finance_score < -1.0, "candidate_finance_component_1m"] = -0.80
+    working["swing_score_1m"] = (
+        working["candidate_sector_component_1m"]
+        + working["candidate_rs_component_1m"]
+        + working["candidate_rs_component_3m"]
+        + working["candidate_ma20_component_1m"]
+        + working["candidate_flow_component_1m"]
+        + working["candidate_live_component_1m"]
+        + working["candidate_liquidity_component_1m"]
+        + working["candidate_sector_rank_component_1m"]
+        + working["candidate_sector_rank_component_3m"]
+        + working["candidate_earnings_component_1m"]
+        + working["candidate_finance_component_1m"]
+    )
+    working.loc[working["sector_confidence_1m"].eq("高"), "swing_score_1m"] += float(selection_config.get("sector_confidence_bonus_high_1m", 0.0) or 0.0)
+    working.loc[working["sector_confidence_1m"].eq("中"), "swing_score_1m"] += float(selection_config.get("sector_confidence_bonus_mid_1m", 0.0) or 0.0)
+    working["pass_score_gate_1m"] = (
+        working["swing_score_1m"].fillna(-999.0).ge(float(selection_config.get("score_gate_1m", 2.9) or 2.9))
+        & working["pass_trend_gate_1m"]
+    )
+    working["candidate_quality_score_1m"] = 0.0
+    working.loc[working["belongs_persistence_sector"], "candidate_quality_score_1m"] += 1.0
+    working.loc[working["pass_trend_gate_1m"], "candidate_quality_score_1m"] += 1.4
+    working.loc[working["pass_flow_gate_1m"], "candidate_quality_score_1m"] += 0.8
+    working.loc[working["pass_live_gate_1m"], "candidate_quality_score_1m"] += 0.4
+    working.loc[working["liquidity_ok"], "candidate_quality_score_1m"] += 0.5
+    working.loc[~working["finance_risk_flag"], "candidate_quality_score_1m"] += 0.4
+    working.loc[working["extension_flag_1m"], "candidate_quality_score_1m"] -= 0.5
+    working.loc[working["earnings_unknown_flag"], "candidate_quality_score_1m"] -= 0.2
+    working.loc[working["earnings_risk_flag_1m"], "candidate_quality_score_1m"] -= 1.0
+    working.loc[working["finance_risk_flag"], "candidate_quality_score_1m"] -= 1.0
+    working["candidate_quality_1m"] = "低"
+    working.loc[working["candidate_quality_score_1m"] >= 4.0, "candidate_quality_1m"] = "高"
+    working.loc[(working["candidate_quality_score_1m"] >= 2.8) & (working["candidate_quality_score_1m"] < 4.0), "candidate_quality_1m"] = "中"
+
+    working["selection_reason_1w"] = working.apply(_swing_reason_1w_v2, axis=1)
+    working["selection_reason_1m"] = working.apply(_swing_reason_1m_v2, axis=1)
+    working["risk_note_1w"] = working.apply(_swing_risk_note_1w_v2, axis=1)
+    working["risk_note_1m"] = working.apply(_swing_risk_note_1m_v2, axis=1)
+    working["candidate_commentary_1w"] = working.apply(
+        lambda row: _build_candidate_commentary(row.get("selection_reason_1w", ""), row.get("risk_note_1w", "")),
+        axis=1,
+    )
+    working["candidate_commentary_1m"] = working.apply(
+        lambda row: _build_candidate_commentary(row.get("selection_reason_1m", ""), row.get("risk_note_1m", "")),
+        axis=1,
+    )
+    working["entry_fit_1w"] = working.apply(
+        lambda row: _entry_fit_1w_label_v2(
+            candidate_quality=str(row.get("candidate_quality_1w", "")),
+            belongs_today_sector=bool(row.get("belongs_today_sector")),
+            pass_live_gate=bool(row.get("pass_live_gate_1w")),
+            pass_trend_gate=bool(row.get("pass_trend_gate_1w")),
+            pass_flow_gate=bool(row.get("pass_flow_gate_1w")),
+            pass_quality_gate=bool(row.get("pass_quality_gate_1w")),
+            hard_block_reason=str(row.get("hard_block_reason_raw_1w", "") or ""),
+            extension_flag=bool(row.get("extension_flag_1w")),
+            sector_confidence=str(row.get("sector_confidence_1w", "")),
+        ),
+        axis=1,
+    )
+    working["entry_fit_1m"] = working.apply(
+        lambda row: _entry_fit_1m_label_v2(
+            candidate_quality=str(row.get("candidate_quality_1m", "")),
+            belongs_persistence_sector=bool(row.get("belongs_persistence_sector")),
+            pass_live_gate=bool(row.get("pass_live_gate_1m")),
+            pass_trend_gate=bool(row.get("pass_trend_gate_1m")),
+            pass_flow_gate=bool(row.get("pass_flow_gate_1m")),
+            pass_quality_gate=bool(row.get("pass_quality_gate_1m")),
+            hard_block_reason=str(row.get("hard_block_reason_raw_1m", "") or ""),
+            extension_flag=bool(row.get("extension_flag_1m")),
+            sector_confidence=str(row.get("sector_confidence_1m", "")),
+        ),
+        axis=1,
+    )
+    working["entry_fit_priority_1w"] = working["entry_fit_1w"].map(_entry_fit_sort_priority)
+    working["entry_fit_priority_1m"] = working["entry_fit_1m"].map(_entry_fit_sort_priority)
+
+    swing_1w_source = working[
+        working["candidate_quality_1w"].isin(["高", "中"])
+        & working["entry_fit_1w"].isin(["買い候補", "監視候補"])
+        & working["pass_score_gate_1w"]
+    ].copy()
+    swing_1m_source = working[
+        working["candidate_quality_1m"].isin(["高", "中"])
+        & working["entry_fit_1m"].isin(["買い候補", "監視候補"])
+        & working["pass_score_gate_1m"]
+    ].copy()
+    swing_1w = (
+        swing_1w_source.sort_values(
+            ["entry_fit_priority_1w", "sector_confidence_priority_1w", "candidate_quality_score_1w", "swing_score_1w", "live_ret_vs_prev_close", "live_turnover_value", "rs_vs_topix_1w", "price_vs_ma20_abs"],
+            ascending=[True, False, False, False, False, False, False, True],
+            kind="mergesort",
+        )[
+            [
+                "code",
+                "name",
+                "sector_name",
+                "candidate_quality_1w",
+                "entry_fit_1w",
+                "selection_reason_1w",
+                "risk_note_1w",
+                "candidate_commentary_1w",
+                "swing_score_1w",
+                "rs_vs_topix_1w",
+                "live_ret_vs_prev_close",
+                "current_price",
+                "current_price_unavailable",
+                "live_turnover_value",
+                "live_turnover_unavailable",
+                "earnings_buffer_days",
+                "nikkei_search",
+                "material_link",
+            ]
+        ].reset_index(drop=True).rename(
+            columns={
+                "candidate_quality_1w": "candidate_quality",
+                "entry_fit_1w": "entry_fit",
+                "selection_reason_1w": "selection_reason",
+                "risk_note_1w": "risk_note",
+                "candidate_commentary_1w": "candidate_commentary",
+            }
+        )
+    )
+    swing_1m = (
+        swing_1m_source.sort_values(
+            ["entry_fit_priority_1m", "sector_confidence_priority_1m", "candidate_quality_score_1m", "swing_score_1m", "rs_vs_topix_1m", "rs_vs_topix_3m", "price_vs_ma20_abs", "live_turnover_value"],
+            ascending=[True, False, False, False, False, False, True, False],
+            kind="mergesort",
+        )[
+            [
+                "code",
+                "name",
+                "sector_name",
+                "candidate_quality_1m",
+                "entry_fit_1m",
+                "selection_reason_1m",
+                "risk_note_1m",
+                "candidate_commentary_1m",
+                "swing_score_1m",
+                "rs_vs_topix_1m",
+                "rs_vs_topix_3m",
+                "live_ret_vs_prev_close",
+                "current_price",
+                "current_price_unavailable",
+                "live_turnover_value",
+                "live_turnover_unavailable",
+                "price_vs_ma20_pct",
+                "earnings_buffer_days",
+                "finance_health_flag",
+                "nikkei_search",
+                "material_link",
+            ]
+        ].reset_index(drop=True).rename(
+            columns={
+                "candidate_quality_1m": "candidate_quality",
+                "entry_fit_1m": "entry_fit",
+                "selection_reason_1m": "selection_reason",
+                "risk_note_1m": "risk_note",
+                "candidate_commentary_1m": "candidate_commentary",
+            }
+        )
+    )
+    swing_1w = _apply_sector_cap(swing_1w, sector_col="sector_name", limit_per_sector=2, total_limit=6)
+    swing_1m = _apply_sector_cap(swing_1m, sector_col="sector_name", limit_per_sector=2, total_limit=6)
+    if not swing_1w.empty:
+        swing_1w.insert(0, "candidate_rank_1w", range(1, len(swing_1w) + 1))
+    if not swing_1m.empty:
+        swing_1m.insert(0, "candidate_rank_1m", range(1, len(swing_1m) + 1))
+    swing_buy_1w = swing_1w[swing_1w["entry_fit"].eq("買い候補")].head(5).reset_index(drop=True) if not swing_1w.empty else pd.DataFrame(columns=swing_1w.columns)
+    swing_watch_1w = swing_1w[swing_1w["entry_fit"].eq("監視候補")].head(5).reset_index(drop=True) if not swing_1w.empty else pd.DataFrame(columns=swing_1w.columns)
+    swing_buy_1m = swing_1m[swing_1m["entry_fit"].eq("買い候補")].head(5).reset_index(drop=True) if not swing_1m.empty else pd.DataFrame(columns=swing_1m.columns)
+    swing_watch_1m = swing_1m[swing_1m["entry_fit"].eq("監視候補")].head(5).reset_index(drop=True) if not swing_1m.empty else pd.DataFrame(columns=swing_1m.columns)
+    if not swing_buy_1w.empty:
+        swing_buy_1w["candidate_rank_1w"] = range(1, len(swing_buy_1w) + 1)
+    if not swing_watch_1w.empty:
+        swing_watch_1w["candidate_rank_1w"] = range(1, len(swing_watch_1w) + 1)
+    if not swing_buy_1m.empty:
+        swing_buy_1m["candidate_rank_1m"] = range(1, len(swing_buy_1m) + 1)
+    if not swing_watch_1m.empty:
+        swing_watch_1m["candidate_rank_1m"] = range(1, len(swing_watch_1m) + 1)
+
+    selected_codes_1w = set(swing_1w.get("code", pd.Series(dtype=str)).astype(str).tolist())
+    selected_codes_1m = set(swing_1m.get("code", pd.Series(dtype=str)).astype(str).tolist())
+    audit_1w = _build_swing_candidate_audit_frame(
+        working,
+        horizon="1w",
+        target_sector_col="belongs_today_sector",
+        live_col="pass_live_gate_1w",
+        trend_col="pass_trend_gate_1w",
+        flow_col="pass_flow_gate_1w",
+        quality_col="pass_quality_gate_1w",
+        hard_block_col="hard_block_reason_raw_1w",
+        score_col="pass_score_gate_1w",
+        score_total_col="swing_score_1w",
+        display_reason_col="selection_reason_1w",
+        selected_codes=selected_codes_1w,
+    )
+    audit_1m = _build_swing_candidate_audit_frame(
+        working,
+        horizon="1m",
+        target_sector_col="belongs_persistence_sector",
+        live_col="pass_live_gate_1m",
+        trend_col="pass_trend_gate_1m",
+        flow_col="pass_flow_gate_1m",
+        quality_col="pass_quality_gate_1m",
+        hard_block_col="hard_block_reason_raw_1m",
+        score_col="pass_score_gate_1m",
+        score_total_col="swing_score_1m",
+        display_reason_col="selection_reason_1m",
+        selected_codes=selected_codes_1m,
+    )
+    empty_status_1w, empty_reason_1w = _resolve_swing_empty_reason(
+        working,
+        target_sector_col="belongs_today_sector",
+        hard_block_col="hard_block_reason_raw_1w",
+        live_col="pass_live_gate_1w",
+        trend_col="pass_trend_gate_1w",
+        quality_col="pass_quality_gate_1w",
+        score_col="pass_score_gate_1w",
+    )
+    empty_status_1m, empty_reason_1m = _resolve_swing_empty_reason(
+        working,
+        target_sector_col="belongs_persistence_sector",
+        hard_block_col="hard_block_reason_raw_1m",
+        live_col="pass_live_gate_1m",
+        trend_col="pass_trend_gate_1m",
+        quality_col="pass_quality_gate_1m",
+        score_col="pass_score_gate_1m",
+    )
+    if not swing_1w.empty:
+        empty_status_1w, empty_reason_1w = "observed", ""
+    if not swing_1m.empty:
+        empty_status_1m, empty_reason_1m = "observed", ""
+    return {
+        "1w": swing_1w,
+        "1m": swing_1m,
+        "buy_1w": swing_buy_1w,
+        "watch_1w": swing_watch_1w,
+        "buy_1m": swing_buy_1m,
+        "watch_1m": swing_watch_1m,
+        "audit_1w": audit_1w,
+        "audit_1m": audit_1m,
+        "empty_reason_1w": empty_reason_1w,
+        "empty_reason_1m": empty_reason_1m,
+        "empty_status_1w": empty_status_1w,
+        "empty_status_1m": empty_status_1m,
+    }
+
+
 def _make_nikkei_search_link(name: str, code: str) -> str:
     del code
     name = str(name or "").strip()
@@ -5444,6 +6130,24 @@ SECTOR_LIVE_AGGREGATE_AUDIT_COLUMNS = [
     "sample_codes",
 ]
 
+SWING_CANDIDATE_AUDIT_COLUMNS = [
+    "code",
+    "name",
+    "sector_name",
+    "in_candidate_universe",
+    "pass_live_gate",
+    "pass_trend_gate",
+    "pass_flow_gate",
+    "pass_quality_gate",
+    "pass_score_gate",
+    "hard_block_reason_raw",
+    "score_total_raw",
+    "score_subcomponents_raw",
+    "selected_flag",
+    "unselected_reason",
+    "display_reason_raw",
+]
+
 PERSISTENCE_DISPLAY_COLUMNS = [
     "persistence_rank",
     "sector_name",
@@ -5454,22 +6158,29 @@ PERSISTENCE_DISPLAY_COLUMNS = [
 ]
 SWING_1W_DISPLAY_COLUMNS = [
     "candidate_rank_1w",
-    "name",
     "sector_name",
+    "code",
+    "name",
+    "live_ret_vs_prev_close",
+    "current_price",
+    "live_turnover_value",
     "candidate_quality",
     "entry_fit",
     "selection_reason",
     "risk_note",
     "candidate_commentary",
     "rs_vs_topix_1w",
-    "live_ret_vs_prev_close",
-    "live_turnover",
     "earnings_buffer_days",
+    "nikkei_search",
 ]
 SWING_1M_DISPLAY_COLUMNS = [
     "candidate_rank_1m",
-    "name",
     "sector_name",
+    "code",
+    "name",
+    "live_ret_vs_prev_close",
+    "current_price",
+    "live_turnover_value",
     "candidate_quality",
     "entry_fit",
     "selection_reason",
@@ -5480,6 +6191,7 @@ SWING_1M_DISPLAY_COLUMNS = [
     "price_vs_ma20_pct",
     "earnings_buffer_days",
     "finance_health_flag",
+    "nikkei_search",
 ]
 
 
@@ -5725,6 +6437,105 @@ def _build_sector_representatives_display_frame(
             display = pd.concat([display, empty_rows], ignore_index=True, sort=False)
     display = _sort_sector_representatives_display_rows(display)
     return display[SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS].reset_index(drop=True)
+
+
+def _sort_swing_candidate_display_rows(frame: pd.DataFrame, *, rank_col: str) -> pd.DataFrame:
+    columns = SWING_1W_DISPLAY_COLUMNS if rank_col == "candidate_rank_1w" else SWING_1M_DISPLAY_COLUMNS
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=columns)
+    working = frame.copy()
+    working["_rank_sort"] = _coerce_numeric(working.get(rank_col, pd.Series(pd.NA, index=working.index))).fillna(9999)
+    if "sector_name" not in working.columns:
+        working["sector_name"] = ""
+    if "code" not in working.columns:
+        working["code"] = ""
+    working = working.sort_values(
+        ["_rank_sort", "sector_name", "code"],
+        ascending=[True, True, True],
+        kind="mergesort",
+    ).copy()
+    return working.drop(columns=["_rank_sort"], errors="ignore")
+
+
+def _build_swing_candidate_display_frame(
+    frame: pd.DataFrame,
+    *,
+    horizon: str,
+) -> pd.DataFrame:
+    rank_col = "candidate_rank_1w" if horizon == "1w" else "candidate_rank_1m"
+    columns = SWING_1W_DISPLAY_COLUMNS if horizon == "1w" else SWING_1M_DISPLAY_COLUMNS
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=columns)
+    working = frame.copy()
+    for column in columns:
+        if column not in working.columns:
+            if column in {"sector_name", "code", "name", "candidate_quality", "entry_fit", "selection_reason", "risk_note", "candidate_commentary", "finance_health_flag", "nikkei_search"}:
+                working[column] = ""
+            else:
+                working[column] = pd.NA
+    working["current_price"] = _coerce_numeric(working.get("current_price", working.get("live_price", pd.Series(pd.NA, index=working.index))))
+    working["live_turnover_value"] = _coerce_numeric(working.get("live_turnover_value", working.get("live_turnover", pd.Series(pd.NA, index=working.index))))
+    working["current_price_unavailable"] = working.get("current_price_unavailable", working["current_price"].isna()).fillna(True).astype(bool)
+    working["live_turnover_unavailable"] = working.get("live_turnover_unavailable", working["live_turnover_value"].isna()).fillna(True).astype(bool)
+    working[rank_col] = working[rank_col].apply(_format_display_rank_value)
+    working["sector_name"] = working["sector_name"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+    working["code"] = working["code"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+    working["name"] = working["name"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+    for column in ["candidate_quality", "entry_fit", "selection_reason", "risk_note", "candidate_commentary", "finance_health_flag"]:
+        if column in working.columns:
+            working[column] = working[column].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+    working["live_ret_vs_prev_close"] = working["live_ret_vs_prev_close"].apply(_format_display_pct_1dp)
+    working["current_price"] = [
+        _format_display_price_value(value, unavailable=bool(unavailable))
+        for value, unavailable in zip(working["current_price"], working["current_price_unavailable"])
+    ]
+    working["live_turnover_value"] = [
+        _format_display_value_or_unavailable(
+            value,
+            unavailable=bool(unavailable),
+            formatter=lambda numeric: f"{int(round(float(numeric))):,}",
+        )
+        for value, unavailable in zip(working["live_turnover_value"], working["live_turnover_unavailable"])
+    ]
+    for numeric_col in ["rs_vs_topix_1w", "rs_vs_topix_1m", "rs_vs_topix_3m", "price_vs_ma20_pct"]:
+        if numeric_col in working.columns:
+            working[numeric_col] = working[numeric_col].apply(_format_display_pct_1dp)
+    if "earnings_buffer_days" in working.columns:
+        working["earnings_buffer_days"] = working["earnings_buffer_days"].apply(lambda value: _format_display_rank_value(value) or DISPLAY_UNAVAILABLE_MARK)
+    working["nikkei_search"] = working["nikkei_search"].fillna("").astype(str)
+    working = working.drop(columns=["current_price_unavailable", "live_turnover_unavailable"], errors="ignore")
+    working = _sort_swing_candidate_display_rows(working, rank_col=rank_col)
+    return working[columns].reset_index(drop=True)
+
+
+def _prepare_swing_candidate_display_view(
+    saved_display: pd.DataFrame,
+    *,
+    columns: list[str],
+    raw_fallback: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
+    compatibility_notes: list[str] = []
+    if isinstance(saved_display, pd.DataFrame) and not saved_display.empty:
+        prepared = saved_display.copy()
+        for column in columns:
+            if column not in prepared.columns:
+                prepared[column] = ""
+                compatibility_notes.append(column)
+        for column in columns:
+            prepared[column] = prepared[column].fillna("").astype(str)
+        return prepared.reindex(columns=columns), compatibility_notes
+    if isinstance(raw_fallback, pd.DataFrame) and not raw_fallback.empty:
+        compatibility_notes.append("スイング候補表は旧 snapshot 互換表示です。raw swing_candidates から表示列だけ抽出しています。")
+        horizon = "1w" if "candidate_rank_1w" in columns else "1m"
+        prepared = _build_swing_candidate_display_frame(raw_fallback, horizon=horizon)
+        for column in columns:
+            if column not in prepared.columns:
+                prepared[column] = ""
+                compatibility_notes.append(column)
+        for column in columns:
+            prepared[column] = prepared[column].fillna("").astype(str)
+        return prepared.reindex(columns=columns), compatibility_notes
+    return pd.DataFrame(columns=columns), compatibility_notes
 
 
 def _empty_sector_representatives_audit_frame() -> pd.DataFrame:
@@ -5998,6 +6809,24 @@ def _trim_sector_live_aggregate_audit_for_storage(frame: Any) -> Any:
     return trimmed
 
 
+def _trim_swing_display_for_storage(frame: Any, *, horizon: str) -> Any:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    keep_columns = [
+        column
+        for column in (SWING_1W_DISPLAY_COLUMNS if horizon == "1w" else SWING_1M_DISPLAY_COLUMNS)
+        if column in frame.columns
+    ]
+    return frame[keep_columns].copy()
+
+
+def _trim_swing_audit_for_storage(frame: Any) -> Any:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    keep_columns = [column for column in SWING_CANDIDATE_AUDIT_COLUMNS if column in frame.columns]
+    return frame[keep_columns].copy()
+
+
 def _trim_diagnostics_for_storage(diagnostics: Any) -> Any:
     if not isinstance(diagnostics, dict):
         return diagnostics
@@ -6060,6 +6889,15 @@ def _bundle_for_storage(source_bundle: dict[str, Any]) -> dict[str, Any]:
         if key == "sector_live_aggregate_audit":
             storage_bundle[key] = _trim_sector_live_aggregate_audit_for_storage(value)
             continue
+        if key == "swing_candidates_1w_display":
+            storage_bundle[key] = _trim_swing_display_for_storage(value, horizon="1w")
+            continue
+        if key == "swing_candidates_1m_display":
+            storage_bundle[key] = _trim_swing_display_for_storage(value, horizon="1m")
+            continue
+        if key in {"swing_1w_candidates_audit", "swing_1m_candidates_audit"}:
+            storage_bundle[key] = _trim_swing_audit_for_storage(value)
+            continue
         if key == "diagnostics":
             storage_bundle[key] = _trim_diagnostics_for_storage(value)
             continue
@@ -6076,6 +6914,24 @@ def _bundle_for_storage(source_bundle: dict[str, Any]) -> dict[str, Any]:
                 source_bundle["sector_representatives"],
                 today_sector_leaderboard=source_bundle.get("today_sector_leaderboard", pd.DataFrame()),
             )
+        )
+    if (
+        "swing_candidates_1w_display" not in storage_bundle
+        and isinstance(source_bundle.get("swing_candidates_1w"), pd.DataFrame)
+        and not source_bundle.get("swing_candidates_1w").empty
+    ):
+        storage_bundle["swing_candidates_1w_display"] = _trim_swing_display_for_storage(
+            _build_swing_candidate_display_frame(source_bundle["swing_candidates_1w"], horizon="1w"),
+            horizon="1w",
+        )
+    if (
+        "swing_candidates_1m_display" not in storage_bundle
+        and isinstance(source_bundle.get("swing_candidates_1m"), pd.DataFrame)
+        and not source_bundle.get("swing_candidates_1m").empty
+    ):
+        storage_bundle["swing_candidates_1m_display"] = _trim_swing_display_for_storage(
+            _build_swing_candidate_display_frame(source_bundle["swing_candidates_1m"], horizon="1m"),
+            horizon="1m",
         )
     return storage_bundle
 
@@ -6431,20 +7287,24 @@ def build_live_snapshot(
             current_representative = persistence_tables[key]["representative_stock"] if "representative_stock" in persistence_tables[key].columns else pd.Series([""] * len(persistence_tables[key]), index=persistence_tables[key].index)
             persistence_tables[key]["representative_stock"] = current_representative.where(current_representative.astype(str).str.strip() != "", persistence_tables[key]["normalized_sector_name"].map(rep_key_map).fillna(persistence_tables[key]["sector_name"].map(rep_map).fillna("")))
             persistence_tables[key]["leaders"] = persistence_tables[key]["normalized_sector_name"].map(leaders_key_map).fillna(persistence_tables[key]["sector_name"].map(leaders_map).fillna(""))
-    baseline_swing_candidates = _build_swing_candidate_tables(
+    baseline_swing_candidates = _build_swing_candidate_tables_v2(
         stock_merged,
         baseline_today_sector_leaderboard,
         baseline_persistence_tables,
         selection_config=SWING_SELECTION_CONFIG_BASELINE,
     )
-    swing_candidates = _build_swing_candidate_tables(stock_merged, today_sector_leaderboard, persistence_tables)
+    swing_candidates = _build_swing_candidate_tables_v2(stock_merged, today_sector_leaderboard, persistence_tables)
+    swing_candidates_1w_display = _build_swing_candidate_display_frame(swing_candidates["1w"], horizon="1w")
+    swing_candidates_1m_display = _build_swing_candidate_display_frame(swing_candidates["1m"], horizon="1m")
     empty_state = {
         "today_sector_leaderboard": "" if not today_sector_leaderboard.empty else "intraday 条件を満たす本命セクターがありません。",
         "sector_persistence_1w": "" if not persistence_tables["1w"].empty else "TOPIX 比 1週継続性を出せるセクターがありません。",
         "sector_persistence_1m": "" if not persistence_tables["1m"].empty else "TOPIX 比 1か月継続性を出せるセクターがありません。",
         "sector_persistence_3m": "" if not persistence_tables["3m"].empty else "TOPIX 比 3か月継続性を出せるセクターがありません。",
-        "swing_candidates_1w": "" if not swing_candidates["1w"].empty else "1週間スイング候補の条件を満たす銘柄がありません。",
-        "swing_candidates_1m": "" if not swing_candidates["1m"].empty else "1か月スイング候補の条件を満たす銘柄がありません。",
+        "swing_candidates_1w": "" if not swing_candidates["1w"].empty else str(swing_candidates.get("empty_reason_1w", "") or "1週間スイング候補の条件を満たす銘柄がありません。"),
+        "swing_candidates_1m": "" if not swing_candidates["1m"].empty else str(swing_candidates.get("empty_reason_1m", "") or "1か月スイング候補の条件を満たす銘柄がありません。"),
+        "swing_candidates_1w_display": "" if not swing_candidates_1w_display.empty else str(swing_candidates.get("empty_reason_1w", "") or "1週間スイング候補の条件を満たす銘柄がありません。"),
+        "swing_candidates_1m_display": "" if not swing_candidates_1m_display.empty else str(swing_candidates.get("empty_reason_1m", "") or "1か月スイング候補の条件を満たす銘柄がありません。"),
         "swing_buy_candidates_1w": "" if not swing_candidates["buy_1w"].empty else "1週間スイング買い候補はありません。",
         "swing_watch_candidates_1w": "" if not swing_candidates["watch_1w"].empty else "1週間スイング監視候補はありません。",
         "swing_buy_candidates_1m": "" if not swing_candidates["buy_1m"].empty else "1か月スイング買い候補はありません。",
@@ -6535,10 +7395,14 @@ def build_live_snapshot(
         "buy_candidates": swing_candidates["1m"],
         "swing_candidates_1w": swing_candidates["1w"],
         "swing_candidates_1m": swing_candidates["1m"],
+        "swing_candidates_1w_display": swing_candidates_1w_display,
+        "swing_candidates_1m_display": swing_candidates_1m_display,
         "swing_buy_candidates_1w": swing_candidates["buy_1w"],
         "swing_watch_candidates_1w": swing_candidates["watch_1w"],
         "swing_buy_candidates_1m": swing_candidates["buy_1m"],
         "swing_watch_candidates_1m": swing_candidates["watch_1m"],
+        "swing_1w_candidates_audit": swing_candidates["audit_1w"],
+        "swing_1m_candidates_audit": swing_candidates["audit_1m"],
         "empty_reasons": empty_state,
         "diagnostics": {
             "mode": mode,
@@ -6644,6 +7508,10 @@ def build_live_snapshot(
             "includes_kabu": True,
             "non_corporate_products": product_filter_diag["non_corporate_products"],
             "tuning_compare": tuning_compare,
+            "swing_candidates_1w_source_of_truth": "stock_merged",
+            "swing_candidates_1m_source_of_truth": "stock_merged",
+            "swing_candidates_1w_empty_status": str(swing_candidates.get("empty_status_1w", "") or ""),
+            "swing_candidates_1m_empty_status": str(swing_candidates.get("empty_status_1m", "") or ""),
         },
     }
 
@@ -6712,10 +7580,20 @@ def load_saved_snapshot(
         )
     swing_candidates_1w = pd.DataFrame(payload.get("swing_candidates_1w", payload.get("watch_candidates", payload.get("focus_candidates", []))))
     swing_candidates_1m = pd.DataFrame(payload.get("swing_candidates_1m", payload.get("buy_candidates", [])))
+    swing_candidates_1w_display = pd.DataFrame(payload.get("swing_candidates_1w_display", []))
+    swing_candidates_1m_display = pd.DataFrame(payload.get("swing_candidates_1m_display", []))
     swing_buy_candidates_1w = pd.DataFrame(payload.get("swing_buy_candidates_1w", []))
     swing_watch_candidates_1w = pd.DataFrame(payload.get("swing_watch_candidates_1w", []))
     swing_buy_candidates_1m = pd.DataFrame(payload.get("swing_buy_candidates_1m", []))
     swing_watch_candidates_1m = pd.DataFrame(payload.get("swing_watch_candidates_1m", []))
+    swing_1w_candidates_audit = pd.DataFrame(payload.get("swing_1w_candidates_audit", []))
+    swing_1m_candidates_audit = pd.DataFrame(payload.get("swing_1m_candidates_audit", []))
+    if swing_candidates_1w_display.empty and not swing_candidates_1w.empty:
+        compat_notes.append("1週間候補表は旧 snapshot 互換表示です。raw swing_candidates_1w から表示列だけ抽出しています。")
+        swing_candidates_1w_display = _build_swing_candidate_display_frame(swing_candidates_1w, horizon="1w")
+    if swing_candidates_1m_display.empty and not swing_candidates_1m.empty:
+        compat_notes.append("1か月候補表は旧 snapshot 互換表示です。raw swing_candidates_1m から表示列だけ抽出しています。")
+        swing_candidates_1m_display = _build_swing_candidate_display_frame(swing_candidates_1m, horizon="1m")
     if bool(snapshot_guard.get("is_stale")) and not allow_stale_content:
         stale_reason = str(snapshot_guard.get("reason", "")).strip()
         today_sector_leaderboard = pd.DataFrame()
@@ -6728,10 +7606,14 @@ def load_saved_snapshot(
         sector_live_aggregate_audit = pd.DataFrame()
         swing_candidates_1w = pd.DataFrame()
         swing_candidates_1m = pd.DataFrame()
+        swing_candidates_1w_display = pd.DataFrame()
+        swing_candidates_1m_display = pd.DataFrame()
         swing_buy_candidates_1w = pd.DataFrame()
         swing_watch_candidates_1w = pd.DataFrame()
         swing_buy_candidates_1m = pd.DataFrame()
         swing_watch_candidates_1m = pd.DataFrame()
+        swing_1w_candidates_audit = pd.DataFrame()
+        swing_1m_candidates_audit = pd.DataFrame()
         payload_empty_reasons = dict(payload.get("empty_reasons", {}))
         for key in [
             "today_sector_leaderboard",
@@ -6742,6 +7624,8 @@ def load_saved_snapshot(
             "sector_representatives_display",
             "swing_candidates_1w",
             "swing_candidates_1m",
+            "swing_candidates_1w_display",
+            "swing_candidates_1m_display",
             "swing_buy_candidates_1w",
             "swing_watch_candidates_1w",
             "swing_buy_candidates_1m",
@@ -6778,10 +7662,14 @@ def load_saved_snapshot(
         "buy_candidates": swing_candidates_1m,
         "swing_candidates_1w": swing_candidates_1w,
         "swing_candidates_1m": swing_candidates_1m,
+        "swing_candidates_1w_display": swing_candidates_1w_display,
+        "swing_candidates_1m_display": swing_candidates_1m_display,
         "swing_buy_candidates_1w": swing_buy_candidates_1w if not swing_buy_candidates_1w.empty else swing_candidates_1w[swing_candidates_1w.get("entry_fit", pd.Series(dtype=str)).eq("買い候補")] if not swing_candidates_1w.empty and "entry_fit" in swing_candidates_1w.columns else pd.DataFrame(),
         "swing_watch_candidates_1w": swing_watch_candidates_1w if not swing_watch_candidates_1w.empty else swing_candidates_1w[swing_candidates_1w.get("entry_fit", pd.Series(dtype=str)).eq("監視候補")] if not swing_candidates_1w.empty and "entry_fit" in swing_candidates_1w.columns else pd.DataFrame(),
         "swing_buy_candidates_1m": swing_buy_candidates_1m if not swing_buy_candidates_1m.empty else swing_candidates_1m[swing_candidates_1m.get("entry_fit", pd.Series(dtype=str)).eq("買い候補")] if not swing_candidates_1m.empty and "entry_fit" in swing_candidates_1m.columns else pd.DataFrame(),
         "swing_watch_candidates_1m": swing_watch_candidates_1m if not swing_watch_candidates_1m.empty else swing_candidates_1m[swing_candidates_1m.get("entry_fit", pd.Series(dtype=str)).eq("監視候補")] if not swing_candidates_1m.empty and "entry_fit" in swing_candidates_1m.columns else pd.DataFrame(),
+        "swing_1w_candidates_audit": swing_1w_candidates_audit,
+        "swing_1m_candidates_audit": swing_1m_candidates_audit,
         "empty_reasons": payload.get("empty_reasons", {}),
         "diagnostics": payload.get("diagnostics", {}),
         "snapshot_guard": snapshot_guard,
@@ -6852,8 +7740,18 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     weekly_sector_view, weekly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1w", bundle.get("weekly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
     monthly_sector_view, monthly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1m", bundle.get("monthly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
     quarter_sector_view, quarter_sector_notes = _prepare_table_view(bundle.get("sector_persistence_3m", pd.DataFrame()), PERSISTENCE_DISPLAY_COLUMNS)
-    swing_1w_view, swing_1w_notes = _prepare_table_view(bundle.get("swing_candidates_1w", pd.DataFrame()), SWING_1W_DISPLAY_COLUMNS)
-    swing_1m_view, swing_1m_notes = _prepare_table_view(bundle.get("swing_candidates_1m", pd.DataFrame()), SWING_1M_DISPLAY_COLUMNS)
+    swing_1w_display = bundle.get("swing_candidates_1w_display", pd.DataFrame())
+    swing_1m_display = bundle.get("swing_candidates_1m_display", pd.DataFrame())
+    swing_1w_view, swing_1w_notes = _prepare_swing_candidate_display_view(
+        swing_1w_display if isinstance(swing_1w_display, pd.DataFrame) else pd.DataFrame(),
+        columns=SWING_1W_DISPLAY_COLUMNS,
+        raw_fallback=bundle.get("swing_candidates_1w", pd.DataFrame()),
+    )
+    swing_1m_view, swing_1m_notes = _prepare_swing_candidate_display_view(
+        swing_1m_display if isinstance(swing_1m_display, pd.DataFrame) else pd.DataFrame(),
+        columns=SWING_1M_DISPLAY_COLUMNS,
+        raw_fallback=bundle.get("swing_candidates_1m", pd.DataFrame()),
+    )
     base_meta = bundle.get("diagnostics", {}).get("base_meta", {})
     earnings_candidate_note = _build_earnings_candidate_table_note(base_meta)
     sector_compat_notes = sorted(set(today_sector_notes + sector_representatives_notes + weekly_sector_notes + monthly_sector_notes + quarter_sector_notes + swing_1w_notes + swing_1m_notes))
@@ -6920,7 +7818,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     _render_dataframe_or_reason(
         "1週間スイング候補銘柄",
         swing_1w_view,
-        reason=str(empty_reasons.get("swing_candidates_1w", "")),
+        reason=str(empty_reasons.get("swing_candidates_1w_display", empty_reasons.get("swing_candidates_1w", ""))),
         link_columns=True,
     )
     if earnings_candidate_note:
@@ -6928,7 +7826,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     _render_dataframe_or_reason(
         "1か月スイング候補銘柄",
         swing_1m_view,
-        reason=str(empty_reasons.get("swing_candidates_1m", "")),
+        reason=str(empty_reasons.get("swing_candidates_1m_display", empty_reasons.get("swing_candidates_1m", ""))),
         link_columns=True,
     )
     diagnostics = bundle.get("diagnostics", {})
