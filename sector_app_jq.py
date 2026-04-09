@@ -3931,7 +3931,7 @@ def _build_persistence_quality_payload(row: pd.Series) -> dict[str, Any]:
     sector_positive_ratio = float(row.get("sector_positive_ratio", 0.0) or 0.0)
     leader_concentration_share = float(row.get("leader_concentration_share", 0.0) or 0.0)
     if sector_rs_vs_topix <= 0.0:
-        warn_tags.append("RS<=0")
+        warn_tags.append("TOPIXを下回る")
         fail_reasons.append("rs_non_positive")
     if sector_constituent_count < 6.0:
         warn_tags.append("構成少")
@@ -7057,7 +7057,7 @@ def _persistence_gate_fail_warn_label(reason: Any) -> str:
         return ""
     tags: list[str] = []
     if "rs_non_positive" in raw:
-        tags.append("RS弱い")
+        tags.append("TOPIXを下回る")
     if "constituents_lt_6" in raw:
         tags.append("構成少")
     if "positive_ratio_lt_0.55" in raw:
@@ -7438,6 +7438,19 @@ def _coalesce_snapshot_series(frame: pd.DataFrame, candidates: list[str], *, str
     return pd.Series([pd.NA] * len(frame), index=frame.index, dtype="object")
 
 
+def _coalesce_snapshot_string_priority(frame: pd.DataFrame, candidates: list[str]) -> pd.Series:
+    result = pd.Series([""] * len(frame), index=frame.index, dtype="object")
+    for column in candidates:
+        if column not in frame.columns:
+            continue
+        formatter = _summarize_representative_value if column == "representative_stocks" else _stringify_snapshot_cell
+        candidate_values = frame[column].apply(formatter)
+        fill_mask = result.fillna("").astype(str).str.strip().eq("")
+        if fill_mask.any():
+            result.loc[fill_mask] = candidate_values.loc[fill_mask]
+    return result
+
+
 def _prepare_today_sector_view(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     compatibility_notes: list[str] = []
     if df is None or df.empty:
@@ -7448,7 +7461,7 @@ def _prepare_today_sector_view(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str
         compatibility_notes.append("today_rank")
     prepared["today_rank"] = _coalesce_snapshot_series(df, ["today_display_rank", "today_rank"])
     prepared["sector_name"] = _coalesce_snapshot_series(df, ["sector_name"], string_output=True)
-    prepared["representative_stock"] = _coalesce_snapshot_series(df, ["representative_stocks", "leaders", "representative_stock"], string_output=True)
+    prepared["representative_stock"] = _coalesce_snapshot_string_priority(df, ["representative_stocks", "leaders", "representative_stock"])
     prepared["sector_confidence"] = _coalesce_snapshot_series(df, ["sector_confidence"], string_output=True)
     prepared["sector_caution"] = _coalesce_snapshot_series(df, ["sector_caution"], string_output=True)
     prepared["industry_rank_live"] = _coalesce_snapshot_series(df, ["industry_rank_live"])
@@ -9016,17 +9029,17 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         reason=str(empty_reasons.get("today_sector_leaderboard", "intraday 条件を満たす本命セクターがありません。")),
     )
     _render_dataframe_or_reason(
-        "1週間主力セクター",
+        "1週間セクターランキング",
         weekly_sector_view,
         reason=str(empty_reasons.get("sector_persistence_1w", empty_reasons.get("weekly_sector_summary", ""))),
     )
     _render_dataframe_or_reason(
-        "1か月主力セクター",
+        "1か月セクターランキング",
         monthly_sector_view,
         reason=str(empty_reasons.get("sector_persistence_1m", empty_reasons.get("monthly_sector_summary", ""))),
     )
     _render_dataframe_or_reason(
-        "3か月主力セクター",
+        "3か月セクターランキング",
         quarter_sector_view,
         reason=str(empty_reasons.get("sector_persistence_3m", "")),
     )
