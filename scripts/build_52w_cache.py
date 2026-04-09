@@ -10,6 +10,13 @@ import requests
 BASE_URL = "https://api.jquants.com/v2"
 JST = ZoneInfo("Asia/Tokyo")
 OUTPUT_PATH = Path("data/sector_52w_cache.csv.gz")
+TRADING_DAYS_WINDOW = 260
+LATEST_PRICE_LOOKBACK_DAYS = 5
+DEFAULT_PAGE_SLEEP_SECONDS = 0.03
+DAILY_BARS_PAGE_SLEEP_SECONDS = 0.08
+DAILY_BARS_POST_FETCH_SLEEP_SECONDS = 0.08
+DAILY_BARS_MAX_RETRIES = 5
+RETRY_BACKOFF_CAP_SECONDS = 16.0
 
 
 def pick_first_existing(df: pd.DataFrame, candidates: list[str]) -> str:
@@ -26,7 +33,28 @@ def pick_optional_existing(df: pd.DataFrame, candidates: list[str]) -> str | Non
     return None
 
 
-def jquants_get_all(path: str, params: dict, api_key: str, max_retries: int = 3) -> list[dict]:
+def get_retry_delay_seconds(
+    response: requests.Response | None,
+    attempt: int,
+    cap_seconds: float = RETRY_BACKOFF_CAP_SECONDS,
+) -> float:
+    if response is not None:
+        retry_after = response.headers.get("Retry-After", "").strip()
+        if retry_after:
+            try:
+                return min(max(float(retry_after), 1.0), cap_seconds)
+            except ValueError:
+                pass
+    return min(float(2 ** attempt), cap_seconds)
+
+
+def jquants_get_all(
+    path: str,
+    params: dict,
+    api_key: str,
+    max_retries: int = 3,
+    page_sleep_seconds: float = DEFAULT_PAGE_SLEEP_SECONDS,
+) -> list[dict]:
     headers = {
         "x-api-key": api_key,
         "Accept": "application/json",
@@ -50,13 +78,13 @@ def jquants_get_all(path: str, params: dict, api_key: str, max_retries: int = 3)
                 if response.status_code == 200:
                     break
                 if response.status_code in {429, 500, 502, 503, 504} and attempt < max_retries - 1:
-                    time.sleep(min(2 ** attempt, 8))
+                    time.sleep(get_retry_delay_seconds(response, attempt))
                     continue
                 response.raise_for_status()
             except requests.RequestException as exc:
                 last_error = exc
                 if attempt < max_retries - 1:
-                    time.sleep(min(2 ** attempt, 8))
+                    time.sleep(get_retry_delay_seconds(response, attempt))
                     continue
                 raise RuntimeError(f"J-Quants API request failed: path={path}, params={request_params}") from exc
 
@@ -64,8 +92,12 @@ def jquants_get_all(path: str, params: dict, api_key: str, max_retries: int = 3)
             raise RuntimeError(f"J-Quants API request failed without response: path={path}, params={request_params}")
 
         if response.status_code != 200:
+            date_str = request_params.get("date")
             message = response.text[:500] if response.text else str(last_error)
-            raise RuntimeError(f"J-Quants API error: status={response.status_code}, url={response.url}, body={message}")
+            raise RuntimeError(
+                f"J-Quants API error: path={path}, date={date_str}, status={response.status_code}, "
+                f"url={response.url}, body={message}"
+            )
 
         js = response.json()
         rows = js.get("data", [])
@@ -76,7 +108,7 @@ def jquants_get_all(path: str, params: dict, api_key: str, max_retries: int = 3)
         if not pagination_key:
             break
 
-        time.sleep(0.03)
+        time.sleep(page_sleep_seconds)
 
     return rows_all
 
@@ -154,7 +186,14 @@ def get_master_df(api_key: str, date_str: str) -> pd.DataFrame:
 
 
 def get_price_df(api_key: str, date_str: str) -> pd.DataFrame:
-    rows = jquants_get_all("/equities/bars/daily", {"date": date_str}, api_key)
+    rows = jquants_get_all(
+        "/equities/bars/daily",
+        {"date": date_str},
+        api_key,
+        max_retries=DAILY_BARS_MAX_RETRIES,
+        page_sleep_seconds=DAILY_BARS_PAGE_SLEEP_SECONDS,
+    )
+    time.sleep(DAILY_BARS_POST_FETCH_SLEEP_SECONDS)
     df = pd.DataFrame(rows)
     if df.empty:
         return pd.DataFrame(columns=["Code", "Date", "Close", "High"])
@@ -181,9 +220,31 @@ def resolve_latest_price_date(api_key: str, trading_dates: list[str], lookback_d
     raise RuntimeError("価格配信済み最新営業日を特定できませんでした。")
 
 
+def trim_trading_dates_to_latest(trading_dates: list[str], latest_date: str, n: int) -> list[str]:
+    try:
+        latest_index = trading_dates.index(latest_date)
+    except ValueError as exc:
+        raise RuntimeError(f"latest_date が営業日一覧に存在しません: latest_date={latest_date}") from exc
+
+    trimmed = trading_dates[max(0, latest_index - n + 1): latest_index + 1]
+    if len(trimmed) < n:
+        raise RuntimeError(
+            f"52週高値計算に必要な営業日数が不足しています。latest_date={latest_date}, days={len(trimmed)}"
+        )
+    return trimmed
+
+
 def build_52w_cache(api_key: str) -> pd.DataFrame:
-    trading_dates = get_recent_trading_dates(api_key, n=260)
-    latest_date, latest_price_df = resolve_latest_price_date(api_key, trading_dates, lookback_days=5)
+    trading_dates = get_recent_trading_dates(
+        api_key,
+        n=TRADING_DAYS_WINDOW + LATEST_PRICE_LOOKBACK_DAYS - 1,
+    )
+    latest_date, latest_price_df = resolve_latest_price_date(
+        api_key,
+        trading_dates,
+        lookback_days=LATEST_PRICE_LOOKBACK_DAYS,
+    )
+    trading_dates = trim_trading_dates_to_latest(trading_dates, latest_date, n=TRADING_DAYS_WINDOW)
     master = get_master_df(api_key, latest_date)
     target_codes = set(master["Code"].astype(str).tolist())
 
