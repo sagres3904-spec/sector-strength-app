@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-04-09T15:04:36.860718+00:00",
-  "status": "success",
-  "message": "latest_now.json updated at 2026-04-09T15:04:36.860718+00:00",
-  "request_mode": "now"
+  "last_run_at": "2026-04-09T15:08:45.494842+00:00",
+  "status": "running",
+  "message": "1530 snapshot refresh is running.",
+  "request_mode": "1530"
 }
