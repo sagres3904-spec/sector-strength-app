@@ -3968,39 +3968,49 @@ def _build_persistence_core_representatives(
     if "code" in raw_working.columns:
         raw_working["code"] = raw_working["code"].fillna("").astype(str)
     working = _exclude_non_corporate_products(raw_working, context=f"persistence_core_representatives_{horizon}")
-    residual_non_equity_pattern = re.compile(
-        r"上場信託|商品連動|投資口|受益証券|純金|純銀|純プラチナ|金価格|銀価格|プラチナ価格|REIT|リート|不動産投資法人",
+    available_metadata_columns = [
+        column
+        for column in [
+            "instrument_type",
+            "product_category",
+            "listing_category",
+            "underlying_index",
+            "market_code",
+            "exchange_name",
+            "sector_code",
+        ]
+        if column in raw_working.columns
+    ]
+    metadata_non_equity_pattern = re.compile(
+        r"ETF|ETN|ETP|REIT|リート|投資法人|不動産投資法人|TRUST|信託|投信|FUND|受益証券|INDEX|指数|連動|COMMODITY|商品|"
+        r"BOND|債券|国債|米国債|社債|TREASURY|SPDR|ISHARES|NEXT\s*FUNDS|MAXIS|TRACERS|ONE\s*ETF|"
+        r"レバレッジ|ブル|ベア|インバース|ダブルインバース",
         re.IGNORECASE,
     )
-    if not working.empty:
-        residual_non_equity_reason = working.apply(
-            lambda row: (
-                "residual_non_equity_pattern"
-                if residual_non_equity_pattern.search(
-                    _pick_first_non_empty_text(
-                        row.get("name", ""),
-                        row.get("instrument_type", ""),
-                        row.get("product_category", ""),
-                        row.get("listing_category", ""),
-                        row.get("underlying_index", ""),
-                    )
-                )
-                else ""
-            ),
-            axis=1,
-        )
-        if residual_non_equity_reason.astype(str).str.strip().ne("").any():
-            working = working.copy()
-            working["persistence_non_equity_reason"] = residual_non_equity_reason.fillna("").astype(str)
-            working = working[working["persistence_non_equity_reason"].astype(str).str.strip().eq("")].copy()
-    final_name_hard_block_pattern = re.compile(
-        r"ETF|ETN|上場投信|上場信託|指数連動|商品連動|投資口|REIT|リート|投資法人|不動産投資法人|受益証券|純金|純銀|純プラチナ|金価格|銀価格|プラチナ価格",
+    name_non_equity_pattern = re.compile(
+        r"ETF|ETN|ETP|REIT|リート|投資法人|不動産投資法人|上場投信|上場信託|投資信託|受益証券|指数連動|商品連動|商品指数|"
+        r"債券|国債|米国債|社債|純金|純銀|純プラチナ|金価格|銀価格|プラチナ価格|ゴールド.?シェア|シルバー.?シェア|"
+        r"プラチナ.?シェア|SPDR|ISHARES|I.?シェアーズ|NEXT\s*FUNDS|MAXIS|TRACERS|ONE\s*ETF|上場TRACER|"
+        r"ブル|ベア|レバレッジ|インバース|ダブルインバース",
         re.IGNORECASE,
     )
 
-    def _final_name_hard_block(value: Any) -> bool:
-        normalized_name = _normalize_security_text(value)
-        return bool(normalized_name) and bool(final_name_hard_block_pattern.search(normalized_name))
+    def _is_non_equity_candidate(row: pd.Series) -> bool:
+        non_corporate_flag = row.get("is_non_corporate_product", False)
+        if pd.notna(non_corporate_flag) and bool(non_corporate_flag):
+            return True
+        non_corporate_reason = str(row.get("non_corporate_product_reason", "") or "").strip()
+        if non_corporate_reason:
+            return True
+        if _classify_non_corporate_product_row(row):
+            return True
+        metadata_text = _pick_first_non_empty_text(*(row.get(column, "") for column in available_metadata_columns))
+        if metadata_text and metadata_non_equity_pattern.search(metadata_text):
+            return True
+        normalized_name = _normalize_security_text(row.get("name", ""))
+        if normalized_name and name_non_equity_pattern.search(normalized_name):
+            return True
+        return False
 
     target_sector_names = set(result["sector_name"].tolist())
     for sector_key in result["sector_name"].tolist():
@@ -4017,21 +4027,8 @@ def _build_persistence_core_representatives(
                 if raw_group["name"].fillna("").astype(str).str.strip().eq("").all():
                     sector_reason.append("blank_name_only")
                 annotated_raw_group = _annotate_non_corporate_products(raw_group)
-                if not annotated_raw_group.empty and annotated_raw_group.get("is_non_corporate_product", pd.Series(False, index=annotated_raw_group.index)).fillna(False).all():
+                if not annotated_raw_group.empty and annotated_raw_group.apply(_is_non_equity_candidate, axis=1).all():
                     sector_reason.append("non_corporate_products_only")
-                elif not raw_group.empty:
-                    residual_text = raw_group.apply(
-                        lambda row: _pick_first_non_empty_text(
-                            row.get("name", ""),
-                            row.get("instrument_type", ""),
-                            row.get("product_category", ""),
-                            row.get("listing_category", ""),
-                            row.get("underlying_index", ""),
-                        ),
-                        axis=1,
-                    )
-                    if residual_text.astype(str).apply(lambda value: bool(residual_non_equity_pattern.search(_normalize_security_text(value)))).all():
-                        sector_reason.append("residual_non_equity_only")
                 for column in numeric_columns:
                     if column == "avg_turnover_20d":
                         if not _coerce_numeric(raw_group[column]).fillna(0.0).gt(0.0).any():
@@ -4048,7 +4045,7 @@ def _build_persistence_core_representatives(
                 eligible = eligible[eligible[column].gt(0.0)]
             else:
                 eligible = eligible[eligible[column].notna()]
-        eligible = eligible[~eligible["name"].apply(_final_name_hard_block)].copy()
+        eligible = eligible[~eligible.apply(_is_non_equity_candidate, axis=1)].copy()
         if "code" in eligible.columns:
             eligible = eligible.drop_duplicates("code")
         else:
@@ -4057,7 +4054,7 @@ def _build_persistence_core_representatives(
             sector_reason: list[str] = []
             if raw_group["name"].fillna("").astype(str).str.strip().eq("").all():
                 sector_reason.append("blank_name_only")
-            elif raw_group["name"].apply(_final_name_hard_block).all():
+            elif _annotate_non_corporate_products(raw_group).apply(_is_non_equity_candidate, axis=1).all():
                 sector_reason.append("non_corporate_products_only")
             for column in numeric_columns:
                 if column == "avg_turnover_20d":
@@ -4076,7 +4073,7 @@ def _build_persistence_core_representatives(
         )
         chosen_rows: list[pd.Series] = []
         for _, candidate_row in sorted_eligible.iterrows():
-            if _final_name_hard_block(candidate_row.get("name", "")):
+            if _is_non_equity_candidate(candidate_row):
                 continue
             chosen_rows.append(candidate_row)
             if len(chosen_rows) >= 3:
