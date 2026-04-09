@@ -4612,11 +4612,10 @@ def _build_sector_persistence_tables(base_df: pd.DataFrame, *, display_base_df: 
         frame["core_representatives"] = frame.get("core_representatives", pd.Series("", index=frame.index)).fillna("").astype(str)
         frame["core_representatives_count"] = _coerce_numeric(frame.get("core_representatives_count", pd.Series(0, index=frame.index))).fillna(0).astype(int)
         frame["core_representatives_reason"] = frame.get("core_representatives_reason", pd.Series("", index=frame.index)).fillna("").astype(str)
-        frame = frame[frame["sector_display_eligible"]].copy()
-        if frame.empty:
-            return _empty_persistence_table()
+        gate_warn = frame["sector_gate_fail_reason"].apply(_persistence_gate_fail_warn_label)
+        frame.loc[frame["quality_warn"].eq("") & gate_warn.ne(""), "quality_warn"] = gate_warn[frame["quality_warn"].eq("") & gate_warn.ne("")]
         frame = frame.sort_values(secondary_sort_columns, ascending=secondary_sort_ascending, kind="mergesort").reset_index(drop=True)
-        frame["persistence_rank"] = range(1, len(frame) + 1)
+        frame["persistence_rank"] = _coerce_numeric(frame["persistence_rank"]).round().astype("Int64")
         return frame
 
     return {"1w": _build("1w", "sector_rank_1w"), "1m": _build("1m", "sector_rank_1m"), "3m": _build("3m", "sector_rank_3m")}
@@ -4852,27 +4851,36 @@ def _build_sector_representatives(scored_candidates: pd.DataFrame) -> pd.DataFra
         ).copy()
         quality = sector_group[sector_group["rep_quality_pass"].fillna(False)].copy()
         chosen = pd.DataFrame()
+        fallback_reason = "fallback_no_clear_leader"
+        fallback_pool = sector_group[
+            (~sector_group["rep_hard_block"].fillna(False))
+            & (sector_group["rep_centrality_pass"].fillna(False))
+            & (_coerce_numeric(sector_group["rep_score_sanity"]).fillna(0.0) >= -0.25)
+        ].copy()
+        if fallback_pool.empty:
+            fallback_reason = "fallback_insufficient_candidates"
+            fallback_pool = sector_group[
+                (~sector_group["rep_hard_block"].fillna(False))
+                & (_coerce_numeric(sector_group["rep_score_sanity"]).fillna(0.0) >= -0.50)
+            ].copy()
+        if fallback_pool.empty:
+            fallback_pool = sector_group[(~sector_group["rep_hard_block"].fillna(False))].copy()
         if not quality.empty:
             chosen = quality.head(3).copy()
             chosen["representative_quality_flag"] = "quality_pass"
+            if len(chosen) < 3 and not fallback_pool.empty:
+                existing_codes = set(chosen.get("code", pd.Series(dtype=str)).astype(str).tolist())
+                supplement = fallback_pool[~fallback_pool.get("code", pd.Series(dtype=str)).astype(str).isin(existing_codes)].head(3 - len(chosen)).copy()
+                if not supplement.empty:
+                    supplement["rep_selected_reason"] = "center_fallback_leader"
+                    supplement["rep_fallback_reason"] = fallback_reason
+                    supplement["representative_fallback_reason"] = fallback_reason
+                    supplement["representative_quality_flag"] = "quality_warn"
+                    chosen = pd.concat([chosen, supplement], ignore_index=True, sort=False)
         else:
-            fallback_reason = "fallback_no_clear_leader"
-            fallback_pool = sector_group[
-                (~sector_group["rep_hard_block"].fillna(False))
-                & (sector_group["rep_centrality_pass"].fillna(False))
-                & (_coerce_numeric(sector_group["rep_score_sanity"]).fillna(0.0) >= -0.25)
-            ].copy()
-            if fallback_pool.empty:
-                fallback_reason = "fallback_insufficient_candidates"
-                fallback_pool = sector_group[
-                    (~sector_group["rep_hard_block"].fillna(False))
-                    & (_coerce_numeric(sector_group["rep_score_sanity"]).fillna(0.0) >= -0.50)
-                ].copy()
-            if fallback_pool.empty:
-                fallback_pool = sector_group[(~sector_group["rep_hard_block"].fillna(False))].copy()
             if fallback_pool.empty:
                 continue
-            chosen = fallback_pool.head(1).copy()
+            chosen = fallback_pool.head(3).copy()
             chosen["rep_selected_reason"] = "center_fallback_leader"
             chosen["rep_fallback_reason"] = fallback_reason
             chosen["representative_fallback_reason"] = fallback_reason
@@ -5640,10 +5648,6 @@ def _hard_block_reason_3m_v2(row: pd.Series) -> str:
         reasons.append("finance_risk")
     if bool(row.get("current_price_unavailable")):
         reasons.append("no_live_price")
-    if bool(row.get("sector_gate_fail_3m")):
-        reasons.append("sector_gate_failed")
-    if bool(row.get("month_confirmation_broken_3m")):
-        reasons.append("1m_confirmation_broken")
     if bool(row.get("severe_extension_flag_1m")):
         reasons.append("severe_extension")
     return "|".join(dict.fromkeys(reasons))
@@ -5915,6 +5919,78 @@ def _apply_swing_display_cap(
         sector_counts[sector_name] = sector_counts.get(sector_name, 0) + 1
     kept = frame.loc[kept_indices].copy().reset_index(drop=True)
     return kept, pruned_codes
+
+
+def _append_warning_note(base_text: Any, warning: str) -> str:
+    text = str(base_text or "").strip()
+    warn = str(warning or "").strip()
+    if not warn:
+        return text
+    if not text:
+        return warn
+    if warn in text:
+        return text
+    return f"{text} / {warn}"
+
+
+def _fill_swing_display_minimum(
+    primary: pd.DataFrame,
+    fallback: pd.DataFrame,
+    *,
+    min_rows: int,
+    total_limit: int,
+    sector_col: str,
+    limit_per_sector: int,
+) -> pd.DataFrame:
+    if min_rows <= 0:
+        return primary.copy() if isinstance(primary, pd.DataFrame) else pd.DataFrame()
+    if (primary is None or primary.empty) and (fallback is None or fallback.empty):
+        return pd.DataFrame(columns=primary.columns if isinstance(primary, pd.DataFrame) else (fallback.columns if isinstance(fallback, pd.DataFrame) else []))
+    result = primary.copy() if isinstance(primary, pd.DataFrame) else pd.DataFrame(columns=fallback.columns)
+    if result.empty and isinstance(fallback, pd.DataFrame):
+        result = pd.DataFrame(columns=fallback.columns)
+    fallback_frame = fallback.copy() if isinstance(fallback, pd.DataFrame) else pd.DataFrame(columns=result.columns)
+    existing_codes = set(result.get("code", pd.Series(dtype=str)).astype(str).tolist()) if not result.empty else set()
+    sector_counts: dict[str, int] = {}
+    if not result.empty and sector_col in result.columns:
+        sector_counts = result[sector_col].fillna("").astype(str).value_counts().to_dict()
+    deferred_rows: list[pd.Series] = []
+
+    def _try_append(row: pd.Series, *, ignore_sector_cap: bool) -> bool:
+        nonlocal result, existing_codes, sector_counts
+        if len(result) >= total_limit:
+            return False
+        code = str(row.get("code", "") or "")
+        if code and code in existing_codes:
+            return False
+        sector_name = str(row.get(sector_col, "") or "")
+        if not ignore_sector_cap and sector_counts.get(sector_name, 0) >= limit_per_sector:
+            return False
+        result = pd.concat([result, pd.DataFrame([row])], ignore_index=True, sort=False)
+        if code:
+            existing_codes.add(code)
+        sector_counts[sector_name] = sector_counts.get(sector_name, 0) + 1
+        return True
+
+    for _, row in fallback_frame.iterrows():
+        if len(result) >= total_limit:
+            break
+        code = str(row.get("code", "") or "")
+        if code and code in existing_codes:
+            continue
+        sector_name = str(row.get(sector_col, "") or "")
+        if sector_counts.get(sector_name, 0) >= limit_per_sector:
+            deferred_rows.append(row)
+            continue
+        _try_append(row, ignore_sector_cap=False)
+        if len(result) >= min_rows:
+            break
+    if len(result) < min_rows:
+        for row in deferred_rows:
+            if len(result) >= min_rows or len(result) >= total_limit:
+                break
+            _try_append(row, ignore_sector_cap=True)
+    return result.reset_index(drop=True)
 
 
 def _empty_swing_candidate_audit_frame() -> pd.DataFrame:
@@ -6211,9 +6287,9 @@ def _build_swing_candidate_tables_v2(
     working["belongs_persistence_sector_1w"] = working["sector_name"].isin(top_1w_sectors)
     working["belongs_persistence_sector"] = working["sector_name"].isin(top_1m_sectors | top_3m_sectors)
     working["belongs_persistence_sector_3m"] = working["sector_name"].isin(top_3m_sectors)
-    working["in_scope_1w"] = working["belongs_persistence_sector_1w"] & working["sector_gate_pass_1w"]
-    working["in_scope_1m"] = working["belongs_persistence_sector"] & working["sector_gate_pass_1m"]
-    working["in_scope_3m"] = working["belongs_persistence_sector_3m"] & working["sector_gate_pass_3m"]
+    working["in_scope_1w"] = working["belongs_persistence_sector_1w"] | working["belongs_today_sector"]
+    working["in_scope_1m"] = working["belongs_persistence_sector"]
+    working["in_scope_3m"] = working["belongs_persistence_sector_3m"]
     working["sector_tailwind_band_1w"] = working["persistence_rank_1w"].apply(lambda value: _tailwind_band_from_rank(value, strong_max=5, mid_max=10))
     working["sector_tailwind_band_1m"] = working.apply(
         lambda row: "strong"
@@ -6301,7 +6377,7 @@ def _build_swing_candidate_tables_v2(
         working["liquidity_ok"]
         | (_score_percentile(working["avg_turnover_20d"]).fillna(0.0) >= 0.55)
     )
-    working["pass_quality_gate_3m"] = working["liquidity_ok"] & ~working["earnings_risk_flag_1m"] & ~working["finance_risk_flag"] & working["sector_gate_pass_3m"]
+    working["pass_quality_gate_3m"] = working["liquidity_ok"] & ~working["earnings_risk_flag_1m"] & ~working["finance_risk_flag"] & working["in_scope_3m"]
     working["sector_gate_fail_3m"] = ~working["sector_gate_pass_3m"]
     working["hard_block_reason_raw_3m"] = working.apply(_hard_block_reason_3m_v2, axis=1)
 
@@ -6533,6 +6609,87 @@ def _build_swing_candidate_tables_v2(
     working["entry_fit_priority_1m"] = working["entry_fit_1m"].map(_entry_fit_sort_priority)
     working["entry_fit_priority_3m"] = working["entry_fit_3m"].map(_entry_fit_sort_priority)
 
+    def _project_swing_candidates(source: pd.DataFrame, *, horizon: str) -> pd.DataFrame:
+        if source is None or source.empty:
+            return pd.DataFrame()
+        if horizon == "1w":
+            gate_col = "sector_gate_pass_1w"
+            sort_columns = [gate_col, "entry_fit_priority_1w", "sector_confidence_priority_1w", "candidate_quality_score_1w", "pass_score_gate_1w", "swing_score_1w", "live_ret_vs_prev_close", "live_turnover_value", "rs_vs_topix_1w", "price_vs_ma20_abs"]
+            ascending = [False, True, False, False, False, False, False, False, False, True]
+            selected_columns = ["code", "name", "sector_name", "candidate_quality_1w", "entry_fit_1w", "selection_reason_1w", "risk_note_1w", "candidate_commentary_1w", "entry_stance_raw_1w", "entry_stance_label_1w", "stretch_caution_label_1w", "watch_reason_label_1w", "swing_score_1w", "rs_vs_topix_1w", "live_ret_vs_prev_close", "current_price", "current_price_unavailable", "live_turnover_value", "live_turnover_unavailable", "earnings_buffer_days", "nikkei_search", "material_link", gate_col]
+            rename_map = {
+                "candidate_quality_1w": "candidate_quality",
+                "entry_fit_1w": "entry_fit",
+                "selection_reason_1w": "selection_reason",
+                "risk_note_1w": "risk_note",
+                "candidate_commentary_1w": "candidate_commentary",
+                "entry_stance_raw_1w": "entry_stance_raw",
+                "entry_stance_label_1w": "entry_stance_label",
+                "stretch_caution_label_1w": "stretch_caution_label",
+                "watch_reason_label_1w": "watch_reason_label",
+            }
+        elif horizon == "3m":
+            gate_col = "sector_gate_pass_3m"
+            sort_columns = [gate_col, "entry_fit_priority_3m", "sector_confidence_priority_3m", "candidate_quality_score_3m", "pass_score_gate_3m", "swing_score_3m", "rs_vs_topix_3m", "ret_3m", "avg_turnover_20d"]
+            ascending = [False, True, False, False, False, False, False, False, False]
+            selected_columns = ["code", "name", "sector_name", "candidate_quality_3m", "entry_fit_3m", "selection_reason_3m", "risk_note_3m", "candidate_commentary_3m", "entry_stance_raw_3m", "entry_stance_label_3m", "stretch_caution_label_3m", "watch_reason_label_3m", "swing_score_3m", "rs_vs_topix_3m", "ret_3m", "avg_turnover_20d", "live_ret_vs_prev_close", "current_price", "current_price_unavailable", "live_turnover_value", "live_turnover_unavailable", "earnings_buffer_days", "nikkei_search", "material_link", gate_col]
+            rename_map = {
+                "candidate_quality_3m": "candidate_quality",
+                "entry_fit_3m": "entry_fit",
+                "selection_reason_3m": "selection_reason",
+                "risk_note_3m": "risk_note",
+                "candidate_commentary_3m": "candidate_commentary",
+                "entry_stance_raw_3m": "entry_stance_raw",
+                "entry_stance_label_3m": "entry_stance_label",
+                "stretch_caution_label_3m": "stretch_caution_label",
+                "watch_reason_label_3m": "watch_reason_label",
+            }
+        else:
+            gate_col = "sector_gate_pass_1m"
+            sort_columns = [gate_col, "entry_fit_priority_1m", "sector_confidence_priority_1m", "candidate_quality_score_1m", "pass_score_gate_1m", "swing_score_1m", "rs_vs_topix_1m", "rs_vs_topix_3m", "price_vs_ma20_abs", "live_turnover_value"]
+            ascending = [False, True, False, False, False, False, False, False, True, False]
+            selected_columns = ["code", "name", "sector_name", "candidate_quality_1m", "entry_fit_1m", "selection_reason_1m", "risk_note_1m", "candidate_commentary_1m", "entry_stance_raw_1m", "entry_stance_label_1m", "stretch_caution_label_1m", "watch_reason_label_1m", "swing_score_1m", "rs_vs_topix_1m", "rs_vs_topix_3m", "live_ret_vs_prev_close", "current_price", "current_price_unavailable", "live_turnover_value", "live_turnover_unavailable", "price_vs_ma20_pct", "earnings_buffer_days", "finance_health_flag", "nikkei_search", "material_link", gate_col]
+            rename_map = {
+                "candidate_quality_1m": "candidate_quality",
+                "entry_fit_1m": "entry_fit",
+                "selection_reason_1m": "selection_reason",
+                "risk_note_1m": "risk_note",
+                "candidate_commentary_1m": "candidate_commentary",
+                "entry_stance_raw_1m": "entry_stance_raw",
+                "entry_stance_label_1m": "entry_stance_label",
+                "stretch_caution_label_1m": "stretch_caution_label",
+                "watch_reason_label_1m": "watch_reason_label",
+            }
+        ordered = source.sort_values(sort_columns, ascending=ascending, kind="mergesort").copy()
+        table = ordered[selected_columns].reset_index(drop=True).rename(columns=rename_map)
+        gate_pass = ordered.get(gate_col, pd.Series(True, index=ordered.index)).fillna(False).astype(bool).reset_index(drop=True)
+        if "risk_note" in table.columns:
+            table["risk_note"] = [
+                _append_warning_note(value, "セクターgate未達") if not bool(pass_flag) else str(value or "").strip()
+                for value, pass_flag in zip(table["risk_note"], gate_pass)
+            ]
+        return table.drop(columns=[gate_col], errors="ignore")
+
+    def _finalize_swing_table(primary: pd.DataFrame, fallback: pd.DataFrame, *, total_limit: int, limit_per_sector: int) -> tuple[pd.DataFrame, set[str]]:
+        capped_primary, _ = _apply_swing_display_cap(
+            primary,
+            sector_col="sector_name",
+            total_limit=total_limit,
+            limit_per_sector=limit_per_sector,
+        )
+        min_rows = min(3, total_limit)
+        final = _fill_swing_display_minimum(
+            capped_primary,
+            fallback,
+            min_rows=min_rows,
+            total_limit=total_limit,
+            sector_col="sector_name",
+            limit_per_sector=limit_per_sector,
+        )
+        all_codes = set(pd.concat([primary, fallback], ignore_index=True).get("code", pd.Series(dtype=str)).astype(str).tolist()) if (not primary.empty or not fallback.empty) else set()
+        selected_codes = set(final.get("code", pd.Series(dtype=str)).astype(str).tolist()) if not final.empty else set()
+        return final, {code for code in all_codes if code and code not in selected_codes}
+
     swing_1w_source = working[
         working["candidate_quality_1w"].isin(["高", "中"])
         & working["entry_fit_1w"].isin(["買い候補", "監視候補"])
@@ -6548,160 +6705,47 @@ def _build_swing_candidate_tables_v2(
         & working["entry_fit_3m"].isin(["買い候補", "監視候補"])
         & working["pass_score_gate_3m"]
     ].copy()
-    swing_1w = (
-        swing_1w_source.sort_values(
-            ["entry_fit_priority_1w", "sector_confidence_priority_1w", "candidate_quality_score_1w", "swing_score_1w", "live_ret_vs_prev_close", "live_turnover_value", "rs_vs_topix_1w", "price_vs_ma20_abs"],
-            ascending=[True, False, False, False, False, False, False, True],
-            kind="mergesort",
-        )[
-            [
-                "code",
-                "name",
-                "sector_name",
-                "candidate_quality_1w",
-                "entry_fit_1w",
-                "selection_reason_1w",
-                "risk_note_1w",
-                "candidate_commentary_1w",
-                "entry_stance_raw_1w",
-                "entry_stance_label_1w",
-                "stretch_caution_label_1w",
-                "watch_reason_label_1w",
-                "swing_score_1w",
-                "rs_vs_topix_1w",
-                "live_ret_vs_prev_close",
-                "current_price",
-                "current_price_unavailable",
-                "live_turnover_value",
-                "live_turnover_unavailable",
-                "earnings_buffer_days",
-                "nikkei_search",
-                "material_link",
-            ]
-        ].reset_index(drop=True).rename(
-            columns={
-                "candidate_quality_1w": "candidate_quality",
-                "entry_fit_1w": "entry_fit",
-                "selection_reason_1w": "selection_reason",
-                "risk_note_1w": "risk_note",
-                "candidate_commentary_1w": "candidate_commentary",
-                "entry_stance_raw_1w": "entry_stance_raw",
-                "entry_stance_label_1w": "entry_stance_label",
-                "stretch_caution_label_1w": "stretch_caution_label",
-                "watch_reason_label_1w": "watch_reason_label",
-            }
-        )
+    swing_1w_fallback_source = working[
+        working["in_scope_1w"]
+        & working["hard_block_reason_raw_1w"].astype(str).str.strip().eq("")
+    ].copy()
+    swing_1m_fallback_source = working[
+        working["in_scope_1m"]
+        & working["hard_block_reason_raw_1m"].astype(str).str.strip().eq("")
+    ].copy()
+    swing_3m_fallback_source = working[
+        working["in_scope_3m"]
+        & working["hard_block_reason_raw_3m"].astype(str).str.strip().eq("")
+    ].copy()
+    swing_1w_primary = _project_swing_candidates(swing_1w_source, horizon="1w")
+    swing_1m_primary = _project_swing_candidates(swing_1m_source, horizon="1m")
+    swing_3m_primary = _project_swing_candidates(swing_3m_source, horizon="3m")
+    swing_1w_fallback = _project_swing_candidates(swing_1w_fallback_source, horizon="1w")
+    swing_1m_fallback = _project_swing_candidates(swing_1m_fallback_source, horizon="1m")
+    swing_3m_fallback = _project_swing_candidates(swing_3m_fallback_source, horizon="3m")
+    display_total_limit_1w = int(selection_config.get("display_total_limit_1w", 5) or 5)
+    display_total_limit_1m = int(selection_config.get("display_total_limit_1m", 5) or 5)
+    display_total_limit_3m = int(selection_config.get("display_total_limit_3m", 5) or 5)
+    display_sector_limit_1w = int(selection_config.get("display_sector_limit_1w", 2) or 2)
+    display_sector_limit_1m = int(selection_config.get("display_sector_limit_1m", 2) or 2)
+    display_sector_limit_3m = int(selection_config.get("display_sector_limit_3m", 2) or 2)
+    swing_1w, pruned_codes_1w = _finalize_swing_table(
+        swing_1w_primary,
+        swing_1w_fallback,
+        total_limit=display_total_limit_1w,
+        limit_per_sector=display_sector_limit_1w,
     )
-    swing_1m = (
-        swing_1m_source.sort_values(
-            ["entry_fit_priority_1m", "sector_confidence_priority_1m", "candidate_quality_score_1m", "swing_score_1m", "rs_vs_topix_1m", "rs_vs_topix_3m", "price_vs_ma20_abs", "live_turnover_value"],
-            ascending=[True, False, False, False, False, False, True, False],
-            kind="mergesort",
-        )[
-            [
-                "code",
-                "name",
-                "sector_name",
-                "candidate_quality_1m",
-                "entry_fit_1m",
-                "selection_reason_1m",
-                "risk_note_1m",
-                "candidate_commentary_1m",
-                "entry_stance_raw_1m",
-                "entry_stance_label_1m",
-                "stretch_caution_label_1m",
-                "watch_reason_label_1m",
-                "swing_score_1m",
-                "rs_vs_topix_1m",
-                "rs_vs_topix_3m",
-                "live_ret_vs_prev_close",
-                "current_price",
-                "current_price_unavailable",
-                "live_turnover_value",
-                "live_turnover_unavailable",
-                "price_vs_ma20_pct",
-                "earnings_buffer_days",
-                "finance_health_flag",
-                "nikkei_search",
-                "material_link",
-            ]
-        ].reset_index(drop=True).rename(
-            columns={
-                "candidate_quality_1m": "candidate_quality",
-                "entry_fit_1m": "entry_fit",
-                "selection_reason_1m": "selection_reason",
-                "risk_note_1m": "risk_note",
-                "candidate_commentary_1m": "candidate_commentary",
-                "entry_stance_raw_1m": "entry_stance_raw",
-                "entry_stance_label_1m": "entry_stance_label",
-                "stretch_caution_label_1m": "stretch_caution_label",
-                "watch_reason_label_1m": "watch_reason_label",
-            }
-        )
+    swing_1m, pruned_codes_1m = _finalize_swing_table(
+        swing_1m_primary,
+        swing_1m_fallback,
+        total_limit=display_total_limit_1m,
+        limit_per_sector=display_sector_limit_1m,
     )
-    swing_3m = (
-        swing_3m_source.sort_values(
-            ["entry_fit_priority_3m", "sector_confidence_priority_3m", "candidate_quality_score_3m", "swing_score_3m", "rs_vs_topix_3m", "ret_3m", "avg_turnover_20d"],
-            ascending=[True, False, False, False, False, False, False],
-            kind="mergesort",
-        )[
-            [
-                "code",
-                "name",
-                "sector_name",
-                "candidate_quality_3m",
-                "entry_fit_3m",
-                "selection_reason_3m",
-                "risk_note_3m",
-                "candidate_commentary_3m",
-                "entry_stance_raw_3m",
-                "entry_stance_label_3m",
-                "stretch_caution_label_3m",
-                "watch_reason_label_3m",
-                "swing_score_3m",
-                "rs_vs_topix_3m",
-                "ret_3m",
-                "avg_turnover_20d",
-                "live_ret_vs_prev_close",
-                "current_price",
-                "current_price_unavailable",
-                "live_turnover_value",
-                "live_turnover_unavailable",
-                "earnings_buffer_days",
-                "nikkei_search",
-                "material_link",
-            ]
-        ].reset_index(drop=True).rename(
-            columns={
-                "candidate_quality_3m": "candidate_quality",
-                "entry_fit_3m": "entry_fit",
-                "selection_reason_3m": "selection_reason",
-                "risk_note_3m": "risk_note",
-                "candidate_commentary_3m": "candidate_commentary",
-                "entry_stance_raw_3m": "entry_stance_raw",
-                "entry_stance_label_3m": "entry_stance_label",
-                "stretch_caution_label_3m": "stretch_caution_label",
-                "watch_reason_label_3m": "watch_reason_label",
-            }
-        )
-    )
-    swing_1w, pruned_codes_1w = _apply_swing_display_cap(
-        swing_1w,
-        sector_col="sector_name",
-        total_limit=int(selection_config.get("display_total_limit_1w", 5) or 5),
-        limit_per_sector=int(selection_config.get("display_sector_limit_1w", 2) or 2),
-    )
-    swing_1m, pruned_codes_1m = _apply_swing_display_cap(
-        swing_1m,
-        sector_col="sector_name",
-        total_limit=int(selection_config.get("display_total_limit_1m", 5) or 5),
-        limit_per_sector=int(selection_config.get("display_sector_limit_1m", 2) or 2),
-    )
-    swing_3m, pruned_codes_3m = _apply_swing_display_cap(
-        swing_3m,
-        sector_col="sector_name",
-        total_limit=int(selection_config.get("display_total_limit_3m", 5) or 5),
-        limit_per_sector=int(selection_config.get("display_sector_limit_3m", 2) or 2),
+    swing_3m, pruned_codes_3m = _finalize_swing_table(
+        swing_3m_primary,
+        swing_3m_fallback,
+        total_limit=display_total_limit_3m,
+        limit_per_sector=display_sector_limit_3m,
     )
     if not swing_1w.empty:
         swing_1w.insert(0, "candidate_rank_1w", range(1, len(swing_1w) + 1))
@@ -7007,6 +7051,26 @@ def _build_earnings_candidate_table_note(base_meta: dict[str, Any] | None) -> st
     return ""
 
 
+def _persistence_gate_fail_warn_label(reason: Any) -> str:
+    raw = str(reason or "").strip()
+    if not raw:
+        return ""
+    tags: list[str] = []
+    if "rs_non_positive" in raw:
+        tags.append("RS弱い")
+    if "constituents_lt_6" in raw:
+        tags.append("構成少")
+    if "positive_ratio_lt_0.55" in raw:
+        tags.append("広がり弱い")
+    if "leader_concentration_gt_0.40" in raw:
+        tags.append("偏重高い")
+    if "1m_confirmation_broken" in raw:
+        tags.append("1か月失速")
+    if raw.startswith("missing:"):
+        tags.append("判定列不足")
+    return " / ".join(dict.fromkeys([tag for tag in tags if tag]))
+
+
 TODAY_SECTOR_DISPLAY_COLUMNS = [
     "today_rank",
     "sector_name",
@@ -7308,6 +7372,32 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
     return prepared.reindex(columns=columns), compatibility_notes
 
 
+def _prepare_persistence_sector_view(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=PERSISTENCE_DISPLAY_COLUMNS), []
+    prepared = df.copy()
+    gate_warn = prepared.get("sector_gate_fail_reason", pd.Series("", index=prepared.index)).apply(_persistence_gate_fail_warn_label)
+    if "quality_warn" not in prepared.columns:
+        prepared["quality_warn"] = ""
+    prepared["quality_warn"] = prepared["quality_warn"].fillna("").astype(str)
+    empty_quality_mask = prepared["quality_warn"].eq("") & gate_warn.ne("")
+    prepared.loc[empty_quality_mask, "quality_warn"] = gate_warn[empty_quality_mask]
+    if "sector_caution" not in prepared.columns:
+        prepared["sector_caution"] = ""
+    prepared["sector_caution"] = prepared["sector_caution"].fillna("").astype(str)
+    empty_caution_mask = prepared["sector_caution"].eq("") & gate_warn.ne("")
+    prepared.loc[empty_caution_mask, "sector_caution"] = gate_warn[empty_caution_mask]
+    prepared["_gate_priority"] = prepared.get("sector_gate_pass", pd.Series(False, index=prepared.index)).fillna(False).astype(bool).astype(int) * -1
+    prepared["_rank_sort"] = _coerce_numeric(prepared.get("persistence_rank", pd.Series(pd.NA, index=prepared.index))).fillna(9999)
+    prepared["_sector_name_sort"] = prepared.get("sector_name", pd.Series("", index=prepared.index)).fillna("").astype(str)
+    prepared = prepared.sort_values(
+        ["_gate_priority", "_rank_sort", "_sector_name_sort"],
+        ascending=[True, True, True],
+        kind="mergesort",
+    ).drop(columns=["_gate_priority", "_rank_sort", "_sector_name_sort"], errors="ignore")
+    return _prepare_table_view(prepared, PERSISTENCE_DISPLAY_COLUMNS)
+
+
 def _summarize_representative_value(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
@@ -7358,7 +7448,7 @@ def _prepare_today_sector_view(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str
         compatibility_notes.append("today_rank")
     prepared["today_rank"] = _coalesce_snapshot_series(df, ["today_display_rank", "today_rank"])
     prepared["sector_name"] = _coalesce_snapshot_series(df, ["sector_name"], string_output=True)
-    prepared["representative_stock"] = _coalesce_snapshot_series(df, ["representative_stock", "representative_stocks", "leaders"], string_output=True)
+    prepared["representative_stock"] = _coalesce_snapshot_series(df, ["representative_stocks", "leaders", "representative_stock"], string_output=True)
     prepared["sector_confidence"] = _coalesce_snapshot_series(df, ["sector_confidence"], string_output=True)
     prepared["sector_caution"] = _coalesce_snapshot_series(df, ["sector_caution"], string_output=True)
     prepared["industry_rank_live"] = _coalesce_snapshot_series(df, ["industry_rank_live"])
@@ -8830,9 +8920,9 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         ),
         display_is_source_of_truth=isinstance(saved_representatives_display, pd.DataFrame) and not saved_representatives_display.empty,
     )
-    weekly_sector_view, weekly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1w", bundle.get("weekly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
-    monthly_sector_view, monthly_sector_notes = _prepare_table_view(bundle.get("sector_persistence_1m", bundle.get("monthly_sector_summary", pd.DataFrame())), PERSISTENCE_DISPLAY_COLUMNS)
-    quarter_sector_view, quarter_sector_notes = _prepare_table_view(bundle.get("sector_persistence_3m", pd.DataFrame()), PERSISTENCE_DISPLAY_COLUMNS)
+    weekly_sector_view, weekly_sector_notes = _prepare_persistence_sector_view(bundle.get("sector_persistence_1w", bundle.get("weekly_sector_summary", pd.DataFrame())))
+    monthly_sector_view, monthly_sector_notes = _prepare_persistence_sector_view(bundle.get("sector_persistence_1m", bundle.get("monthly_sector_summary", pd.DataFrame())))
+    quarter_sector_view, quarter_sector_notes = _prepare_persistence_sector_view(bundle.get("sector_persistence_3m", pd.DataFrame()))
     swing_1w_display = bundle.get("swing_candidates_1w_display", pd.DataFrame())
     swing_1m_display = bundle.get("swing_candidates_1m_display", pd.DataFrame())
     swing_3m_display = bundle.get("swing_candidates_3m_display", pd.DataFrame())
