@@ -5611,6 +5611,23 @@ def _entry_fit_3m_label_v2(
     return "見送り"
 
 
+def _resolve_earnings_forward_buffer_state(base_meta: dict[str, Any] | None) -> tuple[bool, str]:
+    if not isinstance(base_meta, dict) or not base_meta:
+        return False, ""
+    status = str(base_meta.get("earnings_dataset_status", base_meta.get("earnings_forward_buffer_status", "")) or "").strip()
+    rows_future_raw = base_meta.get("earnings_rows_future_window", pd.NA)
+    rows_future = int(_coerce_numeric(pd.Series([rows_future_raw])).fillna(0.0).iloc[0] or 0)
+    forward_available = bool(base_meta.get("earnings_forward_buffer_available", False))
+    forward_reason = str(base_meta.get("earnings_forward_buffer_reason", "") or "").strip()
+    if status == "ok" and rows_future > 0 and forward_available:
+        return False, ""
+    unavailable = bool(status) or rows_future <= 0 or (not forward_available)
+    if not unavailable:
+        return False, ""
+    reason = forward_reason or status or "unavailable"
+    return True, reason
+
+
 def _join_reason_tags(tags: list[str], *, fallback: str = "") -> str:
     text = _join_candidate_tags(tags)
     return text or str(fallback or "").strip()
@@ -5716,7 +5733,9 @@ def _swing_reason_3m_v2(row: pd.Series) -> str:
 def _swing_risk_note_1w_v2(row: pd.Series) -> str:
     tags = [
         "決算接近" if bool(row.get("earnings_risk_flag_1w")) else "",
-        "決算日不明" if bool(row.get("earnings_unknown_flag")) else "",
+        "決算前方データ不足で判定弱め" if bool(row.get("earnings_forward_buffer_unavailable")) and bool(row.get("earnings_unknown_flag")) else (
+            "決算日不明" if bool(row.get("earnings_unknown_flag")) else ""
+        ),
         "短期過熱気味" if bool(row.get("moderate_extension_flag_1w")) else "",
         "流動性注意" if not bool(row.get("liquidity_ok")) else "",
         "当日資金追認弱め" if not bool(row.get("pass_flow_gate_1w")) else "",
@@ -5727,7 +5746,9 @@ def _swing_risk_note_1w_v2(row: pd.Series) -> str:
 def _swing_risk_note_1m_v2(row: pd.Series) -> str:
     tags = [
         "決算接近" if bool(row.get("earnings_risk_flag_1m")) else "",
-        "決算日不明" if bool(row.get("earnings_unknown_flag")) else "",
+        "決算前方データ不足で判定弱め" if bool(row.get("earnings_forward_buffer_unavailable")) and bool(row.get("earnings_unknown_flag")) else (
+            "決算日不明" if bool(row.get("earnings_unknown_flag")) else ""
+        ),
         "20日線乖離大" if bool(row.get("moderate_extension_flag_1m")) else "",
         "財務注意" if bool(row.get("finance_risk_flag")) else "",
         "流動性注意" if not bool(row.get("liquidity_ok")) else "",
@@ -5738,7 +5759,9 @@ def _swing_risk_note_1m_v2(row: pd.Series) -> str:
 def _swing_risk_note_3m_v2(row: pd.Series) -> str:
     tags = [
         "決算接近" if bool(row.get("earnings_risk_flag_1m")) else "",
-        "決算日不明" if bool(row.get("earnings_unknown_flag")) else "",
+        "決算前方データ不足で判定弱め" if bool(row.get("earnings_forward_buffer_unavailable")) and bool(row.get("earnings_unknown_flag")) else (
+            "決算日不明" if bool(row.get("earnings_unknown_flag")) else ""
+        ),
         "財務注意" if bool(row.get("finance_risk_flag")) else "",
         "1か月側が失速" if bool(row.get("month_confirmation_broken_3m")) else "",
         "流動性注意" if not bool(row.get("liquidity_ok")) else "",
@@ -6096,6 +6119,7 @@ def _build_swing_candidate_tables_v2(
     today_sector_leaderboard: pd.DataFrame,
     persistence_tables: dict[str, pd.DataFrame],
     *,
+    base_meta: dict[str, Any] | None = None,
     selection_config: dict[str, float] | None = None,
 ) -> dict[str, pd.DataFrame]:
     selection_config = selection_config or SWING_SELECTION_CONFIG
@@ -6131,12 +6155,15 @@ def _build_swing_candidate_tables_v2(
     working["live_turnover_value"] = _coerce_numeric(working.get("live_turnover_value", working.get("live_turnover", pd.Series(pd.NA, index=working.index))))
     working["current_price_unavailable"] = working["current_price"].isna()
     working["live_turnover_unavailable"] = working["live_turnover_value"].isna()
+    earnings_forward_buffer_unavailable, earnings_forward_buffer_reason = _resolve_earnings_forward_buffer_state(base_meta)
     earnings_days_raw = _coerce_numeric(working.get("earnings_buffer_days", pd.Series([pd.NA] * len(working), index=working.index)))
     earnings_days = earnings_days_raw.fillna(999.0)
     earnings_data_available = bool(earnings_days_raw.notna().any())
     finance_score_raw = _coerce_numeric(working.get("finance_health_score", pd.Series([pd.NA] * len(working), index=working.index)))
     finance_score = finance_score_raw.fillna(0.0)
-    working["earnings_unknown_flag"] = earnings_days_raw.isna() & earnings_data_available
+    working["earnings_forward_buffer_unavailable"] = bool(earnings_forward_buffer_unavailable)
+    working["earnings_forward_buffer_reason"] = str(earnings_forward_buffer_reason or "")
+    working["earnings_unknown_flag"] = earnings_days_raw.isna() & (earnings_data_available | earnings_forward_buffer_unavailable)
     working["earnings_risk_flag_1w"] = earnings_days.lt(float(selection_config.get("earnings_hard_block_days_1w", 7) or 7)).fillna(False)
     working["earnings_risk_flag_1m"] = earnings_days.lt(float(selection_config.get("earnings_hard_block_days_1m", 7) or 7)).fillna(False)
     working["finance_risk_flag"] = finance_score_raw.lt(-1.0).fillna(False)
@@ -6391,9 +6418,10 @@ def _build_swing_candidate_tables_v2(
     working["candidate_breadth_component_1w"] = _score_percentile(working["sector_positive_ratio_1w"]) * 0.35
     working["candidate_liquidity_component_1w"] = _score_percentile(working["avg_turnover_20d"]) * 0.45
     working["candidate_earnings_component_1w"] = 0.0
-    working.loc[earnings_days >= 7.0, "candidate_earnings_component_1w"] = 0.15
-    working.loc[(earnings_days >= 3.0) & (earnings_days < 5.0), "candidate_earnings_component_1w"] = -0.35
-    working.loc[earnings_days < 3.0, "candidate_earnings_component_1w"] = -0.80
+    known_earnings_mask = earnings_days_raw.notna()
+    working.loc[known_earnings_mask & (earnings_days >= 7.0), "candidate_earnings_component_1w"] = 0.15
+    working.loc[known_earnings_mask & (earnings_days >= 3.0) & (earnings_days < 5.0), "candidate_earnings_component_1w"] = -0.35
+    working.loc[known_earnings_mask & (earnings_days < 3.0), "candidate_earnings_component_1w"] = -0.80
     working["swing_score_1w"] = (
         working["candidate_sector_component_1w"]
         + working["candidate_today_confirmation_component_1w"]
@@ -6442,9 +6470,10 @@ def _build_swing_candidate_tables_v2(
     working["candidate_breadth_component_1m"] = _score_percentile(working["sector_positive_ratio_1m"]) * 0.55
     working["candidate_concentration_component_1m"] = (1.0 - _score_percentile(working["leader_concentration_share_1m"])) * 0.45
     working["candidate_earnings_component_1m"] = 0.0
-    working.loc[earnings_days >= 10.0, "candidate_earnings_component_1m"] = 0.15
-    working.loc[(earnings_days >= 5.0) & (earnings_days < 7.0), "candidate_earnings_component_1m"] = -0.35
-    working.loc[earnings_days < 5.0, "candidate_earnings_component_1m"] = -0.80
+    working.loc[known_earnings_mask & (earnings_days >= 10.0), "candidate_earnings_component_1m"] = 0.15
+    working.loc[known_earnings_mask & (earnings_days >= 5.0) & (earnings_days < 7.0), "candidate_earnings_component_1m"] = -0.35
+    working.loc[known_earnings_mask & (earnings_days < 5.0), "candidate_earnings_component_1m"] = -0.80
+    working["candidate_earnings_component_3m"] = 0.0
     working["candidate_finance_component_1m"] = 0.0
     working.loc[finance_score >= 0.0, "candidate_finance_component_1m"] = 0.35
     working.loc[finance_score < -1.0, "candidate_finance_component_1m"] = -0.80
@@ -7040,7 +7069,7 @@ def _build_earnings_candidate_table_note(base_meta: dict[str, Any] | None) -> st
     forward_available = bool(base_meta.get("earnings_forward_buffer_available", False))
     forward_reason = str(base_meta.get("earnings_forward_buffer_reason", "") or "").strip()
     if not forward_available and forward_reason:
-        return f"決算前方データ不足のため決算接近判定は弱いです。reason={forward_reason} rows_raw={rows_raw} future_window={rows_future}"
+        return f"決算前方データ不足のため、決算接近判定は弱めです。reason={forward_reason} rows_raw={rows_raw} future_window={rows_future}"
     if status == "no_forward_events_in_dataset":
         date_part = f" event_date={min_date}" if min_date and min_date == max_date else (f" event_date={min_date}..{max_date}" if min_date or max_date else "")
         return f"決算カレンダーは前方日付を返していません。空欄は全銘柄共通のデータ未提供です。rows_raw={rows_raw} future_window={rows_future}.{date_part}"
@@ -8100,6 +8129,7 @@ def build_live_snapshot(
     base_df: pd.DataFrame,
     now_ts: datetime,
     deep_watch_df: pd.DataFrame | None = None,
+    base_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     deep_watch_sector_frame = deep_watch_df.copy() if isinstance(deep_watch_df, pd.DataFrame) else pd.DataFrame()
     merged = base_df.merge(board_df, on="code", how="inner")
@@ -8447,9 +8477,10 @@ def build_live_snapshot(
         stock_merged,
         baseline_today_sector_leaderboard,
         baseline_persistence_tables,
+        base_meta=base_meta,
         selection_config=SWING_SELECTION_CONFIG_BASELINE,
     )
-    swing_candidates = _build_swing_candidate_tables_v2(stock_merged, today_sector_leaderboard, persistence_tables)
+    swing_candidates = _build_swing_candidate_tables_v2(stock_merged, today_sector_leaderboard, persistence_tables, base_meta=base_meta)
     swing_candidates_1w_display = _build_swing_candidate_display_frame(swing_candidates["1w"], horizon="1w")
     swing_candidates_1m_display = _build_swing_candidate_display_frame(swing_candidates["1m"], horizon="1m")
     swing_candidates_3m_display = _build_swing_candidate_display_frame(swing_candidates["3m"], horizon="3m")
@@ -8537,6 +8568,12 @@ def build_live_snapshot(
         if not today_sector_leaderboard.empty
         else []
     )
+    if isinstance(base_meta, dict) and base_meta:
+        meta["earnings_forward_buffer_available"] = bool(base_meta.get("earnings_forward_buffer_available", False))
+        meta["earnings_forward_buffer_reason"] = str(base_meta.get("earnings_forward_buffer_reason", "") or "")
+        meta["earnings_dataset_status"] = str(base_meta.get("earnings_dataset_status", "") or "")
+        meta["earnings_rows_future_window"] = int(base_meta.get("earnings_rows_future_window", 0) or 0)
+        meta["earnings_rows_raw"] = int(base_meta.get("earnings_rows_raw", 0) or 0)
     return {
         "meta": meta,
         "sector_summary": today_sector_leaderboard,
@@ -8886,7 +8923,7 @@ def run_cli(mode: str, write_drive: bool = False, fast_check: bool = False) -> d
             ranking_df, industry_df, ranking_diag = build_market_scan_universe(base_df, settings, token)
         deep_watch_df, deep_watch_diag = select_deep_watch_universe(ranking_df, industry_df, base_df, settings, mode)
         board_df, board_diag = enrich_with_board_snapshot(deep_watch_df, base_df, settings, token, mode=mode)
-        bundle = build_live_snapshot(mode, ranking_df, industry_df, board_df, base_df, datetime.now(timezone.utc), deep_watch_df=deep_watch_df)
+        bundle = build_live_snapshot(mode, ranking_df, industry_df, board_df, base_df, datetime.now(timezone.utc), deep_watch_df=deep_watch_df, base_meta=base_meta)
         bundle["meta"]["earnings_forward_buffer_available"] = bool(base_meta.get("earnings_forward_buffer_available", False))
         bundle["meta"]["earnings_forward_buffer_reason"] = str(base_meta.get("earnings_forward_buffer_reason", "") or "")
         bundle["meta"]["earnings_dataset_status"] = str(base_meta.get("earnings_dataset_status", "") or "")
