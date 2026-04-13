@@ -1788,19 +1788,42 @@ def get_earnings_buffer_frame(trading_dates: list[str], *, api_key: str | None =
         "status": "empty_dataset",
         "rows_raw": 0,
         "rows_future_window": 0,
+        "rows_target_date": 0,
         "valid_code4_count": 0,
         "date_col": "",
         "code_col": "",
         "min_event_date": "",
         "max_event_date": "",
+        "target_date": "",
+        "request_mode": "",
+        "source_path": "",
     }
     if not trading_dates:
         meta["status"] = "no_trading_dates"
-        return pd.DataFrame(columns=["code", "earnings_buffer_days"]), meta
+        return pd.DataFrame(columns=["code", "earnings_buffer_days", "earnings_today_announcement_flag", "earnings_announcement_date"]), meta
     latest_date = pd.Timestamp(trading_dates[-1])
-    path = "/equities/earnings-calendar"
-    params = {"from": latest_date.strftime("%Y-%m-%d"), "to": (latest_date + timedelta(days=90)).strftime("%Y-%m-%d")}
-    df = _get_optional_dataset(path, params, dataset_name="earnings_calendar", api_key=api_key)
+    target_date = latest_date.normalize()
+    meta["target_date"] = target_date.strftime("%Y-%m-%d")
+    df = pd.DataFrame()
+    attempt_specs = [
+        ("/fins/announcement", {}, "announcement_latest"),
+        ("/fins/announcement", {"date": target_date.strftime("%Y-%m-%d")}, "announcement_date"),
+        (
+            "/equities/earnings-calendar",
+            {"from": target_date.strftime("%Y-%m-%d"), "to": (target_date + timedelta(days=90)).strftime("%Y-%m-%d")},
+            "calendar_forward_fallback",
+        ),
+    ]
+    for path, params, request_mode in attempt_specs:
+        current = _get_optional_dataset(path, params, dataset_name="earnings_announcement", api_key=api_key)
+        if not current.empty:
+            df = current
+            meta["request_mode"] = request_mode
+            meta["source_path"] = path
+            break
+    if meta["request_mode"] == "":
+        meta["request_mode"] = "announcement_latest"
+        meta["source_path"] = "/fins/announcement"
     meta["rows_raw"] = int(len(df))
     if not df.empty:
         code_col = pick_optional_existing(df, ["Code", "LocalCode", "code"])
@@ -1815,27 +1838,31 @@ def get_earnings_buffer_frame(trading_dates: list[str], *, api_key: str | None =
                 meta["min_event_date"] = valid_dates.min().strftime("%Y-%m-%d")
                 meta["max_event_date"] = valid_dates.max().strftime("%Y-%m-%d")
             meta["valid_code4_count"] = int(normalized_codes.map(_is_code4).sum())
-            meta["rows_future_window"] = int(((event_dates >= latest_date) & (event_dates <= latest_date + timedelta(days=90))).fillna(False).sum())
+            meta["rows_target_date"] = int(event_dates.dt.normalize().eq(target_date).fillna(False).sum())
+            meta["rows_future_window"] = int(meta["rows_target_date"])
             out = pd.DataFrame({"code": normalized_codes, "event_date": event_dates})
             out = out[out["code"].map(_is_code4)].dropna(subset=["event_date"])
-            out = out[(out["event_date"] >= latest_date) & (out["event_date"] <= latest_date + timedelta(days=90))].copy()
-            logger.info("earnings calendar endpoint used path=%s rows_raw=%s rows_filtered=%s", path, len(df), len(out))
+            out = out[out["event_date"].dt.normalize().eq(target_date)].copy()
+            logger.info("earnings announcement endpoint used path=%s rows_raw=%s rows_filtered=%s request_mode=%s target_date=%s", meta["source_path"], len(df), len(out), meta["request_mode"], meta["target_date"])
             if not out.empty:
-                out["earnings_buffer_days"] = (out["event_date"] - latest_date).dt.days
+                out["earnings_buffer_days"] = pd.Series([pd.NA] * len(out), index=out.index, dtype="Int64")
+                out["earnings_today_announcement_flag"] = True
+                out["earnings_announcement_date"] = out["event_date"].dt.strftime("%Y-%m-%d")
                 meta["status"] = "ok"
-                return out.sort_values(["code", "event_date"]).drop_duplicates("code")[["code", "earnings_buffer_days"]].reset_index(drop=True), meta
-            meta["status"] = "no_forward_events_in_dataset" if meta["rows_future_window"] == 0 else "no_usable_rows_after_filter"
+                return out.sort_values(["code", "event_date"]).drop_duplicates("code")[["code", "earnings_buffer_days", "earnings_today_announcement_flag", "earnings_announcement_date"]].reset_index(drop=True), meta
+            meta["status"] = "no_target_date_announcements" if meta["rows_target_date"] == 0 else "no_usable_rows_after_filter"
             logger.warning(
-                "earnings calendar unavailable for forward buffer latest_date=%s rows_raw=%s min_event_date=%s max_event_date=%s future_window_rows=%s",
-                latest_date.strftime("%Y-%m-%d"),
+                "earnings announcement target-date rows unavailable target_date=%s rows_raw=%s min_event_date=%s max_event_date=%s rows_target_date=%s request_mode=%s",
+                meta["target_date"],
                 meta["rows_raw"],
                 meta["min_event_date"],
                 meta["max_event_date"],
-                meta["rows_future_window"],
+                meta["rows_target_date"],
+                meta["request_mode"],
             )
-            return pd.DataFrame(columns=["code", "earnings_buffer_days"]), meta
+            return pd.DataFrame(columns=["code", "earnings_buffer_days", "earnings_today_announcement_flag", "earnings_announcement_date"]), meta
         meta["status"] = "missing_required_columns"
-    return pd.DataFrame(columns=["code", "earnings_buffer_days"]), meta
+    return pd.DataFrame(columns=["code", "earnings_buffer_days", "earnings_today_announcement_flag", "earnings_announcement_date"]), meta
 
 
 def get_finance_health_frame(trading_dates: list[str], *, api_key: str | None = None) -> pd.DataFrame:
@@ -1956,28 +1983,33 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
     base["reversal_candidates"] = (base["ret_1w"] > 0) & (base["ret_1m"] < 0)
     base["finance_health_score"] = _coerce_numeric(base.get("finance_health_score", pd.Series([pd.NA] * len(base))))
     base["finance_health_flag"] = base.get("finance_health_flag", pd.Series([pd.NA] * len(base))).fillna(pd.NA)
+    base["earnings_today_announcement_flag"] = base.get("earnings_today_announcement_flag", pd.Series(False, index=base.index)).fillna(False).astype(bool)
+    base["earnings_announcement_date"] = base.get("earnings_announcement_date", pd.Series("", index=base.index)).fillna("").astype(str)
     base["material_title"] = ""
     base["material_link"] = ""
     base["material_score"] = 0.0
     base["latest_date"] = pd.to_datetime(base["latest_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     base = _annotate_non_corporate_products(base)
     logger.info("build_daily_base_data end rows=%s", len(base))
-    earnings_forward_buffer_available = str(earnings_meta.get("status", "")) == "ok" and int(earnings_meta.get("rows_future_window", 0) or 0) > 0
-    earnings_forward_buffer_reason = "" if earnings_forward_buffer_available else (
-        str(earnings_meta.get("status", "") or "unavailable").strip() or "unavailable"
-    )
+    earnings_forward_buffer_available = False
+    earnings_forward_buffer_reason = ""
     return base, {
         "latest_date": max(trading_dates),
         "trading_date_count": len(trading_dates),
         "lookback_days": lookback_trading_days,
         "fast_check": fast_check,
         "topix_source_rows": int(len(topix_history)),
-        "earnings_coverage_count": int(base["earnings_buffer_days"].notna().sum()) if "earnings_buffer_days" in base.columns else 0,
+        "earnings_coverage_count": int(base["earnings_today_announcement_flag"].fillna(False).sum()) if "earnings_today_announcement_flag" in base.columns else 0,
         "earnings_dataset_status": str(earnings_meta.get("status", "")),
         "earnings_rows_raw": int(earnings_meta.get("rows_raw", 0) or 0),
         "earnings_rows_future_window": int(earnings_meta.get("rows_future_window", 0) or 0),
         "earnings_min_event_date": str(earnings_meta.get("min_event_date", "") or ""),
         "earnings_max_event_date": str(earnings_meta.get("max_event_date", "") or ""),
+        "earnings_announcement_status": str(earnings_meta.get("status", "")),
+        "earnings_announcement_rows_target_date": int(earnings_meta.get("rows_target_date", 0) or 0),
+        "earnings_announcement_target_date": str(earnings_meta.get("target_date", "") or ""),
+        "earnings_announcement_request_mode": str(earnings_meta.get("request_mode", "") or ""),
+        "earnings_announcement_source_path": str(earnings_meta.get("source_path", "") or ""),
         "earnings_forward_buffer_available": earnings_forward_buffer_available,
         "earnings_forward_buffer_reason": earnings_forward_buffer_reason,
         "finance_coverage_count": int(base["finance_health_score"].notna().sum()) if "finance_health_score" in base.columns else 0,
@@ -4928,6 +4960,8 @@ def _build_sector_representatives(scored_candidates: pd.DataFrame) -> pd.DataFra
                     "representative_selected_reason",
                     "representative_quality_flag",
                     "representative_fallback_reason",
+                    "earnings_today_announcement_flag",
+                    "earnings_announcement_date",
                     "was_in_selected50",
                     "was_in_must_have",
                     "nikkei_search",
@@ -4957,6 +4991,27 @@ def _build_candidate_commentary(reason_tags: str, risk_tags: str) -> str:
     if risk_list:
         return f"{risk_list[0]}に注意"
     return ""
+
+
+TODAY_EARNINGS_ANNOUNCEMENT_NOTE = "本日決算発表日"
+
+
+def _format_stock_name_with_marker(name: Any, *, marked: bool, marker: str = TODAY_EARNINGS_ANNOUNCEMENT_NOTE) -> str:
+    text = str(name or "").strip()
+    if not text or not marked or marker in text:
+        return text
+    return f"{text}（{marker}）"
+
+
+def _append_tag_if(base_text: Any, tag: str, *, enabled: bool) -> str:
+    text = str(base_text or "").strip()
+    if not enabled:
+        return text
+    if not text:
+        return tag
+    if tag in text:
+        return text
+    return f"{text}, {tag}"
 
 
 def _entry_fit_sort_priority(label: Any) -> int:
@@ -5008,6 +5063,8 @@ def _build_representative_stocks_map(sector_representatives: pd.DataFrame, *, se
                     "representative_selected_reason": str(row.get("representative_selected_reason", row.get("rep_selected_reason", "")) or ""),
                     "representative_quality_flag": str(row.get("representative_quality_flag", "") or ""),
                     "representative_fallback_reason": str(row.get("representative_fallback_reason", row.get("rep_fallback_reason", "")) or ""),
+                    "earnings_today_announcement_flag": bool(row.get("earnings_today_announcement_flag", False)),
+                    "earnings_announcement_date": str(row.get("earnings_announcement_date", "") or ""),
                     "was_in_selected50": bool(row.get("was_in_selected50", True)),
                     "was_in_must_have": bool(row.get("was_in_must_have", False)),
                 }
@@ -5251,9 +5308,6 @@ def _build_swing_candidate_tables(
     working["candidate_rs_component_1w"] = _score_percentile(working["rs_vs_topix_1w"]) * 1.0
     working["candidate_liquidity_component_1w"] = _score_percentile(working["avg_turnover_20d"]) * 0.7
     working["candidate_earnings_component_1w"] = 0.0
-    working.loc[earnings_days >= 7, "candidate_earnings_component_1w"] = 0.2
-    working.loc[earnings_days < 3, "candidate_earnings_component_1w"] = -0.8
-    working.loc[(earnings_days >= 3) & (earnings_days < 7), "candidate_earnings_component_1w"] = -0.4
     working["swing_score_1w"] = (
         working["candidate_sector_component_1w"]
         + working["candidate_turnover_component_1w"]
@@ -5282,9 +5336,6 @@ def _build_swing_candidate_tables(
     working["candidate_sector_rank_component_1m"] = _score_rank_ascending(working["sector_rank_1m"]) * 0.8
     working["candidate_sector_rank_component_3m"] = _score_rank_ascending(working["sector_rank_3m"]) * 0.8
     working["candidate_earnings_component_1m"] = 0.0
-    working.loc[earnings_days >= 10, "candidate_earnings_component_1m"] = 0.2
-    working.loc[earnings_days < 5, "candidate_earnings_component_1m"] = -0.8
-    working.loc[(earnings_days >= 5) & (earnings_days < 10), "candidate_earnings_component_1m"] = -0.4
     working["candidate_finance_component_1m"] = 0.0
     working.loc[finance_score >= 0.0, "candidate_finance_component_1m"] = 0.4
     working.loc[finance_score < -1.0, "candidate_finance_component_1m"] = -0.6
@@ -5315,8 +5366,7 @@ def _build_swing_candidate_tables(
     working["risk_note_1w"] = working.apply(
         lambda row: _join_candidate_tags(
             [
-                "決算近い" if bool(row.get("earnings_risk_flag")) else "",
-                "決算不明" if bool(row.get("earnings_unknown_flag")) else "",
+                TODAY_EARNINGS_ANNOUNCEMENT_NOTE if bool(row.get("earnings_today_announcement_flag")) else "",
                 "伸び過ぎ" if bool(row.get("extension_flag_1w")) else "",
                 "流動性弱い" if not bool(row.get("liquidity_ok")) else "",
             ]
@@ -5342,8 +5392,7 @@ def _build_swing_candidate_tables(
     working["risk_note_1m"] = working.apply(
         lambda row: _join_candidate_tags(
             [
-                "決算近い" if bool(row.get("earnings_risk_flag")) else "",
-                "決算不明" if bool(row.get("earnings_unknown_flag")) else "",
+                TODAY_EARNINGS_ANNOUNCEMENT_NOTE if bool(row.get("earnings_today_announcement_flag")) else "",
                 "20日線乖離大" if bool(row.get("extension_flag_1m")) else "",
                 "財務不安" if bool(row.get("finance_risk_flag")) else "",
                 "流動性弱い" if not bool(row.get("liquidity_ok")) else "",
@@ -5715,8 +5764,7 @@ def _swing_reason_3m_v2(row: pd.Series) -> str:
 
 def _swing_risk_note_1w_v2(row: pd.Series) -> str:
     tags = [
-        "決算接近" if bool(row.get("earnings_risk_flag_1w")) else "",
-        "決算日不明" if bool(row.get("earnings_unknown_flag")) else "",
+        TODAY_EARNINGS_ANNOUNCEMENT_NOTE if bool(row.get("earnings_today_announcement_flag")) else "",
         "短期過熱気味" if bool(row.get("moderate_extension_flag_1w")) else "",
         "流動性注意" if not bool(row.get("liquidity_ok")) else "",
         "当日資金追認弱め" if not bool(row.get("pass_flow_gate_1w")) else "",
@@ -5726,8 +5774,7 @@ def _swing_risk_note_1w_v2(row: pd.Series) -> str:
 
 def _swing_risk_note_1m_v2(row: pd.Series) -> str:
     tags = [
-        "決算接近" if bool(row.get("earnings_risk_flag_1m")) else "",
-        "決算日不明" if bool(row.get("earnings_unknown_flag")) else "",
+        TODAY_EARNINGS_ANNOUNCEMENT_NOTE if bool(row.get("earnings_today_announcement_flag")) else "",
         "20日線乖離大" if bool(row.get("moderate_extension_flag_1m")) else "",
         "財務注意" if bool(row.get("finance_risk_flag")) else "",
         "流動性注意" if not bool(row.get("liquidity_ok")) else "",
@@ -5737,8 +5784,7 @@ def _swing_risk_note_1m_v2(row: pd.Series) -> str:
 
 def _swing_risk_note_3m_v2(row: pd.Series) -> str:
     tags = [
-        "決算接近" if bool(row.get("earnings_risk_flag_1m")) else "",
-        "決算日不明" if bool(row.get("earnings_unknown_flag")) else "",
+        TODAY_EARNINGS_ANNOUNCEMENT_NOTE if bool(row.get("earnings_today_announcement_flag")) else "",
         "財務注意" if bool(row.get("finance_risk_flag")) else "",
         "1か月側が失速" if bool(row.get("month_confirmation_broken_3m")) else "",
         "流動性注意" if not bool(row.get("liquidity_ok")) else "",
@@ -6136,6 +6182,7 @@ def _build_swing_candidate_tables_v2(
     earnings_data_available = bool(earnings_days_raw.notna().any())
     finance_score_raw = _coerce_numeric(working.get("finance_health_score", pd.Series([pd.NA] * len(working), index=working.index)))
     finance_score = finance_score_raw.fillna(0.0)
+    working["earnings_today_announcement_flag"] = working.get("earnings_today_announcement_flag", pd.Series(False, index=working.index)).fillna(False).astype(bool)
     working["earnings_unknown_flag"] = earnings_days_raw.isna() & earnings_data_available
     working["earnings_risk_flag_1w"] = earnings_days.lt(float(selection_config.get("earnings_hard_block_days_1w", 7) or 7)).fillna(False)
     working["earnings_risk_flag_1m"] = earnings_days.lt(float(selection_config.get("earnings_hard_block_days_1m", 7) or 7)).fillna(False)
@@ -6391,9 +6438,6 @@ def _build_swing_candidate_tables_v2(
     working["candidate_breadth_component_1w"] = _score_percentile(working["sector_positive_ratio_1w"]) * 0.35
     working["candidate_liquidity_component_1w"] = _score_percentile(working["avg_turnover_20d"]) * 0.45
     working["candidate_earnings_component_1w"] = 0.0
-    working.loc[earnings_days >= 7.0, "candidate_earnings_component_1w"] = 0.15
-    working.loc[(earnings_days >= 3.0) & (earnings_days < 5.0), "candidate_earnings_component_1w"] = -0.35
-    working.loc[earnings_days < 3.0, "candidate_earnings_component_1w"] = -0.80
     working["swing_score_1w"] = (
         working["candidate_sector_component_1w"]
         + working["candidate_today_confirmation_component_1w"]
@@ -6442,9 +6486,6 @@ def _build_swing_candidate_tables_v2(
     working["candidate_breadth_component_1m"] = _score_percentile(working["sector_positive_ratio_1m"]) * 0.55
     working["candidate_concentration_component_1m"] = (1.0 - _score_percentile(working["leader_concentration_share_1m"])) * 0.45
     working["candidate_earnings_component_1m"] = 0.0
-    working.loc[earnings_days >= 10.0, "candidate_earnings_component_1m"] = 0.15
-    working.loc[(earnings_days >= 5.0) & (earnings_days < 7.0), "candidate_earnings_component_1m"] = -0.35
-    working.loc[earnings_days < 5.0, "candidate_earnings_component_1m"] = -0.80
     working["candidate_finance_component_1m"] = 0.0
     working.loc[finance_score >= 0.0, "candidate_finance_component_1m"] = 0.35
     working.loc[finance_score < -1.0, "candidate_finance_component_1m"] = -0.80
@@ -7030,24 +7071,6 @@ def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str,
 
 
 def _build_earnings_candidate_table_note(base_meta: dict[str, Any] | None) -> str:
-    base_meta = base_meta or {}
-    status = str(base_meta.get("earnings_dataset_status", base_meta.get("earnings_forward_buffer_status", "")) or "").strip()
-    coverage = int(base_meta.get("earnings_coverage_count", 0) or 0)
-    rows_raw = int(base_meta.get("earnings_rows_raw", 0) or 0)
-    rows_future = int(base_meta.get("earnings_rows_future_window", 0) or 0)
-    min_date = str(base_meta.get("earnings_min_event_date", "") or "").strip()
-    max_date = str(base_meta.get("earnings_max_event_date", "") or "").strip()
-    forward_available = bool(base_meta.get("earnings_forward_buffer_available", False))
-    forward_reason = str(base_meta.get("earnings_forward_buffer_reason", "") or "").strip()
-    if not forward_available and forward_reason:
-        return f"決算前方データ不足のため決算接近判定は弱いです。reason={forward_reason} rows_raw={rows_raw} future_window={rows_future}"
-    if status == "no_forward_events_in_dataset":
-        date_part = f" event_date={min_date}" if min_date and min_date == max_date else (f" event_date={min_date}..{max_date}" if min_date or max_date else "")
-        return f"決算カレンダーは前方日付を返していません。空欄は全銘柄共通のデータ未提供です。rows_raw={rows_raw} future_window={rows_future}.{date_part}"
-    if status == "ok" and coverage > 0:
-        return "決算日数の空欄は個別銘柄の未取得です。"
-    if status in {"empty_dataset", "missing_required_columns", "bad_request", "network_or_timeout", "auth_or_permission_error", "endpoint_not_found", "unknown_error"}:
-        return f"決算カレンダー自体を取得できていません。空欄は全銘柄共通のデータ未提供です。status={status} rows_raw={rows_raw}"
     return ""
 
 
@@ -7516,7 +7539,16 @@ def _build_sector_representatives_display_frame(
     working["today_rank"] = working["today_rank"].apply(_format_display_rank_value)
     working["representative_rank"] = working["representative_rank"].apply(_format_display_rank_value)
     working["code"] = working["code"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
-    working["name"] = working["name"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+    working["name"] = [
+        _format_stock_name_with_marker(
+            _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK),
+            marked=bool(flag),
+        )
+        for value, flag in zip(
+            working["name"],
+            working.get("earnings_today_announcement_flag", pd.Series(False, index=working.index)).fillna(False),
+        )
+    ]
     working["live_ret_vs_prev_close"] = working["live_ret_vs_prev_close"].apply(_format_display_pct_1dp)
     working["current_price"] = [
         _format_display_price_value(value, unavailable=bool(unavailable))
@@ -8344,15 +8376,35 @@ def build_live_snapshot(
     representative_stocks_map = _build_representative_stocks_map(sector_representatives)
     leaders_map = (
         sector_representatives.sort_values(["sector_name", "representative_rank"])
-        .groupby("sector_name")["name"]
-        .apply(lambda s: " / ".join(s.head(3).astype(str)))
+        .groupby("sector_name")
+        .apply(
+            lambda group: " / ".join(
+                _format_stock_name_with_marker(
+                    row.get("name", ""),
+                    marked=bool(row.get("earnings_today_announcement_flag", False)),
+                )
+                for _, row in group.head(3).iterrows()
+                if str(row.get("name", "") or "").strip()
+            )
+        )
         if not sector_representatives.empty else pd.Series(dtype=str)
+    )
+    sector_today_earnings_map = (
+        sector_representatives.groupby("sector_name")["earnings_today_announcement_flag"].apply(lambda s: bool(s.fillna(False).any()))
+        if not sector_representatives.empty and "earnings_today_announcement_flag" in sector_representatives.columns else pd.Series(dtype=bool)
     )
     if not today_sector_leaderboard.empty:
         today_sector_leaderboard = today_sector_leaderboard.copy()
         today_sector_leaderboard["representative_stock"] = today_sector_leaderboard["sector_name"].map(leaders_map).fillna("")
         today_sector_leaderboard["representative_stocks"] = today_sector_leaderboard["sector_name"].map(representative_stocks_map).apply(lambda value: value if isinstance(value, list) else [])
         today_sector_leaderboard["leaders"] = today_sector_leaderboard["sector_name"].map(leaders_map).fillna(today_sector_leaderboard["representative_stock"])
+        today_sector_leaderboard["sector_caution"] = [
+            _append_tag_if(value, TODAY_EARNINGS_ANNOUNCEMENT_NOTE, enabled=bool(flag))
+            for value, flag in zip(
+                today_sector_leaderboard.get("sector_caution", pd.Series("", index=today_sector_leaderboard.index)),
+                today_sector_leaderboard["sector_name"].map(sector_today_earnings_map).fillna(False),
+            )
+        ]
         today_sector_leaderboard["selected50_codes_in_sector"] = today_sector_leaderboard[leaderboard_sector_key_col].map(selected50_codes_by_sector).apply(lambda value: value if isinstance(value, list) else [])
         today_sector_leaderboard["sector_center_candidate_codes"] = today_sector_leaderboard[leaderboard_sector_key_col].map(representative_candidate_codes_by_sector).apply(lambda value: value if isinstance(value, list) else [])
         today_sector_leaderboard["representative_candidate_codes"] = today_sector_leaderboard[leaderboard_sector_key_col].map(representative_candidate_codes_by_sector).apply(lambda value: value if isinstance(value, list) else [])
@@ -8892,6 +8944,10 @@ def run_cli(mode: str, write_drive: bool = False, fast_check: bool = False) -> d
         bundle["meta"]["earnings_dataset_status"] = str(base_meta.get("earnings_dataset_status", "") or "")
         bundle["meta"]["earnings_rows_future_window"] = int(base_meta.get("earnings_rows_future_window", 0) or 0)
         bundle["meta"]["earnings_rows_raw"] = int(base_meta.get("earnings_rows_raw", 0) or 0)
+        bundle["meta"]["earnings_announcement_status"] = str(base_meta.get("earnings_announcement_status", "") or "")
+        bundle["meta"]["earnings_announcement_rows_target_date"] = int(base_meta.get("earnings_announcement_rows_target_date", 0) or 0)
+        bundle["meta"]["earnings_announcement_target_date"] = str(base_meta.get("earnings_announcement_target_date", "") or "")
+        bundle["meta"]["earnings_announcement_source_path"] = str(base_meta.get("earnings_announcement_source_path", "") or "")
         bundle["diagnostics"].update({"base_meta": base_meta, "ranking": ranking_diag, "deep_watch": deep_watch_diag, "board": board_diag, "write_completed": False})
         bundle["diagnostics"]["write_completed"] = True
         write_result = write_snapshot_bundle(bundle, settings, write_drive=write_drive)
