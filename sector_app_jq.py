@@ -2225,13 +2225,26 @@ def _classify_wide_scan_mode(
     sectors_with_ranking_confirmed_ge5: int,
     sectors_with_source_breadth_ge2: int,
 ) -> str:
-    if int(ranking_union_count) < int(TODAY_SECTOR_RANK_MODE_RULES["ranking_union_count_min"]):
-        return "anchor_only"
-    if int(sectors_with_ranking_confirmed_ge5) < int(TODAY_SECTOR_RANK_MODE_RULES["sectors_with_ranking_confirmed_ge5_min"]):
-        return "anchor_only"
-    if int(sectors_with_source_breadth_ge2) < int(TODAY_SECTOR_RANK_MODE_RULES["sectors_with_source_breadth_ge2_min"]):
-        return "anchor_only"
-    return "anchored_overlay"
+    ranking_union_min = int(TODAY_SECTOR_RANK_MODE_RULES["ranking_union_count_min"])
+    confirmed_min = int(TODAY_SECTOR_RANK_MODE_RULES["sectors_with_ranking_confirmed_ge5_min"])
+    breadth_min = int(TODAY_SECTOR_RANK_MODE_RULES["sectors_with_source_breadth_ge2_min"])
+    ranking_union_count = int(ranking_union_count)
+    sectors_with_ranking_confirmed_ge5 = int(sectors_with_ranking_confirmed_ge5)
+    sectors_with_source_breadth_ge2 = int(sectors_with_source_breadth_ge2)
+    ranking_short = max(0, ranking_union_min - ranking_union_count)
+    confirmed_short = max(0, confirmed_min - sectors_with_ranking_confirmed_ge5)
+    breadth_short = max(0, breadth_min - sectors_with_source_breadth_ge2)
+    if ranking_short == 0 and confirmed_short == 0 and breadth_short == 0:
+        return "anchored_overlay"
+    # If sector-level corroboration is already broad and confirmed, allow a modest union shortfall.
+    if (
+        breadth_short == 0
+        and confirmed_short == 0
+        and (sectors_with_source_breadth_ge2 - breadth_min) >= 8
+        and ranking_short <= 9
+    ):
+        return "anchored_overlay"
+    return "anchor_only"
 
 
 def build_market_scan_universe(base_df: pd.DataFrame, settings: dict[str, Any], token: str) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
@@ -3150,55 +3163,62 @@ def _summarize_market_scan_quality(
     sector_basket_counts: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     thresholds = TODAY_SECTOR_RANK_MODE_RULES
-    summary_sector_frame = sector_frame.copy() if isinstance(sector_frame, pd.DataFrame) and not sector_frame.empty else pd.DataFrame()
-    if summary_sector_frame.empty:
-        base_scan = scan_df.copy() if isinstance(scan_df, pd.DataFrame) and not scan_df.empty else pd.DataFrame()
-        if not base_scan.empty and "sector_name" in base_scan.columns:
-            base_scan["sector_name"] = base_scan["sector_name"].map(_normalize_industry_name)
-            base_scan = base_scan[base_scan["sector_name"].astype(str).str.strip() != ""].copy()
+    summary_sector_frame = pd.DataFrame()
+    base_scan = scan_df.copy() if isinstance(scan_df, pd.DataFrame) and not scan_df.empty else pd.DataFrame()
+    if not base_scan.empty:
+        expanded_scan = _ensure_scan_source_type(base_scan)
+        sector_name_raw = expanded_scan.get("sector_name", pd.Series("", index=expanded_scan.index)).fillna("")
+        if "sector_name_base" in expanded_scan.columns:
+            sector_name_raw = sector_name_raw.where(sector_name_raw.astype(str).str.strip() != "", expanded_scan["sector_name_base"].fillna(""))
+        expanded_scan["sector_name_effective"] = sector_name_raw.astype(str).map(str.strip).map(_normalize_industry_name)
+        expanded_scan = expanded_scan[expanded_scan["sector_name_effective"].astype(str).str.strip() != ""].copy()
+        if not expanded_scan.empty and "code" in expanded_scan.columns:
             summary_sector_frame = (
-                base_scan.groupby("sector_name", as_index=False)
+                expanded_scan.groupby("sector_name_effective", as_index=False)
                 .agg(
                     ranking_confirmed_count=(
                         "ranking_union_member",
                         lambda s: int(
-                            base_scan.loc[s.index, "code"].astype(str)[base_scan.loc[s.index, "ranking_union_member"].fillna(False)].drop_duplicates().shape[0]
+                            expanded_scan.loc[s.index, "code"].astype(str)[expanded_scan.loc[s.index, "ranking_union_member"].fillna(False)].drop_duplicates().shape[0]
                         ),
                     ),
-                    ranking_source_breadth_ex_basket=("ranking_sources", lambda s: 0),
                     basket_member_count=(
                         "industry_basket_member",
                         lambda s: int(
-                            base_scan.loc[s.index, "code"].astype(str)[base_scan.loc[s.index, "industry_basket_member"].fillna(False)].drop_duplicates().shape[0]
+                            expanded_scan.loc[s.index, "code"].astype(str)[expanded_scan.loc[s.index, "industry_basket_member"].fillna(False)].drop_duplicates().shape[0]
                         ),
                     ),
                 )
+                .rename(columns={"sector_name_effective": "sector_name"})
             )
-            expanded_scan = _ensure_scan_source_type(base_scan)
-            if not expanded_scan.empty and "sector_name" in expanded_scan.columns:
-                expanded_scan["sector_name"] = expanded_scan["sector_name"].map(_normalize_industry_name)
-                expanded_scan = expanded_scan[expanded_scan["sector_name"].astype(str).str.strip() != ""].copy()
-                breadth_map = (
-                    expanded_scan[expanded_scan.get("source_type", pd.Series(dtype=str)).astype(str).ne("industry_basket")]
-                    .groupby("sector_name")["source_type"]
-                    .nunique()
-                    .to_dict()
-                )
-                summary_sector_frame["ranking_source_breadth_ex_basket"] = summary_sector_frame["sector_name"].map(lambda value: int(breadth_map.get(str(value or ""), 0) or 0))
+            breadth_map = (
+                expanded_scan[expanded_scan.get("source_type", pd.Series(dtype=str)).astype(str).ne("industry_basket")]
+                .groupby("sector_name_effective")["source_type"]
+                .nunique()
+                .to_dict()
+            )
+            summary_sector_frame["ranking_source_breadth_ex_basket"] = summary_sector_frame["sector_name"].map(lambda value: int(breadth_map.get(str(value or ""), 0) or 0))
             if ranking_union_count is None:
                 ranking_union_count = int(
-                    base_scan[base_scan.get("ranking_union_member", pd.Series(False, index=base_scan.index)).fillna(False)]["code"].astype(str).drop_duplicates().shape[0]
-                ) if "code" in base_scan.columns else 0
+                    expanded_scan[expanded_scan.get("ranking_union_member", pd.Series(False, index=expanded_scan.index)).fillna(False)]["code"].astype(str).drop_duplicates().shape[0]
+                )
             if sector_basket_counts is None:
                 sector_basket_counts = {
                     str(key): int(value or 0)
                     for key, value in (
-                        base_scan[base_scan.get("industry_basket_member", pd.Series(False, index=base_scan.index)).fillna(False)]
-                        .groupby("sector_name")["code"]
+                        expanded_scan[expanded_scan.get("industry_basket_member", pd.Series(False, index=expanded_scan.index)).fillna(False)]
+                        .groupby("sector_name_effective")["code"]
                         .nunique()
                         .to_dict()
                     ).items()
-                } if "code" in base_scan.columns else {}
+                }
+    if summary_sector_frame.empty:
+        summary_sector_frame = sector_frame.copy() if isinstance(sector_frame, pd.DataFrame) and not sector_frame.empty else pd.DataFrame()
+    if summary_sector_frame.empty:
+        if ranking_union_count is None:
+            ranking_union_count = 0
+        if sector_basket_counts is None:
+            sector_basket_counts = {}
     else:
         if ranking_union_count is None:
             ranking_union_count = 0
@@ -3233,16 +3253,22 @@ def _summarize_market_scan_quality(
         gate_failures.append(
             f"sectors_with_source_breadth_ge2={sectors_with_source_breadth_ge2}<{int(thresholds['sectors_with_source_breadth_ge2_min'])}"
         )
-    mode = "anchor_only" if gate_failures else "anchored_overlay"
-    reason = (
-        "; ".join(gate_failures)
-        if gate_failures
-        else (
-            f"ranking_union_count={ranking_union_count}>={int(thresholds['ranking_union_count_min'])}; "
-            f"sectors_with_ranking_confirmed_ge5={sectors_with_ranking_confirmed_ge5}>={int(thresholds['sectors_with_ranking_confirmed_ge5_min'])}; "
-            f"sectors_with_source_breadth_ge2={sectors_with_source_breadth_ge2}>={int(thresholds['sectors_with_source_breadth_ge2_min'])}"
-        )
+    mode = _classify_wide_scan_mode(
+        ranking_union_count,
+        sectors_with_ranking_confirmed_ge5,
+        sectors_with_source_breadth_ge2,
     )
+    if mode == "anchored_overlay":
+        if gate_failures:
+            reason = f"near_pass_override: {'; '.join(gate_failures)}"
+        else:
+            reason = (
+                f"ranking_union_count={ranking_union_count}>={int(thresholds['ranking_union_count_min'])}; "
+                f"sectors_with_ranking_confirmed_ge5={sectors_with_ranking_confirmed_ge5}>={int(thresholds['sectors_with_ranking_confirmed_ge5_min'])}; "
+                f"sectors_with_source_breadth_ge2={sectors_with_source_breadth_ge2}>={int(thresholds['sectors_with_source_breadth_ge2_min'])}"
+            )
+    else:
+        reason = "; ".join(gate_failures)
     summary_text = (
         f"mode={mode}; ranking_union_count={ranking_union_count}; "
         f"sectors_with_ranking_confirmed_ge5={sectors_with_ranking_confirmed_ge5}; "
@@ -4246,6 +4272,7 @@ def _build_intraday_sector_leaderboard(
     ranking_union_total_count = 0.0
     source_totals: dict[str, float] = {}
     sector_basket_counts: dict[str, int] = {}
+    scan = pd.DataFrame()
     if not ranking_df.empty:
         scan = ranking_df.merge(
             base_df[["code", "name", "sector_name", "sector_constituent_count"]],
@@ -4479,6 +4506,7 @@ def _build_intraday_sector_leaderboard(
         | (_coerce_numeric(sector_base["wide_scan_member_count"]).fillna(0.0) < float(WIDE_SCAN_BASKET_MIN_PER_SECTOR))
     )
     market_scan_quality = _summarize_market_scan_quality(
+        scan_df=scan,
         sector_frame=sector_base,
         ranking_union_count=int(ranking_union_total_count or 0),
         sector_basket_counts={str(key): int(value or 0) for key, value in sector_basket_counts.items()},
@@ -4553,11 +4581,13 @@ def _build_intraday_sector_leaderboard(
         sector_base["rank_constraint_applied"] = False
         sector_base["upshift_blocked_reason"] = ""
         result = _sort_today_sector_leaderboard_for_display(sector_base)
+        result.attrs["market_scan_quality"] = dict(market_scan_quality)
         result.attrs["sector_live_aggregate_audit"] = sector_live_aggregate_audit
         result.attrs["sector_live_aggregate_source_meta"] = sector_live_aggregate_meta
         return result
     sector_base = _apply_true_rank_shift_limits(sector_base)
     result = _sort_today_sector_leaderboard_for_display(sector_base)
+    result.attrs["market_scan_quality"] = dict(market_scan_quality)
     result.attrs["sector_live_aggregate_audit"] = sector_live_aggregate_audit
     result.attrs["sector_live_aggregate_source_meta"] = sector_live_aggregate_meta
     return result
@@ -8538,11 +8568,23 @@ def build_live_snapshot(
         if not filtered_ranking_df.empty and "sector_name" in filtered_ranking_df.columns and "code" in filtered_ranking_df.columns
         else {}
     )
-    today_market_scan_quality = _summarize_market_scan_quality(
-        sector_frame=today_sector_leaderboard,
-        ranking_union_count=filtered_ranking_union_count,
-        sector_basket_counts={str(key): int(value or 0) for key, value in filtered_sector_basket_counts.items()},
-    )
+    leaderboard_market_scan_quality = today_sector_leaderboard.attrs.get("market_scan_quality", {}) if isinstance(today_sector_leaderboard, pd.DataFrame) else {}
+    if isinstance(leaderboard_market_scan_quality, dict) and leaderboard_market_scan_quality:
+        today_market_scan_quality = {
+            "mode": str(leaderboard_market_scan_quality.get("mode", "") or ""),
+            "reason": str(leaderboard_market_scan_quality.get("reason", "") or ""),
+            "summary": str(leaderboard_market_scan_quality.get("summary", "") or ""),
+            "ranking_union_count": int(leaderboard_market_scan_quality.get("ranking_union_count", 0) or 0),
+            "sectors_with_ranking_confirmed_ge5": int(leaderboard_market_scan_quality.get("sectors_with_ranking_confirmed_ge5", 0) or 0),
+            "sectors_with_source_breadth_ge2": int(leaderboard_market_scan_quality.get("sectors_with_source_breadth_ge2", 0) or 0),
+        }
+    else:
+        today_market_scan_quality = _summarize_market_scan_quality(
+            scan_df=filtered_ranking_df,
+            sector_frame=today_sector_leaderboard,
+            ranking_union_count=filtered_ranking_union_count,
+            sector_basket_counts={str(key): int(value or 0) for key, value in filtered_sector_basket_counts.items()},
+        )
     today_sector_scan_mode = str(today_market_scan_quality["mode"])
     industry_anchor_watch_before = _summarize_industry_anchor_positions(industry_df, baseline_today_sector_leaderboard, anchor_ranks=[2, 3, 4])
     industry_anchor_watch_after = _summarize_industry_anchor_positions(industry_df, today_sector_leaderboard, anchor_ranks=[2, 3, 4])
@@ -8648,7 +8690,7 @@ def build_live_snapshot(
                 "scan_zero_sector_count": int(_coerce_numeric(today_sector_leaderboard.get("scan_member_count", pd.Series(dtype="float64"))).fillna(0.0).eq(0.0).sum()) if not today_sector_leaderboard.empty else 0,
             },
             "wide_scan_total_count": filtered_wide_scan_total_count,
-            "ranking_union_count": filtered_ranking_union_count,
+            "ranking_union_count": int(today_market_scan_quality["ranking_union_count"]),
             "industry_basket_count": filtered_industry_basket_count,
             "sector_basket_counts": {str(key): int(value or 0) for key, value in filtered_sector_basket_counts.items()},
             "sectors_with_ranking_confirmed_ge5": int(today_market_scan_quality["sectors_with_ranking_confirmed_ge5"]),
@@ -8949,6 +8991,10 @@ def run_cli(mode: str, write_drive: bool = False, fast_check: bool = False) -> d
         bundle["meta"]["earnings_announcement_target_date"] = str(base_meta.get("earnings_announcement_target_date", "") or "")
         bundle["meta"]["earnings_announcement_source_path"] = str(base_meta.get("earnings_announcement_source_path", "") or "")
         bundle["diagnostics"].update({"base_meta": base_meta, "ranking": ranking_diag, "deep_watch": deep_watch_diag, "board": board_diag, "write_completed": False})
+        bundle["meta"]["today_rank_mode"] = str(bundle["diagnostics"].get("today_rank_mode", "") or "")
+        bundle["meta"]["ranking_union_count"] = int(bundle["diagnostics"].get("ranking_union_count", 0) or 0)
+        bundle["meta"]["sectors_with_ranking_confirmed_ge5"] = int(bundle["diagnostics"].get("sectors_with_ranking_confirmed_ge5", 0) or 0)
+        bundle["meta"]["sectors_with_source_breadth_ge2"] = int(bundle["diagnostics"].get("sectors_with_source_breadth_ge2", 0) or 0)
         bundle["diagnostics"]["write_completed"] = True
         write_result = write_snapshot_bundle(bundle, settings, write_drive=write_drive)
         bundle["snapshot_source_label"] = str(write_result.pop("source_label", ""))
