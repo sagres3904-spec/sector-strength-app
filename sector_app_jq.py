@@ -758,11 +758,15 @@ INDUSTRY_KEY_ALIASES = {
     "建設業": "建設業",
     "情報通信": "情報･通信業",
     "情報・通信": "情報･通信業",
+    "情報･通信": "情報･通信業",
     "情報・通信業": "情報･通信業",
     "情報･通信業": "情報･通信業",
     "機械": "機械",
-    "水産": "水産・農林業",
-    "水産・農林業": "水産・農林業",
+    "水産": "水産･農林業",
+    "水産・農林": "水産･農林業",
+    "水産･農林": "水産･農林業",
+    "水産・農林業": "水産･農林業",
+    "水産･農林業": "水産･農林業",
     "海運": "海運業",
     "海運業": "海運業",
     "石油": "石油･石炭製品",
@@ -2054,12 +2058,19 @@ def _normalize_industry_name(value: Any) -> str:
     return name
 
 
-def _normalize_industry_key(value: Any) -> str:
+def _canonicalize_industry_key_text(value: Any) -> str:
     name = str(value or "").strip()
     if name.startswith("IS "):
         name = name[3:].strip()
-    name = name.replace("・", "･")
-    return INDUSTRY_KEY_ALIASES.get(name, name)
+    return name.replace("・", "･")
+
+
+def _normalize_industry_key(value: Any) -> str:
+    name = _canonicalize_industry_key_text(value)
+    name = INDUSTRY_KEY_ALIASES.get(name, name)
+    name = _canonicalize_industry_key_text(name)
+    name = INDUSTRY_KEY_ALIASES.get(name, name)
+    return _canonicalize_industry_key_text(name)
 
 
 def _sector_key_column(*frames: pd.DataFrame) -> str:
