@@ -7236,6 +7236,35 @@ def _split_ui_stock_names(value: Any) -> list[str]:
     return [name.strip() for name in text.split("/") if name.strip()][:3]
 
 
+def _today_sector_summary_text(row: pd.Series) -> str:
+    lead_names = _split_ui_stock_names(
+        _first_ui_value(
+            row.get("representative_stock"),
+            row.get("core_representatives"),
+            row.get("leaders_display"),
+        )
+    )
+    caution = _first_ui_value(
+        row.get("sector_caution"),
+        row.get("quality_warn"),
+        row.get("scan_sample_warning_reason"),
+    )
+    return _shorten_ui_text(
+        _first_ui_value(
+            row.get("sector_summary"),
+            _join_ui_fragments(
+                f"信頼度 {_clean_ui_value(row.get('sector_confidence'))}" if _clean_ui_value(row.get("sector_confidence")) else "",
+                f"主力 {lead_names[0]}" if lead_names else "",
+                f"価格 {_format_ui_number(row.get('price_block_score'))}" if _format_ui_number(row.get("price_block_score")) else "",
+                f"資金 {_format_ui_number(row.get('flow_block_score'))}" if _format_ui_number(row.get("flow_block_score")) else "",
+                f"注意 {caution}" if caution else "",
+            ),
+            "当日順位と既存スナップショットを確認",
+        ),
+        limit=92,
+    )
+
+
 def _extract_sector_rank_lookup(frame: pd.DataFrame, *, rank_col: str) -> dict[str, int]:
     if frame is None or frame.empty or "sector_name" not in frame.columns:
         return {}
@@ -7259,7 +7288,7 @@ def _extract_sector_rank_lookup(frame: pd.DataFrame, *, rank_col: str) -> dict[s
 def _build_sector_focus_view(frame: pd.DataFrame, *, timeframe: str, limit: int = 5) -> pd.DataFrame:
     if frame is None or frame.empty:
         if timeframe == "today":
-            return pd.DataFrame(columns=["today_display_rank", "industry_anchor_rank", "final_rank_delta", "sector_name", "sector_summary"])
+            return pd.DataFrame(columns=["today_display_rank", "sector_name", "sector_summary", "industry_anchor_rank"])
         return pd.DataFrame(columns=["axis_rank", "sector_name", "sector_summary"])
     rank_col = "today_display_rank" if timeframe == "today" else "persistence_rank"
     working = frame.copy()
@@ -7281,25 +7310,25 @@ def _build_sector_focus_view(frame: pd.DataFrame, *, timeframe: str, limit: int 
         working["final_rank_delta"] = delta.where(delta.notna(), display_rank - anchor_rank).round().astype("Int64")
     else:
         working["axis_rank"] = _coerce_numeric(working.get("persistence_rank", pd.Series(pd.NA, index=working.index))).round().astype("Int64")
-    working["sector_summary"] = working.apply(
-        lambda row: _shorten_ui_text(
-            _first_ui_value(
-                row.get("sector_summary"),
-                _join_ui_fragments(
-                    f"信頼度 {_clean_ui_value(row.get('sector_confidence'))}" if _clean_ui_value(row.get("sector_confidence")) else "",
-                    f"TOPIX比RS {_format_ui_number(row.get('sector_rs_vs_topix'))}" if timeframe != "today" and _format_ui_number(row.get("sector_rs_vs_topix")) else "",
-                    f"価格 {_format_ui_number(row.get('price_block_score'))}" if timeframe == "today" and _format_ui_number(row.get("price_block_score")) else "",
-                    f"資金 {_format_ui_number(row.get('flow_block_score'))}" if timeframe == "today" and _format_ui_number(row.get("flow_block_score")) else "",
-                    f"広がり {_clean_ui_value(row.get('ranking_breadth_display'))}" if timeframe == "today" and _clean_ui_value(row.get("ranking_breadth_display")) else "",
-                    f"注意 {_first_ui_value(row.get('quality_warn'), row.get('sector_caution'))}" if _first_ui_value(row.get("quality_warn"), row.get("sector_caution")) else "",
-                ),
-            ),
-            limit=92,
-        ),
-        axis=1,
-    )
     if timeframe == "today":
-        return working.drop(columns=["_rank_sort"], errors="ignore")[["today_display_rank", "industry_anchor_rank", "final_rank_delta", "sector_name", "sector_summary"]].reset_index(drop=True)
+        working["sector_summary"] = working.apply(_today_sector_summary_text, axis=1)
+    else:
+        working["sector_summary"] = working.apply(
+            lambda row: _shorten_ui_text(
+                _first_ui_value(
+                    row.get("sector_summary"),
+                    _join_ui_fragments(
+                        f"信頼度 {_clean_ui_value(row.get('sector_confidence'))}" if _clean_ui_value(row.get("sector_confidence")) else "",
+                        f"TOPIX比RS {_format_ui_number(row.get('sector_rs_vs_topix'))}" if _format_ui_number(row.get("sector_rs_vs_topix")) else "",
+                        f"注意 {_first_ui_value(row.get('quality_warn'), row.get('sector_caution'))}" if _first_ui_value(row.get("quality_warn"), row.get("sector_caution")) else "",
+                    ),
+                ),
+                limit=92,
+            ),
+            axis=1,
+        )
+    if timeframe == "today":
+        return working.drop(columns=["_rank_sort"], errors="ignore")[["today_display_rank", "sector_name", "sector_summary", "industry_anchor_rank"]].reset_index(drop=True)
     return working.drop(columns=["_rank_sort"], errors="ignore")[["axis_rank", "sector_name", "sector_summary"]].reset_index(drop=True)
 
 
@@ -7312,12 +7341,12 @@ def _build_center_stock_focus_view(
 ) -> pd.DataFrame:
     if timeframe == "today":
         if representative_frame is None or representative_frame.empty:
-            return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
+            return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_FOCUS_COLUMNS)
         working = representative_frame.copy()
         working["sector_name"] = working.get("sector_name", pd.Series("", index=working.index)).apply(_clean_ui_value)
         working = working[working["sector_name"].isin(sector_rank_lookup)]
         if working.empty:
-            return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
+            return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_FOCUS_COLUMNS)
         working["_axis_rank_sort"] = working["sector_name"].map(lambda value: sector_rank_lookup.get(str(value), 9999))
         working["_rep_rank_sort"] = _coerce_numeric(working.get("representative_rank", pd.Series(pd.NA, index=working.index))).fillna(9999)
         working = working.sort_values(
@@ -7325,8 +7354,8 @@ def _build_center_stock_focus_view(
             ascending=[True, True, True, True],
             kind="mergesort",
         )
-        return working.drop(columns=["_axis_rank_sort", "_rep_rank_sort"], errors="ignore").reset_index(drop=True)
-    columns = ["axis_rank", "sector_name", "representative_rank", "name", "center_note", "nikkei_search"]
+        return working.drop(columns=["_axis_rank_sort", "_rep_rank_sort", "nikkei_search"], errors="ignore").reindex(columns=SECTOR_REPRESENTATIVES_FOCUS_COLUMNS).reset_index(drop=True)
+    columns = ["axis_rank", "sector_name", "representative_rank", "name", "center_note"]
     if sector_frame is None or sector_frame.empty:
         return pd.DataFrame(columns=columns)
     working = sector_frame.copy()
@@ -7361,7 +7390,6 @@ def _build_center_stock_focus_view(
                         ),
                         limit=72,
                     ),
-                    "nikkei_search": _make_nikkei_search_link(name, ""),
                 }
             )
     return pd.DataFrame(rows, columns=columns)
@@ -7508,8 +7536,8 @@ def _render_timeframe_panel(
 ) -> None:
     st.caption(f"{timeframe_label}: {timeframe_note}")
     _render_dataframe_or_reason(sector_title, sector_frame, reason=sector_reason)
-    _render_dataframe_or_reason("そのセクターの中心銘柄", center_frame, reason=center_reason)
-    _render_dataframe_or_reason("買う候補", candidate_frame, reason=candidate_reason, link_columns=True, note=candidate_note)
+    _render_dataframe_or_reason("セクター代表銘柄", center_frame, reason=center_reason)
+    _render_dataframe_or_reason("購入候補", candidate_frame, reason=candidate_reason, link_columns=True, note=candidate_note)
 
 
 def _persistence_gate_fail_warn_label(reason: Any) -> str:
@@ -7538,6 +7566,20 @@ TODAY_SECTOR_DISPLAY_COLUMNS = [
     "final_rank_delta",
     "sector_name",
     "sector_summary",
+]
+
+SECTOR_REPRESENTATIVES_FOCUS_COLUMNS = [
+    "today_rank",
+    "sector_name",
+    "representative_rank",
+    "code",
+    "name",
+    "live_ret_vs_prev_close",
+    "current_price",
+    "live_turnover_value",
+    "representative_selected_reason",
+    "representative_quality_flag",
+    "representative_fallback_reason",
 ]
 
 SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS = [
@@ -9518,7 +9560,10 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         st.caption(f"today表は `{today_sector_source_key}` からの旧 snapshot 互換表示です。")
     if earnings_candidate_note:
         st.warning(earnings_candidate_note)
-    today_sector_focus = _build_sector_focus_view(today_sector_view, timeframe="today")
+    today_sector_focus_source = bundle.get("today_sector_leaderboard", today_sector_view)
+    if not isinstance(today_sector_focus_source, pd.DataFrame) or today_sector_focus_source.empty:
+        today_sector_focus_source = today_sector_view
+    today_sector_focus = _build_sector_focus_view(today_sector_focus_source, timeframe="today")
     weekly_sector_focus = _build_sector_focus_view(weekly_sector_view, timeframe="1w")
     monthly_sector_focus = _build_sector_focus_view(monthly_sector_view, timeframe="1m")
     quarter_sector_focus = _build_sector_focus_view(quarter_sector_view, timeframe="3m")
@@ -9590,8 +9635,8 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     with timeframe_tabs[0]:
         _render_timeframe_panel(
             timeframe_label="today",
-            timeframe_note="当日の強さを優先し、強いセクターは表示順位の昇順で見ます。",
-            sector_title="強いセクター",
+            timeframe_note="当日の強さを優先し、セクター順位は表示順位の昇順で見ます。",
+            sector_title="セクター順位",
             sector_frame=today_sector_focus,
             sector_reason=str(empty_reasons.get("today_sector_leaderboard", "intraday 条件を満たす本命セクターがありません。")),
             center_frame=today_center_focus,
@@ -9608,8 +9653,8 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     with timeframe_tabs[1]:
         _render_timeframe_panel(
             timeframe_label="1w",
-            timeframe_note="1週間で強さが続くセクターを確認し、中心銘柄と買い候補だけを軽く見ます。",
-            sector_title="強いセクター",
+            timeframe_note="1週間で強さが続くセクターを確認し、代表銘柄と購入候補だけを軽く見ます。",
+            sector_title="セクター順位",
             sector_frame=weekly_sector_focus,
             sector_reason=str(empty_reasons.get("sector_persistence_1w", empty_reasons.get("weekly_sector_summary", ""))),
             center_frame=weekly_center_focus,
@@ -9621,8 +9666,8 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     with timeframe_tabs[2]:
         _render_timeframe_panel(
             timeframe_label="1m",
-            timeframe_note="1か月の継続強度を軸に、セクター・中心銘柄・買い候補を上から見られます。",
-            sector_title="強いセクター",
+            timeframe_note="1か月の継続強度を軸に、セクター順位・代表銘柄・購入候補を上から見られます。",
+            sector_title="セクター順位",
             sector_frame=monthly_sector_focus,
             sector_reason=str(empty_reasons.get("sector_persistence_1m", empty_reasons.get("monthly_sector_summary", ""))),
             center_frame=monthly_center_focus,
@@ -9635,7 +9680,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         _render_timeframe_panel(
             timeframe_label="3m",
             timeframe_note="3か月の継続トレンドを俯瞰し、長めの軸で残る候補だけを確認します。",
-            sector_title="強いセクター",
+            sector_title="セクター順位",
             sector_frame=quarter_sector_focus,
             sector_reason=str(empty_reasons.get("sector_persistence_3m", "")),
             center_frame=quarter_center_focus,
@@ -9726,13 +9771,12 @@ def _render_control_plane_status(settings: dict[str, Any], *, current_mode: str 
 
 def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str, Any] | None = None) -> None:
     runtime_context = runtime_context or {}
-    st.caption("Cloud viewer-only モードです。保存済み snapshot をそのまま表示し、更新依頼は補助導線として扱います。")
+    st.caption("Cloud viewer-only モードです。スナップショット表示と更新依頼を扱います。")
     _enable_viewer_auto_refresh(settings)
     _render_snapshot_cache_admin_tools()
     available_modes = _available_viewer_snapshot_modes(settings)
     mode_warnings = _get_viewer_snapshot_mode_warnings()
-    st.markdown("### 保存済み snapshot")
-    st.caption("0915 / 1130 / 1530 / now の順で表示します。stale の場合も最後に保存された中身を表示し、警告だけ残します。")
+    st.markdown("### スナップショット")
     for warning_message in mode_warnings:
         st.warning(warning_message)
     if not available_modes:
@@ -9772,12 +9816,12 @@ def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str,
 
 
 def render_app() -> None:
-    st.set_page_config(page_title="Sector Strength Live", layout="wide")
-    st.title("セクター強度ライブ")
+    st.set_page_config(page_title="セクター概況", layout="wide")
+    st.title("セクター概況")
     settings = get_settings()
     runtime_context = _streamlit_runtime_context(settings)
     if bool(runtime_context.get("viewer_only")):
-        st.caption("Cloud では viewer-only で動作します。保存済み snapshot の表示と更新依頼だけを行います。")
+        st.caption("Cloud では viewer-only で動作します。スナップショット表示と更新依頼だけを行います。")
         st.info("latest_0915.json / latest_1130.json / latest_1530.json / latest_now.json を優先して読み込みます。Cloud では collector / kabu live 取得は実行しません。")
         _render_viewer_only_app(settings, runtime_context)
         return
