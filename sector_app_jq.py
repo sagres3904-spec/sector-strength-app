@@ -2251,6 +2251,8 @@ def _classify_wide_scan_mode(
     ranking_union_count: int,
     sectors_with_ranking_confirmed_ge5: int,
     sectors_with_source_breadth_ge2: int,
+    *,
+    sectors_with_ranking_confirmed_ge4: int | None = None,
 ) -> str:
     ranking_union_min = int(TODAY_SECTOR_RANK_MODE_RULES["ranking_union_count_min"])
     confirmed_min = int(TODAY_SECTOR_RANK_MODE_RULES["sectors_with_ranking_confirmed_ge5_min"])
@@ -2258,6 +2260,7 @@ def _classify_wide_scan_mode(
     ranking_union_count = int(ranking_union_count)
     sectors_with_ranking_confirmed_ge5 = int(sectors_with_ranking_confirmed_ge5)
     sectors_with_source_breadth_ge2 = int(sectors_with_source_breadth_ge2)
+    sectors_with_ranking_confirmed_ge4 = int(sectors_with_ranking_confirmed_ge4 or 0)
     ranking_short = max(0, ranking_union_min - ranking_union_count)
     confirmed_short = max(0, confirmed_min - sectors_with_ranking_confirmed_ge5)
     breadth_short = max(0, breadth_min - sectors_with_source_breadth_ge2)
@@ -2269,6 +2272,13 @@ def _classify_wide_scan_mode(
         and confirmed_short == 0
         and (sectors_with_source_breadth_ge2 - breadth_min) >= 8
         and ranking_short <= 9
+    ):
+        return "anchored_overlay"
+    if (
+        breadth_short == 0
+        and ranking_short <= 15
+        and confirmed_short <= 2
+        and sectors_with_ranking_confirmed_ge4 >= confirmed_min
     ):
         return "anchored_overlay"
     return "anchor_only"
@@ -3266,6 +3276,11 @@ def _summarize_market_scan_quality(
         if not summary_sector_frame.empty
         else 0
     )
+    sectors_with_ranking_confirmed_ge4 = (
+        int(_coerce_numeric(summary_sector_frame.get("ranking_confirmed_count", pd.Series(dtype="float64"))).fillna(0.0).ge(4.0).sum())
+        if not summary_sector_frame.empty
+        else 0
+    )
     sectors_with_source_breadth_ge2 = (
         int(_coerce_numeric(summary_sector_frame.get("ranking_source_breadth_ex_basket", pd.Series(dtype="float64"))).fillna(0.0).ge(2.0).sum())
         if not summary_sector_frame.empty
@@ -3286,6 +3301,7 @@ def _summarize_market_scan_quality(
         ranking_union_count,
         sectors_with_ranking_confirmed_ge5,
         sectors_with_source_breadth_ge2,
+        sectors_with_ranking_confirmed_ge4=sectors_with_ranking_confirmed_ge4,
     )
     if mode == "anchored_overlay":
         if gate_failures:
@@ -3301,6 +3317,7 @@ def _summarize_market_scan_quality(
     summary_text = (
         f"mode={mode}; ranking_union_count={ranking_union_count}; "
         f"sectors_with_ranking_confirmed_ge5={sectors_with_ranking_confirmed_ge5}; "
+        f"sectors_with_ranking_confirmed_ge4={sectors_with_ranking_confirmed_ge4}; "
         f"sectors_with_source_breadth_ge2={sectors_with_source_breadth_ge2}; "
         f"reason={reason}"
     )
@@ -3311,6 +3328,7 @@ def _summarize_market_scan_quality(
         "ranking_union_count": ranking_union_count,
         "sector_basket_counts": sector_basket_counts,
         "sectors_with_ranking_confirmed_ge5": sectors_with_ranking_confirmed_ge5,
+        "sectors_with_ranking_confirmed_ge4": sectors_with_ranking_confirmed_ge4,
         "sectors_with_source_breadth_ge2": sectors_with_source_breadth_ge2,
         "thresholds": {
             "ranking_union_count_min": int(thresholds["ranking_union_count_min"]),
