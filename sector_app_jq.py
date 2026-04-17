@@ -177,7 +177,7 @@ def evaluate_snapshot_guard(mode: str, meta: dict[str, Any], *, now_ts: datetime
         return result
     return result
 
-def read_snapshot_json(mode: str, settings: dict[str, Any], root_dir: Path) -> tuple[str, _SnapshotStoreResult]:
+def read_snapshot_json(mode: str, settings: dict[str, Any], root_dir: Path) -> tuple[str, "_SnapshotStoreResult"]:
     snapshot_path = _snapshot_dir(settings, root_dir) / f"latest_{mode}.json"
     if not snapshot_path.exists():
         raise FileNotFoundError(f"まだ snapshot がありません: latest_{mode}.json")
@@ -199,7 +199,7 @@ def write_snapshot_bundle_to_store(
     settings: dict[str, Any],
     root_dir: Path,
     write_drive: bool = False,
-) -> _SnapshotStoreResult:
+) -> "_SnapshotStoreResult":
     snapshot_dir = _snapshot_dir(settings, root_dir)
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     generated_dt = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
@@ -579,6 +579,7 @@ UI_COLUMN_LABELS = {
     "n": "注目銘柄数",
     "sector_constituent_count": "構成銘柄数",
     "today_rank": "今日の順位",
+    "today_display_rank": "表示順位",
     "persistence_rank": "継続順位",
     "breadth": "scan内当日上昇:下落",
     "median_ret": "当日中央値騰落率",
@@ -597,6 +598,8 @@ UI_COLUMN_LABELS = {
     "industry_up_rank": "東証業種順位",
     "industry_rank_live": "東証業種順位",
     "industry_up_anchor_rank": "東証アンカー順位",
+    "industry_anchor_rank": "東証順位",
+    "final_rank_delta": "差分",
     "sector_rank_1w": "1週順位",
     "sector_rank_1m": "1か月順位",
     "sector_rank_3m": "3か月順位",
@@ -687,8 +690,10 @@ UI_COLUMN_LABELS = {
     "sector_summary": "根拠",
     "center_stocks": "中心銘柄",
     "center_summary": "中心メモ",
+    "center_note": "材料/違い",
     "candidate_rank": "順位",
     "candidate_basis": "根拠",
+    "sector_scope": "強セクター内",
     "sector_confidence": "信頼度",
     "sector_caution": "注意点",
     "quality_pass": "品質OK",
@@ -7066,6 +7071,30 @@ def _representative_fallback_reason_label(value: Any) -> str:
     return _representative_display_label(value, REPRESENTATIVE_FALLBACK_REASON_LABELS)
 
 
+def _persistence_core_representatives_reason_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    labels: list[str] = []
+    for token in [part.strip() for part in raw.split("|") if part.strip()]:
+        if token.startswith("insufficient_candidates:"):
+            count = token.split(":", 1)[1].strip()
+            labels.append(f"候補{count}件")
+        elif token.startswith("missing_columns:"):
+            labels.append("必要列不足")
+        elif token == "non_corporate_products_only":
+            labels.append("ETF等を除外")
+        elif token == "no_eligible_candidates":
+            labels.append("適格候補なし")
+        elif token == "blank_name_only":
+            labels.append("銘柄名不足")
+        elif token.startswith("missing_"):
+            labels.append("材料不足")
+        else:
+            labels.append(token)
+    return " / ".join(dict.fromkeys([label for label in labels if label]))
+
+
 def _is_missing_display_value(value: Any) -> bool:
     if value is None or value is pd.NA:
         return True
@@ -7138,8 +7167,10 @@ def _format_display_value_or_unavailable(value: Any, *, unavailable: bool = Fals
     return str(numeric)
 
 
-def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str, link_columns: bool = False) -> None:
+def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str, link_columns: bool = False, note: str = "") -> None:
     st.subheader(title)
+    if str(note or "").strip():
+        st.caption(str(note).strip())
     if frame.empty:
         st.caption(reason)
         return
@@ -7188,6 +7219,23 @@ def _format_ui_number(value: Any, *, digits: int = 1) -> str:
     return f"{float(numeric):.{digits}f}"
 
 
+def _split_ui_stock_names(value: Any) -> list[str]:
+    if isinstance(value, list):
+        names: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                name = _clean_ui_value(item.get("name")) or _clean_ui_value(item.get("code"))
+            else:
+                name = _clean_ui_value(item)
+            if name:
+                names.append(name)
+        return names[:3]
+    text = _clean_ui_value(value)
+    if not text:
+        return []
+    return [name.strip() for name in text.split("/") if name.strip()][:3]
+
+
 def _extract_sector_rank_lookup(frame: pd.DataFrame, *, rank_col: str) -> dict[str, int]:
     if frame is None or frame.empty or "sector_name" not in frame.columns:
         return {}
@@ -7209,135 +7257,150 @@ def _extract_sector_rank_lookup(frame: pd.DataFrame, *, rank_col: str) -> dict[s
 
 
 def _build_sector_focus_view(frame: pd.DataFrame, *, timeframe: str, limit: int = 5) -> pd.DataFrame:
-    leader_col = "representative_stock" if timeframe == "today" else "core_representatives"
     if frame is None or frame.empty:
-        return pd.DataFrame(columns=["axis_rank", "sector_name", leader_col, "sector_summary"])
-    rank_col = "today_rank" if timeframe == "today" else "persistence_rank"
-    working = frame.head(limit).copy()
-    working["axis_rank"] = working[rank_col]
+        if timeframe == "today":
+            return pd.DataFrame(columns=["today_display_rank", "industry_anchor_rank", "final_rank_delta", "sector_name", "sector_summary"])
+        return pd.DataFrame(columns=["axis_rank", "sector_name", "sector_summary"])
+    rank_col = "today_display_rank" if timeframe == "today" else "persistence_rank"
+    working = frame.copy()
+    working["_rank_sort"] = _coerce_numeric(working.get(rank_col, pd.Series(pd.NA, index=working.index))).fillna(9999)
+    if "sector_name" not in working.columns:
+        working["sector_name"] = ""
+    working = working.sort_values(["_rank_sort", "sector_name"], ascending=[True, True], kind="mergesort").head(limit).copy()
+    if timeframe == "today":
+        working["today_display_rank"] = _coerce_numeric(working.get("today_display_rank", working.get("today_rank", pd.Series(pd.NA, index=working.index)))).round().astype("Int64")
+        working["industry_anchor_rank"] = _coerce_numeric(
+            working.get(
+                "industry_anchor_rank",
+                working.get("industry_up_anchor_rank", working.get("industry_rank_live", pd.Series(pd.NA, index=working.index))),
+            )
+        ).round().astype("Int64")
+        display_rank = _coerce_numeric(working["today_display_rank"])
+        anchor_rank = _coerce_numeric(working["industry_anchor_rank"])
+        delta = _coerce_numeric(working.get("final_rank_delta", pd.Series(pd.NA, index=working.index)))
+        working["final_rank_delta"] = delta.where(delta.notna(), display_rank - anchor_rank).round().astype("Int64")
+    else:
+        working["axis_rank"] = _coerce_numeric(working.get("persistence_rank", pd.Series(pd.NA, index=working.index))).round().astype("Int64")
     working["sector_summary"] = working.apply(
         lambda row: _shorten_ui_text(
-            _join_ui_fragments(
-                f"信頼度 {_clean_ui_value(row.get('sector_confidence'))}" if _clean_ui_value(row.get("sector_confidence")) else "",
-                f"TOPIX比RS {_format_ui_number(row.get('sector_rs_vs_topix'))}" if timeframe != "today" and _format_ui_number(row.get("sector_rs_vs_topix")) else "",
-                f"価格 {_format_ui_number(row.get('price_block_score'))}" if timeframe == "today" and _format_ui_number(row.get("price_block_score")) else "",
-                f"資金 {_format_ui_number(row.get('flow_block_score'))}" if timeframe == "today" and _format_ui_number(row.get("flow_block_score")) else "",
-                f"広がり {_clean_ui_value(row.get('ranking_breadth_display'))}" if timeframe == "today" and _clean_ui_value(row.get("ranking_breadth_display")) else "",
-                f"注意 {_first_ui_value(row.get('quality_warn'), row.get('sector_caution'))}" if _first_ui_value(row.get("quality_warn"), row.get("sector_caution")) else "",
+            _first_ui_value(
+                row.get("sector_summary"),
+                _join_ui_fragments(
+                    f"信頼度 {_clean_ui_value(row.get('sector_confidence'))}" if _clean_ui_value(row.get("sector_confidence")) else "",
+                    f"TOPIX比RS {_format_ui_number(row.get('sector_rs_vs_topix'))}" if timeframe != "today" and _format_ui_number(row.get("sector_rs_vs_topix")) else "",
+                    f"価格 {_format_ui_number(row.get('price_block_score'))}" if timeframe == "today" and _format_ui_number(row.get("price_block_score")) else "",
+                    f"資金 {_format_ui_number(row.get('flow_block_score'))}" if timeframe == "today" and _format_ui_number(row.get("flow_block_score")) else "",
+                    f"広がり {_clean_ui_value(row.get('ranking_breadth_display'))}" if timeframe == "today" and _clean_ui_value(row.get("ranking_breadth_display")) else "",
+                    f"注意 {_first_ui_value(row.get('quality_warn'), row.get('sector_caution'))}" if _first_ui_value(row.get("quality_warn"), row.get("sector_caution")) else "",
+                ),
             ),
             limit=92,
         ),
         axis=1,
     )
-    return working[["axis_rank", "sector_name", leader_col, "sector_summary"]].reset_index(drop=True)
+    if timeframe == "today":
+        return working.drop(columns=["_rank_sort"], errors="ignore")[["today_display_rank", "industry_anchor_rank", "final_rank_delta", "sector_name", "sector_summary"]].reset_index(drop=True)
+    return working.drop(columns=["_rank_sort"], errors="ignore")[["axis_rank", "sector_name", "sector_summary"]].reset_index(drop=True)
 
 
-def _build_center_overview_view(
+def _build_center_stock_focus_view(
     sector_frame: pd.DataFrame,
     *,
     sector_rank_lookup: dict[str, int],
+    timeframe: str,
     representative_frame: pd.DataFrame | None = None,
-    leader_col: str,
 ) -> pd.DataFrame:
+    if timeframe == "today":
+        if representative_frame is None or representative_frame.empty:
+            return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
+        working = representative_frame.copy()
+        working["sector_name"] = working.get("sector_name", pd.Series("", index=working.index)).apply(_clean_ui_value)
+        working = working[working["sector_name"].isin(sector_rank_lookup)]
+        if working.empty:
+            return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
+        working["_axis_rank_sort"] = working["sector_name"].map(lambda value: sector_rank_lookup.get(str(value), 9999))
+        working["_rep_rank_sort"] = _coerce_numeric(working.get("representative_rank", pd.Series(pd.NA, index=working.index))).fillna(9999)
+        working = working.sort_values(
+            ["_axis_rank_sort", "_rep_rank_sort", "sector_name", "code"],
+            ascending=[True, True, True, True],
+            kind="mergesort",
+        )
+        return working.drop(columns=["_axis_rank_sort", "_rep_rank_sort"], errors="ignore").reset_index(drop=True)
+    columns = ["axis_rank", "sector_name", "representative_rank", "name", "center_note", "nikkei_search"]
+    if sector_frame is None or sector_frame.empty:
+        return pd.DataFrame(columns=columns)
+    working = sector_frame.copy()
+    working["sector_name"] = working.get("sector_name", pd.Series("", index=working.index)).apply(_clean_ui_value)
+    working = working[working["sector_name"].isin(sector_rank_lookup)]
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+    working["_axis_rank_sort"] = working["sector_name"].map(lambda value: sector_rank_lookup.get(str(value), 9999))
+    working = working.sort_values(["_axis_rank_sort", "sector_name"], ascending=[True, True], kind="mergesort")
     rows: list[dict[str, Any]] = []
-    covered: set[str] = set()
-    if isinstance(representative_frame, pd.DataFrame) and not representative_frame.empty:
-        rep_working = representative_frame.copy()
-        rep_working["sector_name"] = rep_working["sector_name"].apply(_clean_ui_value)
-        rep_working = rep_working[rep_working["sector_name"].isin(sector_rank_lookup)]
-        if not rep_working.empty:
-            rep_working["_rep_rank_sort"] = _coerce_numeric(rep_working.get("representative_rank", pd.Series(pd.NA, index=rep_working.index))).fillna(9999)
-            rep_working = rep_working.sort_values(["_rep_rank_sort", "sector_name"], ascending=[True, True], kind="mergesort")
-            for sector_name, group in rep_working.groupby("sector_name", sort=False):
-                names = [
-                    _first_ui_value(row.get("name"), row.get("code"))
-                    for _, row in group.head(3).iterrows()
-                    if _first_ui_value(row.get("name"), row.get("code"))
-                ]
-                if not names:
-                    continue
-                first_row = group.iloc[0]
-                rows.append(
-                    {
-                        "axis_rank": sector_rank_lookup.get(sector_name, ""),
-                        "sector_name": sector_name,
-                        "center_stocks": " / ".join(names),
-                        "center_summary": _shorten_ui_text(
-                            _join_ui_fragments(
-                                _clean_ui_value(first_row.get("representative_selected_reason")),
-                                f"品質 {_clean_ui_value(first_row.get('representative_quality_flag'))}" if _clean_ui_value(first_row.get("representative_quality_flag")) else "",
-                                f"注意 {_clean_ui_value(first_row.get('representative_fallback_reason'))}" if _clean_ui_value(first_row.get("representative_fallback_reason")) else "",
-                            ),
-                            limit=88,
-                        ),
-                    }
-                )
-                covered.add(sector_name)
-    if sector_frame is not None and not sector_frame.empty:
-        for _, row in sector_frame.iterrows():
-            sector_name = _clean_ui_value(row.get("sector_name"))
-            if not sector_name or sector_name in covered or sector_name not in sector_rank_lookup:
-                continue
-            center_stocks = _clean_ui_value(row.get(leader_col))
-            if not center_stocks:
-                continue
+    for _, row in working.iterrows():
+        sector_name = _clean_ui_value(row.get("sector_name"))
+        if not sector_name:
+            continue
+        names = _split_ui_stock_names(row.get("core_representatives")) or _split_ui_stock_names(row.get("representative_stock"))
+        if not names:
+            continue
+        reason_label = _persistence_core_representatives_reason_label(row.get("core_representatives_reason"))
+        anchor_name = _clean_ui_value(row.get("representative_stock"))
+        for idx, name in enumerate(names, start=1):
             rows.append(
                 {
                     "axis_rank": sector_rank_lookup.get(sector_name, ""),
                     "sector_name": sector_name,
-                    "center_stocks": center_stocks,
-                    "center_summary": _shorten_ui_text(
+                    "representative_rank": idx,
+                    "name": name,
+                    "center_note": _shorten_ui_text(
                         _join_ui_fragments(
-                            f"信頼度 {_clean_ui_value(row.get('sector_confidence'))}" if _clean_ui_value(row.get("sector_confidence")) else "",
-                            f"注意 {_first_ui_value(row.get('quality_warn'), row.get('sector_caution'))}" if _first_ui_value(row.get("quality_warn"), row.get("sector_caution")) else "",
+                            f"{timeframe}軸の主力{idx}番手",
+                            f"先頭 {anchor_name}" if anchor_name and idx > 1 else "",
+                            reason_label,
                         ),
-                        limit=88,
+                        limit=72,
                     ),
+                    "nikkei_search": _make_nikkei_search_link(name, ""),
                 }
             )
-    if not rows:
-        return pd.DataFrame(columns=["axis_rank", "sector_name", "center_stocks", "center_summary"])
-    center_view = pd.DataFrame(rows)
-    center_view["_axis_rank_sort"] = _coerce_numeric(center_view.get("axis_rank", pd.Series(pd.NA, index=center_view.index))).fillna(9999)
-    center_view = center_view.sort_values(["_axis_rank_sort", "sector_name"], ascending=[True, True], kind="mergesort")
-    return center_view.drop(columns=["_axis_rank_sort"], errors="ignore").reset_index(drop=True)
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _build_center_reference_map(
     center_overview_view: pd.DataFrame,
-    representative_frame: pd.DataFrame | None = None,
 ) -> dict[str, dict[str, Any]]:
     center_map: dict[str, dict[str, Any]] = {}
     if center_overview_view is not None and not center_overview_view.empty:
-        for _, row in center_overview_view.iterrows():
-            sector_name = _clean_ui_value(row.get("sector_name"))
-            if not sector_name:
-                continue
-            center_text = _clean_ui_value(row.get("center_stocks"))
-            center_map[sector_name] = {
-                "center_text": center_text,
-                "codes": {},
-                "names": {name.strip() for name in center_text.split("/") if name.strip()},
-            }
-    if isinstance(representative_frame, pd.DataFrame) and not representative_frame.empty:
-        rep_working = representative_frame.copy()
-        rep_working["sector_name"] = rep_working["sector_name"].apply(_clean_ui_value)
-        rep_working = rep_working[rep_working["sector_name"].ne("")]
-        if not rep_working.empty:
-            rep_working["_rep_rank_sort"] = _coerce_numeric(rep_working.get("representative_rank", pd.Series(pd.NA, index=rep_working.index))).fillna(9999)
-            rep_working = rep_working.sort_values(["_rep_rank_sort", "sector_name"], ascending=[True, True], kind="mergesort")
-            for sector_name, group in rep_working.groupby("sector_name", sort=False):
-                entry = center_map.setdefault(sector_name, {"center_text": "", "codes": {}, "names": set()})
+        working = center_overview_view.copy()
+        working["sector_name"] = working.get("sector_name", pd.Series("", index=working.index)).apply(_clean_ui_value)
+        working = working[working["sector_name"].ne("")]
+        if not working.empty:
+            if "code" not in working.columns:
+                working["code"] = ""
+            if "name" not in working.columns:
+                working["name"] = ""
+            working["_rep_rank_sort"] = _coerce_numeric(working.get("representative_rank", pd.Series(pd.NA, index=working.index))).fillna(9999)
+            working = working.sort_values(["sector_name", "_rep_rank_sort", "code", "name"], ascending=[True, True, True, True], kind="mergesort")
+            for sector_name, group in working.groupby("sector_name", sort=False):
+                names: list[str] = []
+                codes: dict[str, str] = {}
                 for _, row in group.head(3).iterrows():
                     code = _clean_ui_value(row.get("code"))
                     name = _clean_ui_value(row.get("name"))
                     rep_rank = _clean_ui_value(row.get("representative_rank"))
                     if code and rep_rank:
-                        entry["codes"][code] = rep_rank
+                        codes[code] = rep_rank
                     if name:
-                        entry["names"].add(name)
-                if not entry.get("center_text"):
-                    entry["center_text"] = " / ".join([name for name in entry["names"] if name][:3])
+                        names.append(name)
+                center_map[sector_name] = {
+                    "center_text": " / ".join(names[:3]),
+                    "codes": codes,
+                    "names": set(names),
+                }
+                normalized_key = _normalize_industry_key(sector_name)
+                if normalized_key and normalized_key != sector_name:
+                    center_map[normalized_key] = center_map[sector_name]
     return center_map
 
 
@@ -7349,9 +7412,12 @@ def _build_candidate_focus_view(
     center_reference_map: dict[str, dict[str, Any]],
     scope_label: str,
     limit: int = 5,
-) -> tuple[pd.DataFrame, str]:
+    restrict_to_sector_scope: bool = False,
+    fallback_frame: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, str, str]:
     columns = [
         "candidate_rank",
+        "sector_scope",
         "sector_name",
         "code",
         "name",
@@ -7362,31 +7428,45 @@ def _build_candidate_focus_view(
         "nikkei_search",
     ]
     if frame is None or frame.empty:
-        return pd.DataFrame(columns=columns), ""
+        return pd.DataFrame(columns=columns), "", ""
     working = frame.copy()
     working["sector_name"] = working["sector_name"].apply(_clean_ui_value)
-    working = working[working["sector_name"].isin(sector_rank_lookup)]
+    normalized_sector_lookup = {_normalize_industry_key(key): value for key, value in sector_rank_lookup.items() if _normalize_industry_key(key)}
+    working["_sector_lookup_key"] = working["sector_name"].map(_normalize_industry_key)
+    candidate_note = ""
+    if restrict_to_sector_scope:
+        filtered = working[working["_sector_lookup_key"].isin(normalized_sector_lookup)].copy()
+        if filtered.empty and isinstance(fallback_frame, pd.DataFrame) and not fallback_frame.empty:
+            working = fallback_frame.copy()
+            working["sector_name"] = working["sector_name"].apply(_clean_ui_value)
+            working["_sector_lookup_key"] = working["sector_name"].map(_normalize_industry_key)
+            candidate_note = "today強セクター内に該当がないため、1w候補全体から表示しています"
+        else:
+            working = filtered
     if working.empty:
-        return pd.DataFrame(columns=columns), f"{scope_label}に該当する既存候補はありません。"
-    entry_labels = working.get("entry_stance_label", pd.Series("", index=working.index)).fillna("").astype(str)
-    buy_mask = entry_labels.str.contains("買", regex=False)
-    if not buy_mask.any():
-        return pd.DataFrame(columns=columns), f"{scope_label}の買い候補はありません。監視候補のみです。"
-    working = working[buy_mask].copy()
-    working["_axis_rank_sort"] = working["sector_name"].map(lambda value: sector_rank_lookup.get(str(value), 9999))
+        return pd.DataFrame(columns=columns), f"{scope_label}に該当する既存候補はありません。", candidate_note
     working["_candidate_rank_sort"] = _coerce_numeric(working.get(rank_col, pd.Series(pd.NA, index=working.index))).fillna(9999)
-    working = working.sort_values(
-        ["_axis_rank_sort", "_candidate_rank_sort", "sector_name", "code"],
-        ascending=[True, True, True, True],
-        kind="mergesort",
-    ).head(limit)
+    if restrict_to_sector_scope and not candidate_note:
+        working["_axis_rank_sort"] = working["_sector_lookup_key"].map(lambda value: normalized_sector_lookup.get(str(value), 9999))
+        working = working.sort_values(
+            ["_axis_rank_sort", "_candidate_rank_sort", "sector_name", "code"],
+            ascending=[True, True, True, True],
+            kind="mergesort",
+        ).head(limit)
+    else:
+        working = working.sort_values(
+            ["_candidate_rank_sort", "sector_name", "code"],
+            ascending=[True, True, True],
+            kind="mergesort",
+        ).head(limit)
     working["candidate_rank"] = working[rank_col]
+    working["sector_scope"] = working["_sector_lookup_key"].map(lambda value: "内" if str(value or "") in normalized_sector_lookup else "外")
 
     def _build_candidate_basis(row: pd.Series) -> str:
         sector_name = _clean_ui_value(row.get("sector_name"))
         code = _clean_ui_value(row.get("code"))
         name = _clean_ui_value(row.get("name"))
-        center_meta = center_reference_map.get(sector_name, {})
+        center_meta = center_reference_map.get(sector_name, center_reference_map.get(_normalize_industry_key(sector_name), {}))
         center_codes = center_meta.get("codes", {})
         center_names = center_meta.get("names", set())
         center_text = _clean_ui_value(center_meta.get("center_text"))
@@ -7404,13 +7484,13 @@ def _build_candidate_focus_view(
             _join_ui_fragments(
                 f"理由 {reason}" if reason else "理由 既存候補ロジック通過",
                 f"中心 {center_note}",
-                f"注意 {caution}" if caution else "注意 大きな懸念なし",
+                f"注意 {caution}" if caution else "注意 特記なし",
             ),
-            limit=108,
+            limit=92,
         )
 
     working["candidate_basis"] = working.apply(_build_candidate_basis, axis=1)
-    return working[columns].reset_index(drop=True), ""
+    return working.drop(columns=["_sector_lookup_key"], errors="ignore")[columns].reset_index(drop=True), "", candidate_note
 
 
 def _render_timeframe_panel(
@@ -7424,11 +7504,12 @@ def _render_timeframe_panel(
     center_reason: str,
     candidate_frame: pd.DataFrame,
     candidate_reason: str,
+    candidate_note: str = "",
 ) -> None:
     st.caption(f"{timeframe_label}: {timeframe_note}")
     _render_dataframe_or_reason(sector_title, sector_frame, reason=sector_reason)
     _render_dataframe_or_reason("そのセクターの中心銘柄", center_frame, reason=center_reason)
-    _render_dataframe_or_reason("買う候補", candidate_frame, reason=candidate_reason, link_columns=True)
+    _render_dataframe_or_reason("買う候補", candidate_frame, reason=candidate_reason, link_columns=True, note=candidate_note)
 
 
 def _persistence_gate_fail_warn_label(reason: Any) -> str:
@@ -7452,16 +7533,11 @@ def _persistence_gate_fail_warn_label(reason: Any) -> str:
 
 
 TODAY_SECTOR_DISPLAY_COLUMNS = [
-    "today_rank",
+    "today_display_rank",
+    "industry_anchor_rank",
+    "final_rank_delta",
     "sector_name",
-    "representative_stock",
-    "sector_confidence",
-    "sector_caution",
-    "industry_rank_live",
-    "price_block_score",
-    "flow_block_score",
-    "ranking_breadth_display",
-    "scan_member_count",
+    "sector_summary",
 ]
 
 SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS = [
@@ -7839,17 +7915,36 @@ def _prepare_today_sector_view(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str
     rank_column = "today_display_rank" if "today_display_rank" in df.columns else "today_rank"
     if rank_column not in df.columns:
         compatibility_notes.append("today_rank")
-    prepared["today_rank"] = _coalesce_snapshot_series(df, ["today_display_rank", "today_rank"])
+    prepared["today_display_rank"] = _coalesce_snapshot_series(df, ["today_display_rank", "today_rank"])
+    prepared["industry_anchor_rank"] = _coalesce_snapshot_series(df, ["industry_anchor_rank", "industry_up_anchor_rank", "industry_rank_live"])
+    prepared["final_rank_delta"] = _coalesce_snapshot_series(df, ["final_rank_delta"])
     prepared["sector_name"] = _coalesce_snapshot_series(df, ["sector_name"], string_output=True)
-    prepared["representative_stock"] = _coalesce_snapshot_string_priority(df, ["representative_stocks", "leaders", "representative_stock"])
     prepared["sector_confidence"] = _coalesce_snapshot_series(df, ["sector_confidence"], string_output=True)
     prepared["sector_caution"] = _coalesce_snapshot_series(df, ["sector_caution"], string_output=True)
-    prepared["industry_rank_live"] = _coalesce_snapshot_series(df, ["industry_rank_live"])
     prepared["price_block_score"] = _coalesce_snapshot_series(df, ["price_strength_display", "price_block_score"])
     prepared["flow_block_score"] = _coalesce_snapshot_series(df, ["flow_strength_display", "flow_block_score"])
     prepared["ranking_breadth_display"] = _coalesce_snapshot_series(df, ["ranking_breadth_display", "ranking_source_breadth_ex_basket", "participation_block_score"])
-    prepared["scan_member_count"] = _coalesce_snapshot_series(df, ["wide_scan_member_count", "scan_member_count"])
-    return _prepare_table_view(prepared, TODAY_SECTOR_DISPLAY_COLUMNS)
+    display_rank = _coerce_numeric(prepared["today_display_rank"])
+    anchor_rank = _coerce_numeric(prepared["industry_anchor_rank"])
+    delta = _coerce_numeric(prepared["final_rank_delta"])
+    prepared["final_rank_delta"] = delta.where(delta.notna(), display_rank - anchor_rank)
+    prepared["sector_summary"] = prepared.apply(
+        lambda row: _shorten_ui_text(
+            _join_ui_fragments(
+                f"信頼度 {_clean_ui_value(row.get('sector_confidence'))}" if _clean_ui_value(row.get("sector_confidence")) else "",
+                f"価格 {_format_ui_number(row.get('price_block_score'))}" if _format_ui_number(row.get("price_block_score")) else "",
+                f"資金 {_format_ui_number(row.get('flow_block_score'))}" if _format_ui_number(row.get("flow_block_score")) else "",
+                f"広がり {_clean_ui_value(row.get('ranking_breadth_display'))}" if _clean_ui_value(row.get("ranking_breadth_display")) else "",
+                f"注意 {_clean_ui_value(row.get('sector_caution'))}" if _clean_ui_value(row.get("sector_caution")) else "",
+            ),
+            limit=92,
+        ),
+        axis=1,
+    )
+    prepared, notes = _prepare_table_view(prepared, TODAY_SECTOR_DISPLAY_COLUMNS)
+    prepared["_rank_sort"] = _coerce_numeric(prepared.get("today_display_rank", pd.Series(pd.NA, index=prepared.index))).fillna(9999)
+    prepared = prepared.sort_values(["_rank_sort", "sector_name"], ascending=[True, True], kind="mergesort").drop(columns=["_rank_sort"], errors="ignore")
+    return prepared, compatibility_notes + notes
 
 
 def _build_sector_representatives_display_frame(
@@ -9428,60 +9523,62 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     monthly_sector_focus = _build_sector_focus_view(monthly_sector_view, timeframe="1m")
     quarter_sector_focus = _build_sector_focus_view(quarter_sector_view, timeframe="3m")
 
-    today_sector_lookup = _extract_sector_rank_lookup(today_sector_focus, rank_col="axis_rank")
+    today_sector_lookup = _extract_sector_rank_lookup(today_sector_focus, rank_col="today_display_rank")
     weekly_sector_lookup = _extract_sector_rank_lookup(weekly_sector_focus, rank_col="axis_rank")
     monthly_sector_lookup = _extract_sector_rank_lookup(monthly_sector_focus, rank_col="axis_rank")
     quarter_sector_lookup = _extract_sector_rank_lookup(quarter_sector_focus, rank_col="axis_rank")
 
-    today_center_focus = _build_center_overview_view(
-        today_sector_focus,
+    today_center_focus = _build_center_stock_focus_view(
+        today_sector_view,
         sector_rank_lookup=today_sector_lookup,
+        timeframe="today",
         representative_frame=sector_representatives_view,
-        leader_col="representative_stock",
     )
-    weekly_center_focus = _build_center_overview_view(
-        weekly_sector_focus,
+    weekly_center_focus = _build_center_stock_focus_view(
+        weekly_sector_view,
         sector_rank_lookup=weekly_sector_lookup,
-        leader_col="core_representatives",
+        timeframe="1w",
     )
-    monthly_center_focus = _build_center_overview_view(
-        monthly_sector_focus,
+    monthly_center_focus = _build_center_stock_focus_view(
+        monthly_sector_view,
         sector_rank_lookup=monthly_sector_lookup,
-        leader_col="core_representatives",
+        timeframe="1m",
     )
-    quarter_center_focus = _build_center_overview_view(
-        quarter_sector_focus,
+    quarter_center_focus = _build_center_stock_focus_view(
+        quarter_sector_view,
         sector_rank_lookup=quarter_sector_lookup,
-        leader_col="core_representatives",
+        timeframe="3m",
     )
 
-    today_center_map = _build_center_reference_map(today_center_focus, sector_representatives_view)
+    today_center_map = _build_center_reference_map(today_center_focus)
     weekly_center_map = _build_center_reference_map(weekly_center_focus)
     monthly_center_map = _build_center_reference_map(monthly_center_focus)
     quarter_center_map = _build_center_reference_map(quarter_center_focus)
 
-    today_candidate_focus, today_candidate_reason = _build_candidate_focus_view(
+    today_candidate_focus, today_candidate_reason, today_candidate_note = _build_candidate_focus_view(
         swing_1w_view,
         rank_col="candidate_rank_1w",
         sector_rank_lookup=today_sector_lookup,
         center_reference_map=today_center_map,
         scope_label="today 強セクター内",
+        restrict_to_sector_scope=True,
+        fallback_frame=swing_1w_view,
     )
-    weekly_candidate_focus, weekly_candidate_reason = _build_candidate_focus_view(
+    weekly_candidate_focus, weekly_candidate_reason, weekly_candidate_note = _build_candidate_focus_view(
         swing_1w_view,
         rank_col="candidate_rank_1w",
         sector_rank_lookup=weekly_sector_lookup,
         center_reference_map=weekly_center_map,
         scope_label="1週間軸",
     )
-    monthly_candidate_focus, monthly_candidate_reason = _build_candidate_focus_view(
+    monthly_candidate_focus, monthly_candidate_reason, monthly_candidate_note = _build_candidate_focus_view(
         swing_1m_view,
         rank_col="candidate_rank_1m",
         sector_rank_lookup=monthly_sector_lookup,
         center_reference_map=monthly_center_map,
         scope_label="1か月軸",
     )
-    quarter_candidate_focus, quarter_candidate_reason = _build_candidate_focus_view(
+    quarter_candidate_focus, quarter_candidate_reason, quarter_candidate_note = _build_candidate_focus_view(
         swing_3m_view,
         rank_col="candidate_rank_3m",
         sector_rank_lookup=quarter_sector_lookup,
@@ -9493,7 +9590,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     with timeframe_tabs[0]:
         _render_timeframe_panel(
             timeframe_label="today",
-            timeframe_note="当日の強さを優先表示します。買う候補は既存の1w候補を today 強セクター内に絞った表示です。",
+            timeframe_note="当日の強さを優先し、強いセクターは表示順位の昇順で見ます。",
             sector_title="強いセクター",
             sector_frame=today_sector_focus,
             sector_reason=str(empty_reasons.get("today_sector_leaderboard", "intraday 条件を満たす本命セクターがありません。")),
@@ -9506,6 +9603,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
             ),
             candidate_frame=today_candidate_focus,
             candidate_reason=today_candidate_reason or str(empty_reasons.get("swing_candidates_1w_display", empty_reasons.get("swing_candidates_1w", "today 強セクター内の買い候補はありません。"))),
+            candidate_note=today_candidate_note,
         )
     with timeframe_tabs[1]:
         _render_timeframe_panel(
@@ -9518,6 +9616,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
             center_reason=str(empty_reasons.get("sector_persistence_1w", empty_reasons.get("weekly_sector_summary", "中心銘柄がありません。"))),
             candidate_frame=weekly_candidate_focus,
             candidate_reason=weekly_candidate_reason or str(empty_reasons.get("swing_candidates_1w_display", empty_reasons.get("swing_candidates_1w", "1週間軸の買い候補はありません。"))),
+            candidate_note=weekly_candidate_note,
         )
     with timeframe_tabs[2]:
         _render_timeframe_panel(
@@ -9530,6 +9629,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
             center_reason=str(empty_reasons.get("sector_persistence_1m", empty_reasons.get("monthly_sector_summary", "中心銘柄がありません。"))),
             candidate_frame=monthly_candidate_focus,
             candidate_reason=monthly_candidate_reason or str(empty_reasons.get("swing_candidates_1m_display", empty_reasons.get("swing_candidates_1m", "1か月軸の買い候補はありません。"))),
+            candidate_note=monthly_candidate_note,
         )
     with timeframe_tabs[3]:
         _render_timeframe_panel(
@@ -9542,6 +9642,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
             center_reason=str(empty_reasons.get("sector_persistence_3m", "中心銘柄がありません。")),
             candidate_frame=quarter_candidate_focus,
             candidate_reason=quarter_candidate_reason or str(empty_reasons.get("swing_candidates_3m_display", empty_reasons.get("swing_candidates_3m", "3か月軸の買い候補はありません。"))),
+            candidate_note=quarter_candidate_note,
         )
     diagnostics = bundle.get("diagnostics", {})
     if diagnostics:
