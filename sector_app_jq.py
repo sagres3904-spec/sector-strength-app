@@ -425,6 +425,22 @@ REPRESENTATIVE_SORT_ASCENDING = [True, False, False, False, False, False]
 DEEP_WATCH_MUST_HAVE_TOP_SECTORS = 10
 DEEP_WATCH_MUST_HAVE_PER_SECTOR = 2
 DEEP_WATCH_MUST_HAVE_MAX = 20
+DEEP_WATCH_MUST_HAVE_TODAY_WEIGHTS = {
+    "ranking_combo_score": 1.65,
+    "ret_1w": 0.45,
+    "rel_1w": 0.45,
+    "ranking_union_member_bonus": 0.65,
+    "industry_basket_member_bonus": 0.20,
+}
+DEEP_WATCH_MUST_HAVE_REPRESENTATIVE_WEIGHTS = {
+    "sector_contribution_full": 0.55,
+    "contribution_rank_in_sector": 0.35,
+    "turnover_rank_in_sector": 0.30,
+    "avg_turnover_20d": 0.25,
+    "TradingValue_latest": 0.20,
+    "avg_volume_20d": 0.10,
+    "liquidity_ok_bonus": 0.15,
+}
 CENTER_LEADER_TRACE_LIMIT = 10
 CENTER_LEADER_CENTRALITY_WEIGHTS = {
     "sector_contribution_full": 1.55,
@@ -2829,22 +2845,24 @@ def _build_deep_watch_must_have_pool(
     if working.empty:
         return working
     working["protected_sector_rank"] = working["normalized_sector_name"].map(lambda value: float(protected_sector_rank_map.get(str(value or ""), 9999)))
-    working["must_have_priority"] = 0.0
-    working["must_have_priority"] += _score_percentile(working["sector_contribution_full"]) * 1.60
-    working["must_have_priority"] += _score_rank_ascending(working["contribution_rank_in_sector"]) * 1.10
-    working["must_have_priority"] += _score_rank_ascending(working["turnover_rank_in_sector"]) * 1.00
-    working["must_have_priority"] += _score_percentile(working["avg_turnover_20d"]) * 0.85
-    working["must_have_priority"] += _score_percentile(working["avg_volume_20d"]) * 0.45
-    working["must_have_priority"] += _score_percentile(working["ranking_combo_score"]) * 0.65
-    working["must_have_priority"] += _score_percentile(working["ret_1w"]) * 0.35
-    working["must_have_priority"] += _score_percentile(working["rel_1w"]) * 0.35
-    working.loc[working["ranking_union_member"], "must_have_priority"] += 0.45
-    working.loc[working["industry_basket_member"], "must_have_priority"] += 0.20
-    working.loc[working["liquidity_ok"], "must_have_priority"] += 0.55
-    working["must_have_priority"] += _score_rank_ascending(working["protected_sector_rank"]) * 0.55
+    working["must_have_today_strength"] = 0.0
+    working["must_have_today_strength"] += _score_percentile(working["ranking_combo_score"]) * DEEP_WATCH_MUST_HAVE_TODAY_WEIGHTS["ranking_combo_score"]
+    working["must_have_today_strength"] += _score_percentile(working["ret_1w"]) * DEEP_WATCH_MUST_HAVE_TODAY_WEIGHTS["ret_1w"]
+    working["must_have_today_strength"] += _score_percentile(working["rel_1w"]) * DEEP_WATCH_MUST_HAVE_TODAY_WEIGHTS["rel_1w"]
+    working.loc[working["ranking_union_member"], "must_have_today_strength"] += DEEP_WATCH_MUST_HAVE_TODAY_WEIGHTS["ranking_union_member_bonus"]
+    working.loc[working["industry_basket_member"], "must_have_today_strength"] += DEEP_WATCH_MUST_HAVE_TODAY_WEIGHTS["industry_basket_member_bonus"]
+    working["must_have_representative_support"] = 0.0
+    working["must_have_representative_support"] += _score_percentile(working["sector_contribution_full"]) * DEEP_WATCH_MUST_HAVE_REPRESENTATIVE_WEIGHTS["sector_contribution_full"]
+    working["must_have_representative_support"] += _score_rank_ascending(working["contribution_rank_in_sector"]) * DEEP_WATCH_MUST_HAVE_REPRESENTATIVE_WEIGHTS["contribution_rank_in_sector"]
+    working["must_have_representative_support"] += _score_rank_ascending(working["turnover_rank_in_sector"]) * DEEP_WATCH_MUST_HAVE_REPRESENTATIVE_WEIGHTS["turnover_rank_in_sector"]
+    working["must_have_representative_support"] += _score_percentile(working["avg_turnover_20d"]) * DEEP_WATCH_MUST_HAVE_REPRESENTATIVE_WEIGHTS["avg_turnover_20d"]
+    working["must_have_representative_support"] += _score_percentile(working["TradingValue_latest"]) * DEEP_WATCH_MUST_HAVE_REPRESENTATIVE_WEIGHTS["TradingValue_latest"]
+    working["must_have_representative_support"] += _score_percentile(working["avg_volume_20d"]) * DEEP_WATCH_MUST_HAVE_REPRESENTATIVE_WEIGHTS["avg_volume_20d"]
+    working.loc[working["liquidity_ok"], "must_have_representative_support"] += DEEP_WATCH_MUST_HAVE_REPRESENTATIVE_WEIGHTS["liquidity_ok_bonus"]
+    working["must_have_priority"] = working["must_have_today_strength"] * 100.0 + working["must_have_representative_support"]
     working = working.sort_values(
-        ["protected_sector_rank", "must_have_priority", "ranking_combo_score", "TradingValue_latest", "avg_turnover_20d"],
-        ascending=[True, False, False, False, False],
+        ["protected_sector_rank", "must_have_today_strength", "must_have_representative_support", "ranking_combo_score", "sector_contribution_full", "TradingValue_latest", "avg_turnover_20d"],
+        ascending=[True, False, False, False, False, False, False],
         kind="mergesort",
     ).copy()
     working["must_have_rank_in_sector"] = working.groupby("sector_name").cumcount() + 1
