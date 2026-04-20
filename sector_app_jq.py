@@ -1,5 +1,4 @@
 import base64
-import hashlib
 import json
 import logging
 import math
@@ -1064,78 +1063,6 @@ def _snapshot_mtime_ns(snapshot_path: Path) -> int:
         return snapshot_path.stat().st_mtime_ns
     except FileNotFoundError:
         return -1
-
-
-def _parse_runtime_timestamp(value: Any) -> datetime | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _frame_display_signature(frame: Any) -> str:
-    if not isinstance(frame, pd.DataFrame):
-        return "missing"
-    if frame.empty:
-        return "empty"
-    normalized = frame.copy()
-    normalized = normalized.reindex(columns=sorted(str(column) for column in normalized.columns))
-    normalized = normalized.astype("object")
-    normalized = normalized.where(pd.notna(normalized), "")
-    for column in normalized.columns:
-        normalized[column] = normalized[column].map(lambda value: str(value))
-    payload = normalized.to_json(orient="split", force_ascii=False)
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
-
-
-def _bundle_snapshot_token(bundle: dict[str, Any]) -> dict[str, str]:
-    meta = bundle.get("meta", {}) if isinstance(bundle, dict) else {}
-    paths = bundle.get("paths", {}) if isinstance(bundle, dict) else {}
-    signature_keys = [
-        "today_sector_leaderboard",
-        "sector_representatives_display",
-        "swing_candidates_1w_display",
-        "swing_candidates_1m_display",
-        "swing_candidates_3m_display",
-    ]
-    signature_seed = "|".join(
-        f"{key}:{_frame_display_signature(bundle.get(key, pd.DataFrame()) if isinstance(bundle, dict) else pd.DataFrame())}"
-        for key in signature_keys
-    )
-    return {
-        "generated_at": str(meta.get("generated_at", "") or "").strip(),
-        "generated_at_jst": str(meta.get("generated_at_jst", "") or meta.get("generated_at", "") or "").strip(),
-        "json_sha": str(paths.get("json_sha", "") or "").strip(),
-        "json_path": str(paths.get("json_path", "") or "").strip(),
-        "display_signature": hashlib.sha1(signature_seed.encode("utf-8")).hexdigest(),
-    }
-
-
-def _register_viewer_snapshot_observation(mode: str, bundle: dict[str, Any]) -> str:
-    try:
-        observations = dict(st.session_state.get("_viewer_snapshot_observations", {}))
-    except Exception:
-        observations = {}
-    current = _bundle_snapshot_token(bundle)
-    previous = observations.get(mode, {}) if isinstance(observations.get(mode, {}), dict) else {}
-    observations[mode] = current
-    try:
-        st.session_state["_viewer_snapshot_observations"] = observations
-    except Exception:
-        pass
-    previous_generated_at = str(previous.get("generated_at", "") or "").strip()
-    current_generated_at = str(current.get("generated_at", "") or "").strip()
-    if previous_generated_at and current_generated_at and previous_generated_at != current_generated_at:
-        if str(previous.get("display_signature", "") or "").strip() == str(current.get("display_signature", "") or "").strip():
-            return f"{mode} は更新済みですが、主要表示テーブルの内容は前回表示と同一です。"
-        return f"{mode} の表示内容を更新しました。"
-    return ""
 
 
 @st.cache_data(ttl=SNAPSHOT_VIEWER_CACHE_TTL_SECONDS, show_spinner=False)
@@ -7685,29 +7612,6 @@ def _format_today_candidate_ret(value: Any) -> str:
     return f"{float(numeric):.1f}"
 
 
-def _today_shortterm_focus_label(value: Any, *, default: str = "短期注目") -> str:
-    raw = str(value or "").strip()
-    if not raw or raw == DISPLAY_UNAVAILABLE_MARK:
-        return default
-    if raw.startswith("短期注目・"):
-        raw = raw[len("短期注目・") :].strip()
-    elif raw == "短期注目":
-        return default
-    alias_map = {
-        "today専用": "",
-        "today 専用": "",
-        "today_only": "",
-        "today候補": "追撃候補",
-        "today監視": "監視",
-        "補完・監視": "補完監視",
-        "補完監視": "補完監視",
-    }
-    normalized = alias_map.get(raw, raw)
-    if not normalized:
-        return default
-    return f"短期注目・{normalized}"
-
-
 def _build_candidate_focus_view(
     frame: pd.DataFrame,
     *,
@@ -7766,7 +7670,11 @@ def _build_candidate_focus_view(
     working["candidate_rank"] = working[rank_col]
     working["sector_scope"] = working["_sector_lookup_key"].map(lambda value: "内" if str(value or "") in normalized_sector_lookup else "外")
     if restrict_to_sector_scope:
-        working["entry_stance_label"] = working.get("entry_stance_label", pd.Series("", index=working.index)).apply(_today_shortterm_focus_label)
+        working["entry_stance_label"] = working.get("entry_stance_label", pd.Series("", index=working.index)).apply(
+            lambda value: "短期注目"
+            if pd.isna(value) or not str(value).strip()
+            else (str(value).strip() if str(value).strip().startswith("短期注目") else f"短期注目・{str(value).strip()}")
+        )
 
     def _build_candidate_basis(row: pd.Series) -> str:
         sector_name = _clean_ui_value(row.get("sector_name"))
@@ -7903,13 +7811,9 @@ def _build_today_purchase_candidate_view(
                 dedicated = working.head(limit).copy()
                 if not dedicated.empty:
                     dedicated["candidate_rank"] = range(1, len(dedicated) + 1)
-                    dedicated["candidate_source_label"] = dedicated["_stage_sort"].map(
-                        lambda value: _today_shortterm_focus_label("追撃候補" if int(value) == 0 else "監視")
-                    )
+                    dedicated["candidate_source_label"] = "today専用"
                     dedicated["sector_scope"] = "内"
-                    dedicated["entry_stance_label"] = dedicated["_stage_sort"].map(
-                        lambda value: _today_shortterm_focus_label("追撃候補" if int(value) == 0 else "監視")
-                    )
+                    dedicated["entry_stance_label"] = dedicated["_stage_sort"].map(lambda value: "today候補" if int(value) == 0 else "today監視")
                     dedicated["current_price"] = dedicated["current_price"].apply(_format_today_candidate_price)
                     dedicated["live_ret_vs_prev_close"] = dedicated["live_ret_vs_prev_close"].apply(_format_today_candidate_ret)
                     dedicated["candidate_basis"] = dedicated.apply(
@@ -7932,16 +7836,15 @@ def _build_today_purchase_candidate_view(
             fallback["_candidate_rank_sort"] = _coerce_numeric(fallback.get("candidate_rank_1w", pd.Series(pd.NA, index=fallback.index))).fillna(9999)
             fallback = fallback.sort_values(["_candidate_rank_sort", "sector_name", "code"], ascending=[True, True, True], kind="mergesort").head(shortage).copy()
             fallback["candidate_rank"] = range(len(final_frame) + 1, len(final_frame) + len(fallback) + 1)
-            fallback["candidate_source_label"] = _today_shortterm_focus_label("補完監視")
+            fallback["candidate_source_label"] = "1w補完"
             fallback["sector_scope"] = fallback["_sector_lookup_key"].map(lambda value: "内" if str(value or "") in normalized_sector_lookup else "外")
-            fallback["entry_stance_label"] = fallback.get("entry_stance_label", pd.Series("", index=fallback.index)).apply(_today_shortterm_focus_label)
             fallback["candidate_basis"] = fallback.apply(lambda row: _build_candidate_basis_text(row, center_reference_map), axis=1)
             fallback["nikkei_search"] = fallback.get("nikkei_search", pd.Series("", index=fallback.index)).fillna("").astype(str)
             fallback = fallback.reindex(columns=columns)
             final_frame = pd.concat([final_frame, fallback], ignore_index=True)
-            candidate_note = "短期注目銘柄が不足したため、不足分を1w候補から補完しています"
+            candidate_note = "today専用候補が不足したため、不足分を1w候補から補完しています"
     if final_frame.empty:
-        return pd.DataFrame(columns=columns), "today 短期注目銘柄を抽出できませんでした。", candidate_note
+        return pd.DataFrame(columns=columns), "today 購入候補を抽出できませんでした。", candidate_note
     final_frame = final_frame.head(limit).reset_index(drop=True)
     return final_frame, "", candidate_note
 
@@ -9907,7 +9810,6 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     snapshot_source_label = str(bundle.get("snapshot_source_label", "")).strip()
     snapshot_warning_message = str(bundle.get("snapshot_warning_message", "")).strip()
     snapshot_compatibility_notes = [str(note).strip() for note in bundle.get("snapshot_compatibility_notes", []) if str(note).strip()]
-    viewer_refresh_note = str(bundle.get("viewer_refresh_note", "")).strip()
     today_sector_source_key = str(bundle.get("today_sector_source_key", "")).strip()
     meta = bundle.get("meta", {})
     generated_at_jst = str(meta.get("generated_at_jst", "") or meta.get("generated_at", ""))
@@ -9979,8 +9881,6 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
                     st.caption(note)
             elif sector_compat_notes:
                 st.caption("不足列があるので旧スナップショット互換で補完表示しています。")
-    if viewer_refresh_note:
-        st.info(viewer_refresh_note)
     if bool(snapshot_guard.get("is_stale")):
         st.warning(str(snapshot_guard.get("reason", "")).strip() or f"{mode} は本日データなし / stale です。")
     if is_saved_snapshot and today_sector_source_key and today_sector_source_key != "today_sector_leaderboard":
@@ -10121,12 +10021,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
             st.json(diagnostics)
 
 
-def _render_control_plane_status(
-    settings: dict[str, Any],
-    *,
-    current_mode: str = "",
-    displayed_snapshot_tokens: dict[str, dict[str, str]] | None = None,
-) -> None:
+def _render_control_plane_status(settings: dict[str, Any], *, current_mode: str = "") -> None:
     if st.button("状態を再読込", key="refresh-control-plane-status"):
         st.rerun()
     token = _github_control_token(use_streamlit_secrets=True)
@@ -10156,44 +10051,6 @@ def _render_control_plane_status(
         status_request_mode = str(status_payload.get("request_mode", "")).strip()
     if status_request_mode:
         st.caption(f"status request_mode: {status_request_mode}")
-    displayed_snapshot_tokens = displayed_snapshot_tokens or {}
-    displayed_snapshot = displayed_snapshot_tokens.get(status_request_mode, {}) if status_request_mode else {}
-    displayed_generated_at_jst = str(displayed_snapshot.get("generated_at_jst", "") or "").strip()
-    displayed_sha = str(displayed_snapshot.get("json_sha", "") or "").strip()
-    if status_request_mode and (displayed_generated_at_jst or displayed_sha):
-        suffix = f" / sha={displayed_sha[:12]}" if displayed_sha else ""
-        st.caption(f"displayed {status_request_mode}: generated_at_jst={displayed_generated_at_jst or '-'}{suffix}")
-    status_text = str(status_payload.get("status", "") or "").strip().lower()
-    status_last_run_at = _parse_runtime_timestamp(status_payload.get("last_run_at", ""))
-    displayed_generated_at = _parse_runtime_timestamp(displayed_snapshot.get("generated_at", "")) if displayed_snapshot else None
-    refresh_token = f"{status_request_mode}:{status_payload.get('last_run_at', '')}" if status_request_mode else ""
-    try:
-        last_refresh_token = str(st.session_state.get("_viewer_post_success_refresh_token", "") or "").strip()
-    except Exception:
-        last_refresh_token = ""
-    if (
-        status_text == "success"
-        and status_request_mode
-        and status_last_run_at is not None
-        and displayed_generated_at is not None
-        and displayed_generated_at + timedelta(seconds=5) < status_last_run_at
-    ):
-        if refresh_token and refresh_token != last_refresh_token:
-            try:
-                st.session_state["_viewer_post_success_refresh_token"] = refresh_token
-            except Exception:
-                pass
-            st.cache_data.clear()
-            st.rerun()
-        st.warning(
-            f"{status_request_mode} 更新は success ですが、表示中 snapshot はまだ古い可能性があります。"
-            f" displayed={displayed_snapshot.get('generated_at_jst', '-') or '-'} last_run_at={status_payload.get('last_run_at', '-')}"
-        )
-    elif status_text == "success" and refresh_token and refresh_token != last_refresh_token:
-        try:
-            st.session_state["_viewer_post_success_refresh_token"] = refresh_token
-        except Exception:
-            pass
     requested_at = str(request_payload.get("requested_at", "")).strip()
     requested_by = str(request_payload.get("requested_by", "")).strip()
     try:
@@ -10245,7 +10102,6 @@ def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str,
     _render_snapshot_cache_admin_tools()
     available_modes = _available_viewer_snapshot_modes(settings)
     mode_warnings = _get_viewer_snapshot_mode_warnings()
-    displayed_snapshot_tokens: dict[str, dict[str, str]] = {}
     st.markdown("### スナップショット")
     for warning_message in mode_warnings:
         st.warning(warning_message)
@@ -10266,11 +10122,9 @@ def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str,
                 _render_control_plane_status(settings, current_mode=mode)
             _render_runtime_detection_diagnostics(runtime_context)
             return
-        bundle["viewer_refresh_note"] = _register_viewer_snapshot_observation(mode, bundle)
-        displayed_snapshot_tokens[mode] = _bundle_snapshot_token(bundle)
         _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
         with st.expander("更新依頼 / control-plane", expanded=False):
-            _render_control_plane_status(settings, current_mode=mode, displayed_snapshot_tokens=displayed_snapshot_tokens)
+            _render_control_plane_status(settings, current_mode=mode)
         _render_runtime_detection_diagnostics(runtime_context)
         return
     tabs = st.tabs([f"{mode}" for mode in available_modes])
@@ -10281,11 +10135,9 @@ def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str,
             except Exception as exc:
                 st.warning(f"{mode} の snapshot 読み込みに失敗したため、この mode は unavailable 扱いにします: {exc}")
                 continue
-            bundle["viewer_refresh_note"] = _register_viewer_snapshot_observation(mode, bundle)
-            displayed_snapshot_tokens[mode] = _bundle_snapshot_token(bundle)
             _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
     with st.expander("更新依頼 / control-plane", expanded=False):
-        _render_control_plane_status(settings, displayed_snapshot_tokens=displayed_snapshot_tokens)
+        _render_control_plane_status(settings)
     _render_runtime_detection_diagnostics(runtime_context)
 
 
