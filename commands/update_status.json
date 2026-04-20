@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-04-20T07:51:46.475016+00:00",
-  "status": "running",
-  "message": "Fast snapshot refresh is running.",
+  "last_run_at": "2026-04-20T07:57:03.261708+00:00",
+  "status": "failed",
+  "message": "fail-closed: board request failed symbol=3936@1 status=401 body={\"Code\":4001009,\"Message\":\"APIキー不一致\"}",
   "request_mode": "1530"
 }
