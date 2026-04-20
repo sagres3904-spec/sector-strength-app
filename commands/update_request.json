@@ -1,7 +1,7 @@
 {
-  "request_update": true,
+  "request_update": false,
   "requested_at": "2026-04-20T14:21:24.263995+00:00",
   "requested_by": "codex-manual-verify",
-  "status": "pending",
+  "status": "failed",
   "request_mode": "1530"
 }
