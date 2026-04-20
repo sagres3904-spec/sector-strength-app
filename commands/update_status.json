@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-04-20T14:30:03.805970+00:00",
-  "status": "success",
-  "message": "latest_1130.json updated at 2026-04-20T14:30:03.805970+00:00",
+  "last_run_at": "2026-04-20T14:36:00.585812+00:00",
+  "status": "failed",
+  "message": "'leaders_by_sector'",
   "request_mode": "1130"
 }
