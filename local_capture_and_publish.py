@@ -188,6 +188,55 @@ def _resolve_deploy_snapshot_paths(settings: dict[str, Any], mode: str) -> tuple
     return config, _github_deploy_snapshot_json_path(normalized_mode, settings), _github_deploy_snapshot_md_path(normalized_mode, settings)
 
 
+def _read_published_snapshot_meta(
+    token: str,
+    settings: dict[str, Any],
+    mode: str,
+    *,
+    session: Any = None,
+) -> dict[str, str]:
+    config, json_path, _ = _resolve_deploy_snapshot_paths(settings, mode)
+    payload, json_sha = github_read_json_file(config["repository"], config["deploy_branch"], json_path, token, session=session)
+    meta = dict(payload.get("meta", {}) or {})
+    return {
+        "json_path": json_path,
+        "json_sha": str(json_sha or "").strip(),
+        "meta_mode": str(meta.get("mode", "") or "").strip(),
+        "generated_at": str(meta.get("generated_at", "") or meta.get("generated_at_utc", "") or "").strip(),
+        "generated_at_jst": str(meta.get("generated_at_jst", "") or "").strip(),
+    }
+
+
+def _verify_published_snapshot_target(
+    token: str,
+    settings: dict[str, Any],
+    *,
+    request_mode: str,
+    bundle: dict[str, Any],
+    publish_result: dict[str, str],
+    session: Any = None,
+) -> dict[str, str]:
+    expected_mode = normalize_cloud_viewer_mode(request_mode)
+    published_mode = normalize_cloud_viewer_mode(publish_result.get("mode", ""))
+    if published_mode != expected_mode:
+        raise RuntimeError(f"publish mode mismatch: requested={expected_mode} published={published_mode}")
+    published_meta = _read_published_snapshot_meta(token, settings, expected_mode, session=session)
+    stored_mode = normalize_cloud_viewer_mode(
+        published_meta.get("meta_mode", ""),
+        default=expected_mode,
+    )
+    if stored_mode != expected_mode:
+        raise RuntimeError(f"published snapshot mode mismatch: requested={expected_mode} stored={stored_mode}")
+    expected_generated_at = str(bundle.get("meta", {}).get("generated_at", "") or bundle.get("meta", {}).get("generated_at_utc", "") or "").strip()
+    stored_generated_at = str(published_meta.get("generated_at", "") or "").strip()
+    if expected_generated_at and stored_generated_at and stored_generated_at != expected_generated_at:
+        raise RuntimeError(
+            f"published snapshot timestamp mismatch: requested={expected_mode} expected_generated_at={expected_generated_at} stored_generated_at={stored_generated_at}"
+        )
+    published_meta["mode"] = expected_mode
+    return published_meta
+
+
 def publish_snapshot_bundle(token: str, settings: dict[str, Any], bundle: dict[str, Any], *, mode: str | None = None, session: Any = None) -> dict[str, str]:
     publish_mode = normalize_cloud_viewer_mode(mode or bundle.get("meta", {}).get("mode", ""))
     storage_bundle = _bundle_for_storage(bundle)
@@ -267,10 +316,15 @@ def process_update_request(
     if not bool(request_payload.get("request_update")):
         logger.info("no pending update request")
         return {"handled": False, "reason": "no_request"}
-    request_mode = normalize_cloud_viewer_mode(
-        request_payload.get("request_mode", ""),
-        default=DEFAULT_CONTROL_PLANE_REQUEST_MODE,
-    )
+    request_mode_raw = str(request_payload.get("request_mode", "") or "").strip()
+    if not request_mode_raw:
+        failed_at = _utc_now()
+        summary = "Missing request_mode in control-plane request."
+        logger.error(summary)
+        _update_status(token, settings, status="failed", message=summary, last_run_at=failed_at, request_mode="", session=session)
+        _clear_request(token, settings, session=session, status="failed", request_mode="")
+        return {"handled": True, "status": "failed", "message": summary, "request_mode": ""}
+    request_mode = normalize_cloud_viewer_mode(request_mode_raw)
     try:
         fast_check, status_message = _run_cli_options(request_mode)
     except ValueError:
@@ -287,9 +341,17 @@ def process_update_request(
         _update_status(token, settings, status="running", message=status_message, last_run_at=started_at, request_mode=request_mode, session=session)
         logger.info("starting run_cli for mode=%s fast_check=%s", request_mode, fast_check)
         bundle = runner(mode=request_mode, write_drive=False, fast_check=fast_check)
-        publish_snapshot_bundle(token, settings, bundle, mode=request_mode, session=session)
+        publish_result = publish_snapshot_bundle(token, settings, bundle, mode=request_mode, session=session)
+        published_meta = _verify_published_snapshot_target(
+            token,
+            settings,
+            request_mode=request_mode,
+            bundle=bundle,
+            publish_result=publish_result,
+            session=session,
+        )
         finished_at = _utc_now()
-        summary = f"latest_{request_mode}.json updated at {finished_at}"
+        summary = f"{published_meta['json_path'].split('/')[-1]} updated at {finished_at}"
         _update_status(token, settings, status="success", message=summary, last_run_at=finished_at, request_mode=request_mode, session=session)
         _clear_request(token, settings, session=session, status="success", request_mode=request_mode)
         logger.info("update request completed successfully")
@@ -342,9 +404,23 @@ def main() -> int:
                     logger.info("forced snapshot refresh started mode=%s fast_check=%s", force_mode, fast_check)
                     _update_status(token, settings, status="running", message=f"Forced {status_message[0].lower()}{status_message[1:]}", last_run_at=started_at, request_mode=force_mode)
                     bundle = run_cli(mode=force_mode, write_drive=False, fast_check=fast_check)
-                    publish_snapshot_bundle(token, settings, bundle, mode=force_mode)
+                    publish_result = publish_snapshot_bundle(token, settings, bundle, mode=force_mode)
+                    published_meta = _verify_published_snapshot_target(
+                        token,
+                        settings,
+                        request_mode=force_mode,
+                        bundle=bundle,
+                        publish_result=publish_result,
+                    )
                     finished_at = _utc_now()
-                    _update_status(token, settings, status="success", message=f"Forced latest_{force_mode}.json updated at {finished_at}", last_run_at=finished_at, request_mode=force_mode)
+                    _update_status(
+                        token,
+                        settings,
+                        status="success",
+                        message=f"Forced {published_meta['json_path'].split('/')[-1]} updated at {finished_at}",
+                        last_run_at=finished_at,
+                        request_mode=force_mode,
+                    )
                     _clear_request(token, settings, status="success", request_mode=force_mode)
                     logger.info("forced snapshot refresh completed successfully")
                     print(f"forced {force_mode} update completed")
