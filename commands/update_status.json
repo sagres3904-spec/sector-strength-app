@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-04-20T14:36:00.585812+00:00",
-  "status": "failed",
-  "message": "'leaders_by_sector'",
-  "request_mode": "1130"
+  "last_run_at": "2026-04-20T14:50:21.181628+00:00",
+  "status": "running",
+  "message": "Forced 1530 snapshot refresh is running.",
+  "request_mode": "1530"
 }
