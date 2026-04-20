@@ -1086,7 +1086,8 @@ def _frame_display_signature(frame: Any) -> str:
         return "empty"
     normalized = frame.copy()
     normalized = normalized.reindex(columns=sorted(str(column) for column in normalized.columns))
-    normalized = normalized.fillna("")
+    normalized = normalized.astype("object")
+    normalized = normalized.where(pd.notna(normalized), "")
     for column in normalized.columns:
         normalized[column] = normalized[column].map(lambda value: str(value))
     payload = normalized.to_json(orient="split", force_ascii=False)
