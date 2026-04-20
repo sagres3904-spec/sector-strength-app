@@ -226,6 +226,16 @@ def write_snapshot_bundle_to_store(
         warning_message="" if not write_drive else "fallback writer ignores write_drive option",
     )
 
+
+try:
+    from snapshot_store import read_snapshot_json as _snapshot_store_read_snapshot_json
+    from snapshot_store import write_snapshot_bundle as _snapshot_store_write_snapshot_bundle
+except ModuleNotFoundError:
+    pass
+else:
+    read_snapshot_json = _snapshot_store_read_snapshot_json
+    write_snapshot_bundle_to_store = _snapshot_store_write_snapshot_bundle
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover
