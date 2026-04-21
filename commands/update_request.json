@@ -1,7 +1,7 @@
 {
-  "request_update": false,
-  "requested_at": "2026-04-20T14:29:31.982761+00:00",
-  "requested_by": "codex-manual-verify",
-  "status": "success",
-  "request_mode": "1130"
+  "request_update": true,
+  "requested_at": "2026-04-21T10:23:31.575215+00:00",
+  "requested_by": "streamlit-cloud-viewer",
+  "status": "pending",
+  "request_mode": "1530"
 }
