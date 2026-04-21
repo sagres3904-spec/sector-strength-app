@@ -10155,6 +10155,8 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         fallback_frame=swing_1w_view,
         limit=3,
     )
+    if isinstance(today_candidate_focus, pd.DataFrame) and not today_candidate_focus.empty:
+        today_candidate_focus = today_candidate_focus.drop(columns=["candidate_source_label"], errors="ignore")
     weekly_candidate_focus, weekly_candidate_reason, weekly_candidate_note = _build_candidate_focus_view(
         swing_1w_view,
         rank_col="candidate_rank_1w",
