@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-04-21T07:11:45.918778+00:00",
-  "status": "running",
-  "message": "Forced 1530 snapshot refresh is running.",
+  "last_run_at": "2026-04-21T07:19:04.068720+00:00",
+  "status": "failed",
+  "message": "name '_SnapshotStoreResult' is not defined",
   "request_mode": "1530"
 }
