@@ -1002,6 +1002,68 @@ def _get_viewer_snapshot_mode_warnings() -> list[str]:
     return [str(message).strip() for message in messages if str(message).strip()]
 
 
+def _request_viewer_snapshot_reload() -> None:
+    previous_tokens: dict[str, dict[str, str]] = {}
+    try:
+        existing_tokens = st.session_state.get("_viewer_snapshot_tokens", {})
+        if isinstance(existing_tokens, dict):
+            previous_tokens = {
+                str(mode): {
+                    str(key): str(value or "")
+                    for key, value in token.items()
+                }
+                for mode, token in existing_tokens.items()
+                if isinstance(token, dict)
+            }
+        st.session_state["_viewer_snapshot_refresh_previous_tokens"] = previous_tokens
+    except Exception:
+        previous_tokens = {}
+    st.cache_data.clear()
+
+
+def _finalize_viewer_snapshot_reload(current_tokens: dict[str, dict[str, str]]) -> None:
+    normalized_tokens = {
+        str(mode): {
+            "generated_at_jst": str(token.get("generated_at_jst", "") or "").strip(),
+            "json_sha": str(token.get("json_sha", "") or "").strip(),
+            "display_signature": str(token.get("display_signature", "") or "").strip(),
+        }
+        for mode, token in current_tokens.items()
+        if isinstance(token, dict)
+    }
+    previous_tokens: dict[str, dict[str, str]] | None = None
+    try:
+        previous_tokens = st.session_state.pop("_viewer_snapshot_refresh_previous_tokens", None)
+        st.session_state["_viewer_snapshot_tokens"] = normalized_tokens
+    except Exception:
+        previous_tokens = None
+    if not isinstance(previous_tokens, dict):
+        return
+    changed_modes: list[str] = []
+    unchanged_modes: list[str] = []
+    for mode, token in normalized_tokens.items():
+        previous_token = previous_tokens.get(mode, {})
+        if not isinstance(previous_token, dict):
+            previous_token = {}
+        changed = any(
+            token.get(key, "") != str(previous_token.get(key, "") or "")
+            for key in ["generated_at_jst", "json_sha", "display_signature"]
+        )
+        if changed:
+            generated_at_jst = token.get("generated_at_jst", "") or "-"
+            json_sha = token.get("json_sha", "")
+            sha_note = f" / sha={json_sha[:7]}" if json_sha else ""
+            changed_modes.append(f"{mode}: {generated_at_jst}{sha_note}")
+        else:
+            unchanged_modes.append(str(mode))
+    if changed_modes:
+        st.success("更新状態と保存データを再読込しました。反映: " + " | ".join(changed_modes))
+        return
+    if normalized_tokens:
+        unchanged_label = ", ".join(unchanged_modes) if unchanged_modes else ", ".join(sorted(normalized_tokens.keys()))
+        st.info(f"更新状態と保存データを再読込しましたが、表示内容は前回と同じです。mode={unchanged_label}")
+
+
 def _read_github_deploy_snapshot_text(mode: str, settings: dict[str, Any] | None = None) -> tuple[str, str, str]:
     settings = settings or get_settings()
     config = get_github_control_config(settings)
@@ -10246,6 +10308,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
 
 def _render_control_plane_status(settings: dict[str, Any], *, current_mode: str = "") -> None:
     if st.button("状態を再読込", key="refresh-control-plane-status"):
+        _request_viewer_snapshot_reload()
         st.rerun()
     token = _github_control_token(use_streamlit_secrets=True)
     if not token:
@@ -10320,6 +10383,7 @@ def _render_control_plane_status(settings: dict[str, Any], *, current_mode: str 
 
 def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str, Any] | None = None) -> None:
     runtime_context = runtime_context or {}
+    current_snapshot_tokens: dict[str, dict[str, str]] = {}
     st.caption("Cloud viewer-only モードです。スナップショット表示と更新依頼を扱います。")
     _enable_viewer_auto_refresh(settings)
     _render_snapshot_cache_admin_tools()
@@ -10333,6 +10397,7 @@ def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str,
         st.caption("表示対象: latest_0915.json / latest_1130.json / latest_1530.json / latest_now.json")
         with st.expander("更新依頼 / control-plane", expanded=False):
             _render_control_plane_status(settings)
+        _finalize_viewer_snapshot_reload(current_snapshot_tokens)
         _render_runtime_detection_diagnostics(runtime_context)
         return
     if len(available_modes) == 1:
@@ -10343,11 +10408,14 @@ def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str,
             st.warning(f"{mode} の snapshot 読み込みに失敗したため、この mode は unavailable 扱いにします: {exc}")
             with st.expander("更新依頼 / control-plane", expanded=False):
                 _render_control_plane_status(settings, current_mode=mode)
+            _finalize_viewer_snapshot_reload(current_snapshot_tokens)
             _render_runtime_detection_diagnostics(runtime_context)
             return
+        current_snapshot_tokens[mode] = _bundle_snapshot_token(bundle)
         _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
         with st.expander("更新依頼 / control-plane", expanded=False):
             _render_control_plane_status(settings, current_mode=mode)
+        _finalize_viewer_snapshot_reload(current_snapshot_tokens)
         _render_runtime_detection_diagnostics(runtime_context)
         return
     tabs = st.tabs([f"{mode}" for mode in available_modes])
@@ -10358,9 +10426,11 @@ def _render_viewer_only_app(settings: dict[str, Any], runtime_context: dict[str,
             except Exception as exc:
                 st.warning(f"{mode} の snapshot 読み込みに失敗したため、この mode は unavailable 扱いにします: {exc}")
                 continue
+            current_snapshot_tokens[mode] = _bundle_snapshot_token(bundle)
             _render_bundle(bundle, source_label=f"latest_{mode}.json を表示しました", is_saved_snapshot=True)
     with st.expander("更新依頼 / control-plane", expanded=False):
         _render_control_plane_status(settings)
+    _finalize_viewer_snapshot_reload(current_snapshot_tokens)
     _render_runtime_detection_diagnostics(runtime_context)
 
 
