@@ -692,7 +692,7 @@ UI_COLUMN_LABELS = {
     "sector_summary": "根拠",
     "center_stocks": "中心銘柄",
     "center_summary": "中心メモ",
-    "center_note": "材料/違い",
+    "center_note": "代表理由",
     "candidate_rank": "順位",
     "candidate_source_label": "候補種別",
     "candidate_basis": "根拠",
@@ -713,9 +713,9 @@ UI_COLUMN_LABELS = {
     "representative_stock": "代表銘柄",
     "representative_rank": "代表順位",
     "representative_score": "代表銘柄スコア",
-    "representative_selected_reason": "選定理由",
-    "representative_quality_flag": "品質",
-    "representative_fallback_reason": "fallback理由",
+    "representative_selected_reason": "代表理由",
+    "representative_quality_flag": "品質/注意",
+    "representative_fallback_reason": "補足",
     "stock_turnover_share_of_sector": "セクター売買代金寄与率",
     "swing_score_1w": "1週間候補スコア",
     "swing_score_1m": "1か月候補スコア",
@@ -7238,6 +7238,86 @@ def _representative_fallback_reason_label(value: Any) -> str:
     return _representative_display_label(value, REPRESENTATIVE_FALLBACK_REASON_LABELS)
 
 
+DISPLAY_REASON_TEXT_ALIASES = {
+    "1wセクター強い": "1週間で強いセクターに属する",
+    "todayも崩れず": "今日も大きく下げていない",
+    "出来高あり": "出来高あり",
+    "TOPIX比で強い": "市場平均より強い",
+    "1m崩れ小": "直近1か月も大きく崩れていない",
+    "押し待ち": "押し目を待ちたい",
+    "1w条件はあるが追認弱め": "1週間の条件はあるが確認待ち",
+    "1か月トレンド継続": "1か月の上昇傾向が続いている",
+    "中期トレンド維持": "1か月の上昇傾向が続いている",
+    "中期の資金流入継続": "1か月以上の買いが続いている",
+    "押し目後の再加速": "押し目後に持ち直している",
+    "セクター上昇と整合": "1か月で強いセクターに属する",
+    "中期の値崩れが小さい": "直近1か月も崩れにくい",
+    "中期条件はあるが押し待ち": "中期条件はあるが押し目待ち",
+    "3か月主導継続": "3か月の強さが続いている",
+    "長めの上昇主導を維持": "3か月の上昇傾向が続いている",
+    "1か月の崩れが小さい": "直近1か月も大きく崩れていない",
+    "流動性が伴う": "流動性がある",
+    "3か月主力セクターと整合": "3か月で強いセクターに属する",
+    "長めの主導性はあるが確認余地あり": "3か月の条件はあるが確認待ち",
+    "表示件数不足のため補完。通常の買い候補より信頼度は低い": "表示件数を満たすための補完",
+    "押し目待ち推奨": "すぐ買うより押し目待ち寄り",
+    "todayの値動き確認待ち": "今日の値動き確認待ち",
+    "1mの下支え確認待ち": "直近1か月の下支え確認待ち",
+    "セクター追い風の確認待ち": "セクターの追い風確認待ち",
+    "短期追認の上積み待ち": "短期の追認待ち",
+    "条件改善待ち": "条件改善待ち",
+    "中期継続の確度を見極めたい": "中期継続の確認待ち",
+    "中期継続の裏付け待ち": "中期継続の裏付け待ち",
+    "長期条件の改善待ち": "長期条件の改善待ち",
+    "長期主導の確度を見極めたい": "長期主導の確認待ち",
+}
+
+DISPLAY_RISK_TEXT_ALIASES = {
+    "追撃は慎重": "すぐ買うより押し目待ち寄り",
+    "短期過熱注意": "短期で上がりすぎ注意",
+    "today失速": "今日は伸びが鈍い",
+    "流動性注意": "売買代金がやや少ない",
+    "出来高弱め": "出来高がやや弱い",
+    "1m弱め": "直近1か月はやや弱い",
+    "20日線乖離大": "短期で上がりすぎ注意",
+    "財務注意": "財務面は要確認",
+    "1か月側が失速": "直近1か月は勢い鈍化",
+    "セクターgate未達": "セクター条件は一部未達",
+    "当日戻り待ち": "すぐ買うより押し目待ち寄り",
+}
+
+TODAY_REPRESENTATIVE_SELECTED_REASON_ALIASES = {
+    "center_leader": "当日強い / セクター内上位",
+    "中心株かつ当日牽引": "当日強い / セクター内上位",
+    "sector_support_leader": "セクター内上位 / 代表候補を補完",
+    "セクター内の当日牽引補完": "セクター内上位 / 代表候補を補完",
+    "center_fallback_leader": "代表候補を補完",
+    "中心性を優先した代替選出": "代表候補を補完",
+}
+
+
+def _normalize_display_tag_text(value: Any, mapping: dict[str, str]) -> str:
+    text = _clean_ui_value(value)
+    if not text:
+        return ""
+    normalized = text.replace("、", " / ").replace(",", " / ")
+    parts = [part.strip() for part in normalized.split("/") if part.strip()]
+    labels = [mapping.get(part, part) for part in parts]
+    return " / ".join(dict.fromkeys([label for label in labels if label]))
+
+
+def _candidate_reason_display_text(row: pd.Series, *, default: str = "") -> str:
+    text = _first_ui_value(row.get("selection_reason"), row.get("watch_reason_label"), row.get("candidate_commentary"))
+    normalized = _normalize_display_tag_text(text, DISPLAY_REASON_TEXT_ALIASES)
+    return normalized or default
+
+
+def _candidate_risk_display_text(row: pd.Series, *, default: str = "") -> str:
+    text = _first_ui_value(row.get("risk_note"), row.get("stretch_caution_label"))
+    normalized = _normalize_display_tag_text(text, DISPLAY_RISK_TEXT_ALIASES)
+    return normalized or default
+
+
 def _persistence_core_representatives_reason_label(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -7510,12 +7590,29 @@ def _build_center_stock_focus_view(
         if representative_frame is None or representative_frame.empty:
             return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_FOCUS_COLUMNS)
         working = representative_frame.copy()
+        for column in SECTOR_REPRESENTATIVES_FOCUS_COLUMNS:
+            if column not in working.columns:
+                working[column] = ""
+        if "current_price" not in working.columns and "live_price" in working.columns:
+            working["current_price"] = working["live_price"]
+        if "live_turnover_value" not in working.columns and "live_turnover" in working.columns:
+            working["live_turnover_value"] = working["live_turnover"]
         working["sector_name"] = working.get("sector_name", pd.Series("", index=working.index)).apply(_clean_ui_value)
         working = working[working["sector_name"].isin(sector_rank_lookup)]
         if working.empty:
             return pd.DataFrame(columns=SECTOR_REPRESENTATIVES_FOCUS_COLUMNS)
         working["_axis_rank_sort"] = working["sector_name"].map(lambda value: sector_rank_lookup.get(str(value), 9999))
         working["_rep_rank_sort"] = _coerce_numeric(working.get("representative_rank", pd.Series(pd.NA, index=working.index))).fillna(9999)
+        working["today_rank"] = working["today_rank"].apply(_format_display_rank_value)
+        working["representative_rank"] = working["representative_rank"].apply(_format_display_rank_value)
+        working["code"] = working["code"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+        working["name"] = working["name"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+        working["live_ret_vs_prev_close"] = working["live_ret_vs_prev_close"].apply(_format_display_pct_1dp)
+        working["current_price"] = working["current_price"].apply(_format_today_candidate_price)
+        working["live_turnover_value"] = working["live_turnover_value"].apply(_format_display_turnover_value)
+        working["representative_selected_reason"] = working.apply(_today_representative_reason_text, axis=1)
+        working["representative_quality_flag"] = working.apply(_today_representative_quality_text, axis=1)
+        working["representative_fallback_reason"] = working["representative_fallback_reason"].apply(_representative_fallback_reason_label)
         working = working.sort_values(
             ["_axis_rank_sort", "_rep_rank_sort", "sector_name", "code"],
             ascending=[True, True, True, True],
@@ -7541,7 +7638,6 @@ def _build_center_stock_focus_view(
         if not names:
             continue
         reason_label = _persistence_core_representatives_reason_label(row.get("core_representatives_reason"))
-        anchor_name = _clean_ui_value(row.get("representative_stock"))
         for idx, name in enumerate(names, start=1):
             rows.append(
                 {
@@ -7549,14 +7645,7 @@ def _build_center_stock_focus_view(
                     "sector_name": sector_name,
                     "representative_rank": idx,
                     "name": name,
-                    "center_note": _shorten_ui_text(
-                        _join_ui_fragments(
-                            f"{timeframe}軸の主力{idx}番手",
-                            f"先頭 {anchor_name}" if anchor_name and idx > 1 else "",
-                            reason_label,
-                        ),
-                        limit=72,
-                    ),
+                    "center_note": _build_persistence_representative_note(timeframe, idx, reason_label),
                 }
             )
     return pd.DataFrame(rows, columns=columns)
@@ -7608,12 +7697,12 @@ def _resolve_candidate_center_note(row: pd.Series, center_reference_map: dict[st
     center_names = center_meta.get("names", set())
     center_text = _clean_ui_value(center_meta.get("center_text"))
     if code and str(code) in center_codes:
-        return f"中心銘柄({center_codes[str(code)]}位)"
+        return f"代表銘柄({center_codes[str(code)]}位)"
     if name and name in center_names:
-        return "主力3銘柄に含む"
+        return "代表候補3銘柄に含む"
     if center_text:
-        return f"中心は {center_text.split('/')[0].strip()}"
-    return "中心情報なし"
+        return f"代表は {center_text.split('/')[0].strip()}"
+    return "代表情報なし"
 
 
 def _build_candidate_basis_text(
@@ -7624,12 +7713,12 @@ def _build_candidate_basis_text(
     default_caution: str = "特記なし",
 ) -> str:
     center_note = _resolve_candidate_center_note(row, center_reference_map)
-    reason = _first_ui_value(row.get("candidate_commentary"), row.get("selection_reason"), row.get("watch_reason_label"))
-    caution = _first_ui_value(row.get("risk_note"), row.get("stretch_caution_label"))
+    reason = _candidate_reason_display_text(row, default=default_reason)
+    caution = _candidate_risk_display_text(row, default=default_caution)
     return _shorten_ui_text(
         _join_ui_fragments(
             f"理由 {reason}" if reason else f"理由 {default_reason}",
-            f"中心 {center_note}",
+            f"代表 {center_note}",
             f"注意 {caution}" if caution else f"注意 {default_caution}",
         ),
         limit=92,
@@ -7652,7 +7741,11 @@ def _format_today_candidate_ret(value: Any) -> str:
     return f"{float(numeric):.1f}"
 
 
-def _today_shortterm_focus_label(value: Any, *, default: str = "短期注目") -> str:
+def _today_shortterm_candidate_type_label() -> str:
+    return "短期注目"
+
+
+def _today_shortterm_focus_label(value: Any, *, default: str = "監視") -> str:
     raw = str(value or "").strip()
     if not raw or raw == DISPLAY_UNAVAILABLE_MARK:
         return default
@@ -7661,18 +7754,99 @@ def _today_shortterm_focus_label(value: Any, *, default: str = "短期注目") -
     elif raw == "短期注目":
         return default
     alias_map = {
-        "today専用": "",
-        "today 専用": "",
-        "today_only": "",
+        "today専用": "追撃候補",
+        "today 専用": "追撃候補",
+        "today_only": "追撃候補",
         "today候補": "追撃候補",
         "today監視": "監視",
-        "補完・監視": "補完監視",
-        "補完監視": "補完監視",
+        "補完・監視": "補完・監視",
+        "補完監視": "補完・監視",
     }
     normalized = alias_map.get(raw, raw)
     if not normalized:
         return default
-    return f"短期注目・{normalized}"
+    return normalized
+
+
+def _today_representative_reason_text(row: pd.Series) -> str:
+    selected_reason_raw = str(row.get("representative_selected_reason", "") or "").strip()
+    selected_reason = TODAY_REPRESENTATIVE_SELECTED_REASON_ALIASES.get(selected_reason_raw, "")
+    reasons = [part.strip() for part in selected_reason.split("/") if part.strip()]
+    live_turnover = _coerce_numeric(pd.Series([row.get("live_turnover_value", row.get("live_turnover", pd.NA))])).iloc[0]
+    rep_centrality = _coerce_numeric(pd.Series([row.get("rep_score_centrality", pd.NA)])).iloc[0]
+    turnover_share = _coerce_numeric(pd.Series([row.get("stock_turnover_share_of_sector", pd.NA)])).iloc[0]
+    if pd.notna(live_turnover) and float(live_turnover) >= 1_000_000_000.0:
+        reasons.append("出来高あり")
+    if (
+        (pd.notna(rep_centrality) and float(rep_centrality) >= 4.0)
+        or (pd.notna(turnover_share) and float(turnover_share) >= 0.25)
+        or bool(row.get("was_in_selected50"))
+        or bool(row.get("was_in_must_have"))
+    ):
+        reasons.append("代表性あり")
+    if not reasons:
+        reasons.append("代表候補")
+    return " / ".join(dict.fromkeys(reasons))
+
+
+def _today_representative_quality_text(row: pd.Series) -> str:
+    quality_raw = str(row.get("representative_quality_flag", "") or "").strip()
+    if quality_raw in {"quality_pass", "品質基準を満たす"}:
+        return "品質基準を満たす"
+    if quality_raw in {"quality_fail", "excluded", "品質基準未達"}:
+        return "品質基準未達"
+    reasons: list[str] = []
+    rep_rank = _coerce_numeric(pd.Series([row.get("representative_rank", pd.NA)])).iloc[0]
+    leadership = _coerce_numeric(pd.Series([row.get("rep_score_today_leadership", pd.NA)])).iloc[0]
+    centrality = _coerce_numeric(pd.Series([row.get("rep_score_centrality", pd.NA)])).iloc[0]
+    sanity = _coerce_numeric(pd.Series([row.get("rep_score_sanity", pd.NA)])).iloc[0]
+    live_turnover = _coerce_numeric(pd.Series([row.get("live_turnover_value", row.get("live_turnover", pd.NA))])).iloc[0]
+    fallback_reason = str(row.get("representative_fallback_reason", "") or "").strip()
+    if pd.notna(rep_rank) and int(rep_rank) >= 2:
+        reasons.append("セクター内順位低め")
+    if pd.notna(leadership) and float(leadership) < 4.0:
+        reasons.append("当日強さ弱め")
+    if pd.notna(centrality) and float(centrality) < 4.0:
+        reasons.append("代表性弱め")
+    if pd.notna(live_turnover):
+        if float(live_turnover) < 500_000_000.0:
+            reasons.append("流動性弱め")
+        elif float(live_turnover) < 1_000_000_000.0:
+            reasons.append("出来高弱め")
+    if pd.notna(sanity) and float(sanity) < 0.10:
+        reasons.append("判定材料不足")
+    if fallback_reason in {"fallback_no_clear_leader", "no_quality_candidate_met_center_leader_gate", "no_positive_candidate_in_selected50"}:
+        reasons.append("当日強さ弱め")
+    if fallback_reason in {"fallback_insufficient_candidates", "filled_remaining_support_slots_with_best_available_nonblocked_candidates"}:
+        reasons.append("候補不足")
+    if not reasons:
+        fallback_text = _representative_fallback_reason_label(fallback_reason) or fallback_reason
+        reasons.append(fallback_text or "判定材料不足")
+    return f"品質要注意: {' / '.join(dict.fromkeys(reasons))}"
+
+
+def _build_persistence_representative_note(timeframe: str, representative_rank: int, reason_label: str = "") -> str:
+    if timeframe == "1w":
+        fragments = [
+            "1wで市場平均より強い",
+            "セクター内上位" if representative_rank == 1 else "セクター内の代表候補",
+            "短期資金が続く",
+        ]
+    elif timeframe == "1m":
+        fragments = [
+            "1か月の上昇が続く",
+            "中期資金が入っている",
+            "直近も大きく崩れていない",
+        ]
+    else:
+        fragments = [
+            "3か月でセクターを主導",
+            "1か月でも大きく崩れていない",
+            "中長期資金の中心",
+        ]
+    if reason_label and reason_label not in {"ETF等を除外"}:
+        fragments.append(reason_label)
+    return _shorten_ui_text(" / ".join(dict.fromkeys([fragment for fragment in fragments if fragment])), limit=72)
 
 
 def _build_candidate_focus_view(
@@ -7736,27 +7910,13 @@ def _build_candidate_focus_view(
         working["entry_stance_label"] = working.get("entry_stance_label", pd.Series("", index=working.index)).apply(_today_shortterm_focus_label)
 
     def _build_candidate_basis(row: pd.Series) -> str:
-        sector_name = _clean_ui_value(row.get("sector_name"))
-        code = _clean_ui_value(row.get("code"))
-        name = _clean_ui_value(row.get("name"))
-        center_meta = center_reference_map.get(sector_name, center_reference_map.get(_normalize_industry_key(sector_name), {}))
-        center_codes = center_meta.get("codes", {})
-        center_names = center_meta.get("names", set())
-        center_text = _clean_ui_value(center_meta.get("center_text"))
-        if code and str(code) in center_codes:
-            center_note = f"中心銘柄({center_codes[str(code)]}位)"
-        elif name and name in center_names:
-            center_note = "主力3銘柄に含む"
-        elif center_text:
-            center_note = f"中心は {center_text.split('/')[0].strip()}"
-        else:
-            center_note = "中心情報なし"
-        reason = _first_ui_value(row.get("candidate_commentary"), row.get("selection_reason"), row.get("watch_reason_label"))
-        caution = _first_ui_value(row.get("risk_note"), row.get("stretch_caution_label"))
+        center_note = _resolve_candidate_center_note(row, center_reference_map)
+        reason = _candidate_reason_display_text(row, default="既存候補ロジック通過")
+        caution = _candidate_risk_display_text(row, default="特記なし")
         return _shorten_ui_text(
             _join_ui_fragments(
                 f"理由 {reason}" if reason else "理由 既存候補ロジック通過",
-                f"中心 {center_note}",
+                f"代表 {center_note}",
                 f"注意 {caution}" if caution else "注意 特記なし",
             ),
             limit=92,
@@ -7844,24 +8004,23 @@ def _build_today_purchase_candidate_view(
             working["_quality_sort"] = working["_quality_warn"].astype(int)
             working = working[working["_stage_sort"].lt(9)].copy()
             if not working.empty:
-                working["selection_reason"] = working["representative_selected_reason"].apply(_representative_selected_reason_label)
-                working["stretch_caution_label"] = working["representative_quality_flag"].apply(
-                    lambda value: "" if _representative_quality_flag_label(value) == "品質基準を満たす" else _representative_quality_flag_label(value)
+                working["selection_reason"] = working.apply(_today_representative_reason_text, axis=1)
+                working["stretch_caution_label"] = working.apply(
+                    lambda row: ""
+                    if str(row.get("representative_quality_flag", "") or "") in {"quality_pass", "品質基準を満たす"}
+                    else _today_representative_quality_text(row),
+                    axis=1,
                 )
                 working["risk_note"] = working.apply(
                     lambda row: _join_ui_fragments(
-                        _representative_fallback_reason_label(row.get("representative_fallback_reason")),
+                        ""
+                        if str(row.get("representative_quality_flag", "") or "") in {"quality_pass", "品質基準を満たす"}
+                        else _today_representative_quality_text(row),
                         "当日戻り待ち" if _coerce_numeric(pd.Series([row.get("_ret_numeric")])).iloc[0] < 0 else "",
                     ),
                     axis=1,
                 )
-                working["candidate_commentary"] = working.apply(
-                    lambda row: _join_ui_fragments(
-                        f"today{int(row.get('_sector_rank_sort', 0) or 0)}位セクター",
-                        _representative_selected_reason_label(row.get("representative_selected_reason")),
-                    ),
-                    axis=1,
-                )
+                working["candidate_commentary"] = working["selection_reason"]
                 working = working.sort_values(
                     ["_stage_sort", "_rep_rank_sort", "_sector_rank_sort", "_quality_sort", "_ret_numeric", "_lead_numeric", "_centrality_numeric", "_turnover_numeric", "code"],
                     ascending=[True, True, True, True, False, False, False, False, True],
@@ -7870,9 +8029,7 @@ def _build_today_purchase_candidate_view(
                 dedicated = working.head(limit).copy()
                 if not dedicated.empty:
                     dedicated["candidate_rank"] = range(1, len(dedicated) + 1)
-                    dedicated["candidate_source_label"] = dedicated["_stage_sort"].map(
-                        lambda value: _today_shortterm_focus_label("追撃候補" if int(value) == 0 else "監視")
-                    )
+                    dedicated["candidate_source_label"] = _today_shortterm_candidate_type_label()
                     dedicated["sector_scope"] = "内"
                     dedicated["entry_stance_label"] = dedicated["_stage_sort"].map(
                         lambda value: _today_shortterm_focus_label("追撃候補" if int(value) == 0 else "監視")
@@ -7899,7 +8056,7 @@ def _build_today_purchase_candidate_view(
             fallback["_candidate_rank_sort"] = _coerce_numeric(fallback.get("candidate_rank_1w", pd.Series(pd.NA, index=fallback.index))).fillna(9999)
             fallback = fallback.sort_values(["_candidate_rank_sort", "sector_name", "code"], ascending=[True, True, True], kind="mergesort").head(shortage).copy()
             fallback["candidate_rank"] = range(len(final_frame) + 1, len(final_frame) + len(fallback) + 1)
-            fallback["candidate_source_label"] = _today_shortterm_focus_label("補完監視")
+            fallback["candidate_source_label"] = _today_shortterm_candidate_type_label()
             fallback["sector_scope"] = fallback["_sector_lookup_key"].map(lambda value: "内" if str(value or "") in normalized_sector_lookup else "外")
             fallback["entry_stance_label"] = fallback.get("entry_stance_label", pd.Series("", index=fallback.index)).apply(_today_shortterm_focus_label)
             fallback["candidate_basis"] = fallback.apply(lambda row: _build_candidate_basis_text(row, center_reference_map), axis=1)
@@ -9968,7 +10125,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         today_sector_view,
         sector_rank_lookup=today_sector_lookup,
         timeframe="today",
-        representative_frame=sector_representatives_view,
+        representative_frame=sector_representatives_raw if isinstance(sector_representatives_raw, pd.DataFrame) and not sector_representatives_raw.empty else sector_representatives_view,
     )
     weekly_center_focus = _build_center_stock_focus_view(
         weekly_sector_view,
