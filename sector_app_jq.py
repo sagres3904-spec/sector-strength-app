@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -1064,6 +1065,44 @@ def _snapshot_mtime_ns(snapshot_path: Path) -> int:
         return snapshot_path.stat().st_mtime_ns
     except FileNotFoundError:
         return -1
+
+
+def _frame_display_signature(frame: Any) -> str:
+    if not isinstance(frame, pd.DataFrame):
+        return "missing"
+    if frame.empty:
+        return "empty"
+    normalized = frame.copy()
+    normalized = normalized.reindex(columns=sorted(str(column) for column in normalized.columns))
+    normalized = normalized.astype("object")
+    normalized = normalized.where(pd.notna(normalized), "")
+    for column in normalized.columns:
+        normalized[column] = normalized[column].map(lambda value: str(value))
+    payload = normalized.to_json(orient="split", force_ascii=False)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _bundle_snapshot_token(bundle: dict[str, Any]) -> dict[str, str]:
+    meta = bundle.get("meta", {}) if isinstance(bundle, dict) else {}
+    paths = bundle.get("paths", {}) if isinstance(bundle, dict) else {}
+    signature_keys = [
+        "today_sector_leaderboard",
+        "sector_representatives_display",
+        "swing_candidates_1w_display",
+        "swing_candidates_1m_display",
+        "swing_candidates_3m_display",
+    ]
+    signature_seed = "|".join(
+        f"{key}:{_frame_display_signature(bundle.get(key, pd.DataFrame()) if isinstance(bundle, dict) else pd.DataFrame())}"
+        for key in signature_keys
+    )
+    return {
+        "generated_at": str(meta.get("generated_at", "") or "").strip(),
+        "generated_at_jst": str(meta.get("generated_at_jst", "") or meta.get("generated_at", "") or "").strip(),
+        "json_sha": str(paths.get("json_sha", "") or "").strip(),
+        "json_path": str(paths.get("json_path", "") or "").strip(),
+        "display_signature": hashlib.sha1(signature_seed.encode("utf-8")).hexdigest(),
+    }
 
 
 @st.cache_data(ttl=SNAPSHOT_VIEWER_CACHE_TTL_SECONDS, show_spinner=False)
@@ -7613,6 +7652,29 @@ def _format_today_candidate_ret(value: Any) -> str:
     return f"{float(numeric):.1f}"
 
 
+def _today_shortterm_focus_label(value: Any, *, default: str = "短期注目") -> str:
+    raw = str(value or "").strip()
+    if not raw or raw == DISPLAY_UNAVAILABLE_MARK:
+        return default
+    if raw.startswith("短期注目・"):
+        raw = raw[len("短期注目・") :].strip()
+    elif raw == "短期注目":
+        return default
+    alias_map = {
+        "today専用": "",
+        "today 専用": "",
+        "today_only": "",
+        "today候補": "追撃候補",
+        "today監視": "監視",
+        "補完・監視": "補完監視",
+        "補完監視": "補完監視",
+    }
+    normalized = alias_map.get(raw, raw)
+    if not normalized:
+        return default
+    return f"短期注目・{normalized}"
+
+
 def _build_candidate_focus_view(
     frame: pd.DataFrame,
     *,
@@ -7671,11 +7733,7 @@ def _build_candidate_focus_view(
     working["candidate_rank"] = working[rank_col]
     working["sector_scope"] = working["_sector_lookup_key"].map(lambda value: "内" if str(value or "") in normalized_sector_lookup else "外")
     if restrict_to_sector_scope:
-        working["entry_stance_label"] = working.get("entry_stance_label", pd.Series("", index=working.index)).apply(
-            lambda value: "短期注目"
-            if pd.isna(value) or not str(value).strip()
-            else (str(value).strip() if str(value).strip().startswith("短期注目") else f"短期注目・{str(value).strip()}")
-        )
+        working["entry_stance_label"] = working.get("entry_stance_label", pd.Series("", index=working.index)).apply(_today_shortterm_focus_label)
 
     def _build_candidate_basis(row: pd.Series) -> str:
         sector_name = _clean_ui_value(row.get("sector_name"))
@@ -7812,9 +7870,13 @@ def _build_today_purchase_candidate_view(
                 dedicated = working.head(limit).copy()
                 if not dedicated.empty:
                     dedicated["candidate_rank"] = range(1, len(dedicated) + 1)
-                    dedicated["candidate_source_label"] = "today専用"
+                    dedicated["candidate_source_label"] = dedicated["_stage_sort"].map(
+                        lambda value: _today_shortterm_focus_label("追撃候補" if int(value) == 0 else "監視")
+                    )
                     dedicated["sector_scope"] = "内"
-                    dedicated["entry_stance_label"] = dedicated["_stage_sort"].map(lambda value: "today候補" if int(value) == 0 else "today監視")
+                    dedicated["entry_stance_label"] = dedicated["_stage_sort"].map(
+                        lambda value: _today_shortterm_focus_label("追撃候補" if int(value) == 0 else "監視")
+                    )
                     dedicated["current_price"] = dedicated["current_price"].apply(_format_today_candidate_price)
                     dedicated["live_ret_vs_prev_close"] = dedicated["live_ret_vs_prev_close"].apply(_format_today_candidate_ret)
                     dedicated["candidate_basis"] = dedicated.apply(
@@ -7837,15 +7899,16 @@ def _build_today_purchase_candidate_view(
             fallback["_candidate_rank_sort"] = _coerce_numeric(fallback.get("candidate_rank_1w", pd.Series(pd.NA, index=fallback.index))).fillna(9999)
             fallback = fallback.sort_values(["_candidate_rank_sort", "sector_name", "code"], ascending=[True, True, True], kind="mergesort").head(shortage).copy()
             fallback["candidate_rank"] = range(len(final_frame) + 1, len(final_frame) + len(fallback) + 1)
-            fallback["candidate_source_label"] = "1w補完"
+            fallback["candidate_source_label"] = _today_shortterm_focus_label("補完監視")
             fallback["sector_scope"] = fallback["_sector_lookup_key"].map(lambda value: "内" if str(value or "") in normalized_sector_lookup else "外")
+            fallback["entry_stance_label"] = fallback.get("entry_stance_label", pd.Series("", index=fallback.index)).apply(_today_shortterm_focus_label)
             fallback["candidate_basis"] = fallback.apply(lambda row: _build_candidate_basis_text(row, center_reference_map), axis=1)
             fallback["nikkei_search"] = fallback.get("nikkei_search", pd.Series("", index=fallback.index)).fillna("").astype(str)
             fallback = fallback.reindex(columns=columns)
             final_frame = pd.concat([final_frame, fallback], ignore_index=True)
-            candidate_note = "today専用候補が不足したため、不足分を1w候補から補完しています"
+            candidate_note = "短期注目銘柄が不足したため、不足分を1w候補から補完しています"
     if final_frame.empty:
-        return pd.DataFrame(columns=columns), "today 購入候補を抽出できませんでした。", candidate_note
+        return pd.DataFrame(columns=columns), "today 短期注目銘柄を抽出できませんでした。", candidate_note
     final_frame = final_frame.head(limit).reset_index(drop=True)
     return final_frame, "", candidate_note
 
