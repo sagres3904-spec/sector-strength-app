@@ -1,6 +1,6 @@
 # Snapshot 1530
 
-- generated_at: 2026-04-21T09:47:39.587044+00:00
+- generated_at: 2026-04-21T10:32:04.074240+00:00
 - mode: 1530
 - source_profile: local_kabu_jq_yanoshin
 - includes_kabu: True
