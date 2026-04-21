@@ -1,6 +1,6 @@
 # Snapshot 1130
 
-- generated_at: 2026-04-21T07:38:44.056271+00:00
+- generated_at: 2026-04-21T09:56:34.498442+00:00
 - mode: 1130
 - source_profile: local_kabu_jq_yanoshin
 - includes_kabu: True
