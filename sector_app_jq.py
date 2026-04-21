@@ -18,27 +18,28 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
+
+def _snapshot_dir(settings: dict[str, Any], root_dir: Path) -> Path:
+    output_dir = str(settings.get("SNAPSHOT_OUTPUT_DIR", "data/snapshots")).strip() or "data/snapshots"
+    output_path = Path(output_dir)
+    if not output_path.is_absolute():
+        output_path = root_dir / output_path
+    return output_path
+
+
+@dataclass
+class _SnapshotStoreResult:
+    paths: dict[str, str]
+    source_label: str
+    backend_name: str
+    warning_message: str
+
+
 try:
     from snapshot_bundle import bundle_to_json_text, bundle_to_markdown
     from snapshot_store import read_snapshot_json, write_snapshot_bundle as write_snapshot_bundle_to_store
     from snapshot_time import build_snapshot_meta, normalize_snapshot_meta, saved_snapshot_timing_warning
 except ModuleNotFoundError:
-    @dataclass
-    class _SnapshotStoreResult:
-        paths: dict[str, str]
-        source_label: str
-        backend_name: str
-        warning_message: str
-
-
-    def _snapshot_dir(settings: dict[str, Any], root_dir: Path) -> Path:
-        output_dir = str(settings.get("SNAPSHOT_OUTPUT_DIR", "data/snapshots")).strip() or "data/snapshots"
-        output_path = Path(output_dir)
-        if not output_path.is_absolute():
-            output_path = root_dir / output_path
-        return output_path
-
-
     def _json_ready(value: Any) -> Any:
         if isinstance(value, pd.DataFrame):
             return value.to_dict(orient="records")
@@ -7865,7 +7866,7 @@ def _render_timeframe_panel(
 ) -> None:
     st.caption(f"{timeframe_label}: {timeframe_note}")
     _render_dataframe_or_reason(sector_title, sector_frame, reason=sector_reason)
-    _render_dataframe_or_reason("そのセクターの中心銘柄", center_frame, reason=center_reason)
+    _render_dataframe_or_reason("セクター代表銘柄", center_frame, reason=center_reason)
     _render_dataframe_or_reason(candidate_title, candidate_frame, reason=candidate_reason, link_columns=True, note=candidate_note)
 
 
