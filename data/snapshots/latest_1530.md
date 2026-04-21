@@ -1,6 +1,46 @@
-# Sector Strength Snapshot
+# Snapshot 1530
 
+- generated_at: 2026-04-21T07:28:36.998043+00:00
 - mode: 1530
-- generated_at_jst: 2026-04-21 15:37:45 JST
-- is_true_timepoint: False
-- diagnostics_keys: base_meta, board, breadth_scope, buy_candidate_count, center_stock_count, deep_watch, generated_at, includes_kabu, industry_anchor_presence_watch, industry_anchor_watch_after, industry_anchor_watch_before, industry_basket_count, market_scan_quality_summary, mode, non_corporate_products, rank_mode_reason, ranking, ranking_candidate_count, ranking_union_count, representative_candidate_pool_basis, representative_sector_trace_top10, scan_sample_warning_rules, sector_alias_normalization_basis, sector_basket_counts, sector_live_aggregate_fail_closed_rule, sector_live_aggregate_source_of_truth, sector_summary_scope, sectors_with_ranking_confirmed_ge5, sectors_with_source_breadth_ge2, swing_3m_candidate_count, swing_candidates_1m_empty_status, swing_candidates_1m_source_of_truth, swing_candidates_1w_empty_status, swing_candidates_1w_source_of_truth, today_display_universe_rule, today_rank_absolute_constraint, today_rank_mode, today_rank_rule, today_sector_display_rank_column, today_sector_participation_inputs, today_sector_population_basis, today_sector_population_counts, today_sector_primary_rank_column, today_sector_rank_tether, today_sector_removed_live_inputs, today_top_sectors_basis, today_upshift_block_rules, top10_before_after_compare, tuning_compare, watch_candidate_count, wide_scan_mode, wide_scan_total_count, write_completed
+- source_profile: local_kabu_jq_yanoshin
+- includes_kabu: True
+- snapshot_backend: 
+
+## 強いセクター
+- 非鉄: live_ret= turnover_score=
+- 情報・通信: live_ret= turnover_score=
+- 金属: live_ret= turnover_score=
+- ｶﾞﾗｽ: live_ret= turnover_score=
+- 電気: live_ret= turnover_score=
+- ｻｰﾋﾞｽ: live_ret= turnover_score=
+- ﾊﾟﾙﾌﾟ: live_ret= turnover_score=
+- 化学: live_ret= turnover_score=
+- ｺﾞﾑ: live_ret= turnover_score=
+- 不動: live_ret= turnover_score=
+
+## セクター別中心銘柄
+- 金融: 7183 あんしん保証 score=
+- ｺﾞﾑ: 5101 横浜ゴム score=
+- ｺﾞﾑ: 5105 ＴＯＹＯ　ＴＩＲＥ score=
+- ｻｰﾋﾞｽ: 2459 アウンコンサルティング score=
+- ｻｰﾋﾞｽ: 6098 リクルートホールディングス score=
+- ﾊﾟﾙﾌﾟ: 3863 日本製紙 score=
+- 不動: 8918 ランド score=
+- 不動: 3498 霞ヶ関キャピタル score=
+- 化学: 4125 三和油化工業 score=
+- 卸売業: 2776 新都ホールディングス score=
+- 小売業: 7419 ノジマ score=
+- 建設: 1711 ＳＤＳホールディングス score=
+- 情報・通信: 5244 ｊｉｇ．ｊｐ score=
+- 情報・通信: 9984 ソフトバンクグループ score=
+- 機械: 6146 ディスコ score=
+
+## 需給ブレイク候補
+- 8035 東京エレクトロン: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 6857 アドバンテスト: 1wセクター強い / todayも崩れず / 出来高あり / 1m崩れ小
+- 3863 日本製紙: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 5991 日本発條: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 3409 北紡: 表示件数不足のため補完。通常の買い候補より信頼度は低い / 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+
+## 注意点
+- 過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。
