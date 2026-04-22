@@ -1647,6 +1647,173 @@ def _normalize_iso_date_text(value: Any) -> str:
     return text[:10]
 
 
+def _build_earnings_announcement_lookup(*frames: Any) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for frame in frames:
+        if not isinstance(frame, pd.DataFrame) or frame.empty or "code" not in frame.columns:
+            continue
+        dates = frame.get("earnings_announcement_date", pd.Series("", index=frame.index))
+        for code_value, date_value in zip(frame["code"], dates):
+            normalized_code = _normalize_security_code(code_value)
+            normalized_date = _normalize_iso_date_text(date_value)
+            if normalized_code and normalized_date:
+                lookup[normalized_code] = normalized_date
+    return lookup
+
+
+def _resolve_frame_earnings_announcement_dates(
+    frame: pd.DataFrame,
+    *,
+    lookup: dict[str, str] | None = None,
+) -> pd.Series:
+    if frame is None or frame.empty:
+        return pd.Series(dtype="object")
+    resolved = frame.get("earnings_announcement_date", pd.Series("", index=frame.index)).apply(_normalize_iso_date_text)
+    if not lookup or "code" not in frame.columns:
+        return resolved
+    normalized_codes = frame["code"].map(_normalize_security_code)
+    lookup_dates = normalized_codes.map(lambda value: lookup.get(str(value), "") if str(value) else "")
+    fill_mask = resolved.eq("") & lookup_dates.astype(str).str.strip().ne("")
+    if fill_mask.any():
+        resolved = resolved.copy()
+        resolved.loc[fill_mask] = lookup_dates.loc[fill_mask]
+    return resolved
+
+
+def _prefer_security_reference(current: dict[str, Any] | None, candidate: dict[str, Any]) -> dict[str, Any]:
+    if not current:
+        return dict(candidate)
+    current_has_date = bool(str(current.get("earnings_announcement_date", "") or "").strip())
+    candidate_has_date = bool(str(candidate.get("earnings_announcement_date", "") or "").strip())
+    if candidate_has_date and not current_has_date:
+        return dict(candidate)
+    if candidate.get("sector_name") and not current.get("sector_name"):
+        return dict(candidate)
+    if candidate.get("name") and not current.get("name"):
+        return dict(candidate)
+    return current
+
+
+def _build_security_reference_lookup(
+    *frames: Any,
+    earnings_announcement_lookup: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    by_code: dict[str, dict[str, Any]] = {}
+    by_sector_name: dict[tuple[str, str], dict[str, Any]] = {}
+    by_name: dict[str, dict[str, dict[str, Any]]] = {}
+    announcement_lookup = earnings_announcement_lookup or {}
+    for frame in frames:
+        if not isinstance(frame, pd.DataFrame) or frame.empty or "code" not in frame.columns:
+            continue
+        names = frame.get("name", pd.Series("", index=frame.index))
+        sectors = frame.get("sector_name", pd.Series("", index=frame.index))
+        raw_dates = frame.get("earnings_announcement_date", pd.Series("", index=frame.index))
+        for code_value, name_value, sector_value, raw_date_value in zip(frame["code"], names, sectors, raw_dates):
+            normalized_code = _normalize_security_code(code_value)
+            if not normalized_code:
+                continue
+            normalized_name = _normalize_security_text(name_value)
+            normalized_sector = _normalize_industry_key(sector_value)
+            normalized_date = announcement_lookup.get(normalized_code, "") or _normalize_iso_date_text(raw_date_value)
+            candidate = {
+                "code": normalized_code,
+                "name": normalized_name,
+                "sector_name": normalized_sector,
+                "earnings_announcement_date": normalized_date,
+            }
+            by_code[normalized_code] = _prefer_security_reference(by_code.get(normalized_code), candidate)
+            if normalized_name:
+                by_name.setdefault(normalized_name, {})
+                by_name[normalized_name][normalized_code] = _prefer_security_reference(
+                    by_name[normalized_name].get(normalized_code),
+                    candidate,
+                )
+                if normalized_sector:
+                    sector_key = (normalized_sector, normalized_name)
+                    by_sector_name[sector_key] = _prefer_security_reference(by_sector_name.get(sector_key), candidate)
+    return {
+        "by_code": by_code,
+        "by_sector_name": by_sector_name,
+        "by_name": {key: list(code_map.values()) for key, code_map in by_name.items()},
+    }
+
+
+def _resolve_security_reference(
+    name: Any,
+    *,
+    sector_name: Any = "",
+    security_reference_lookup: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(security_reference_lookup, dict) or not security_reference_lookup:
+        return {}
+    normalized_name = _normalize_security_text(name)
+    if not normalized_name:
+        return {}
+    normalized_sector = _normalize_industry_key(sector_name)
+    by_sector_name = security_reference_lookup.get("by_sector_name", {})
+    if normalized_sector:
+        matched = by_sector_name.get((normalized_sector, normalized_name))
+        if isinstance(matched, dict) and matched:
+            return matched
+    candidates = security_reference_lookup.get("by_name", {}).get(normalized_name, [])
+    if not candidates:
+        return {}
+    if len(candidates) == 1:
+        return candidates[0]
+    with_date = [candidate for candidate in candidates if str(candidate.get("earnings_announcement_date", "") or "").strip()]
+    unique_codes = {str(candidate.get("code", "") or "").strip() for candidate in candidates if str(candidate.get("code", "") or "").strip()}
+    if len(with_date) == 1:
+        return with_date[0]
+    if len(unique_codes) == 1:
+        return candidates[0]
+    return {}
+
+
+def _representative_stocks_to_frame(frame: Any) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "representative_stocks" not in frame.columns:
+        return pd.DataFrame(columns=["sector_name", "code", "name", "earnings_announcement_date"])
+    rows: list[dict[str, Any]] = []
+    for _, row in frame.iterrows():
+        sector_name = _clean_ui_value(row.get("sector_name"))
+        for item in row.get("representative_stocks", []):
+            if not isinstance(item, dict):
+                continue
+            code = _normalize_security_code(item.get("code"))
+            if not code:
+                continue
+            rows.append(
+                {
+                    "sector_name": sector_name,
+                    "code": code,
+                    "name": _normalize_security_text(item.get("name")),
+                    "earnings_announcement_date": _normalize_iso_date_text(item.get("earnings_announcement_date")),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _snapshot_security_frames(bundle: dict[str, Any]) -> list[pd.DataFrame]:
+    frames: list[pd.DataFrame] = []
+    for key in [
+        "sector_representatives_display",
+        "sector_representatives",
+        "focus_candidates",
+        "swing_candidates_1w",
+        "swing_candidates_1m",
+        "swing_candidates_3m",
+        "swing_candidates_1w_display",
+        "swing_candidates_1m_display",
+        "swing_candidates_3m_display",
+    ]:
+        frame = bundle.get(key, pd.DataFrame())
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            frames.append(frame)
+    representative_stocks_frame = _representative_stocks_to_frame(bundle.get("today_sector_leaderboard", pd.DataFrame()))
+    if not representative_stocks_frame.empty:
+        frames.append(representative_stocks_frame)
+    return frames
+
+
 def get_edinetdb_api_key() -> str:
     return str(os.environ.get("EDINETDB_API_KEY", "")).strip()
 
@@ -5154,6 +5321,8 @@ def _empty_sector_representatives_frame() -> pd.DataFrame:
             "representative_selected_reason",
             "representative_quality_flag",
             "representative_fallback_reason",
+            "earnings_today_announcement_flag",
+            "earnings_announcement_date",
             "was_in_selected50",
             "was_in_must_have",
             "nikkei_search",
@@ -7935,6 +8104,8 @@ def _build_center_stock_focus_view(
     sector_rank_lookup: dict[str, int],
     timeframe: str,
     representative_frame: pd.DataFrame | None = None,
+    earnings_announcement_lookup: dict[str, str] | None = None,
+    security_reference_lookup: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     if timeframe == "today":
         if representative_frame is None or representative_frame.empty:
@@ -7961,7 +8132,10 @@ def _build_center_stock_focus_view(
         working["current_price"] = working["current_price"].apply(_format_today_candidate_price)
         working["live_turnover_value"] = working["live_turnover_value"].apply(_format_display_turnover_value)
         working["representative_selected_reason"] = working.apply(_today_representative_reason_text, axis=1)
-        working["earnings_announcement_date"] = working.get("earnings_announcement_date", pd.Series("", index=working.index)).apply(_format_display_announcement_date)
+        working["earnings_announcement_date"] = _resolve_frame_earnings_announcement_dates(
+            working,
+            lookup=earnings_announcement_lookup,
+        ).apply(_format_display_announcement_date)
         working["representative_quality_flag"] = working.apply(_today_representative_quality_text, axis=1)
         working["representative_fallback_reason"] = working["representative_fallback_reason"].apply(_representative_fallback_reason_label)
         working = working.sort_values(
@@ -7970,7 +8144,7 @@ def _build_center_stock_focus_view(
             kind="mergesort",
         )
         return working.drop(columns=["_axis_rank_sort", "_rep_rank_sort", "nikkei_search"], errors="ignore").reindex(columns=SECTOR_REPRESENTATIVES_FOCUS_COLUMNS).reset_index(drop=True)
-    columns = ["axis_rank", "sector_name", "representative_rank", "name", "center_note"]
+    columns = PERSISTENCE_REPRESENTATIVES_FOCUS_COLUMNS
     if sector_frame is None or sector_frame.empty:
         return pd.DataFrame(columns=columns)
     working = sector_frame.copy()
@@ -7985,18 +8159,47 @@ def _build_center_stock_focus_view(
         sector_name = _clean_ui_value(row.get("sector_name"))
         if not sector_name:
             continue
-        names = _split_ui_stock_names(row.get("core_representatives")) or _split_ui_stock_names(row.get("representative_stock"))
-        if not names:
+        representative_items: list[dict[str, Any]] = []
+        raw_items = row.get("representative_stocks", [])
+        if isinstance(raw_items, list):
+            for item in raw_items[:3]:
+                if not isinstance(item, dict):
+                    continue
+                representative_items.append(
+                    {
+                        "code": _normalize_security_code(item.get("code")),
+                        "name": _clean_ui_value(item.get("name")),
+                        "earnings_announcement_date": _normalize_iso_date_text(item.get("earnings_announcement_date")),
+                    }
+                )
+        if not representative_items:
+            names = _split_ui_stock_names(row.get("core_representatives")) or _split_ui_stock_names(row.get("representative_stock"))
+            representative_items = [{"code": "", "name": name, "earnings_announcement_date": ""} for name in names]
+        if not representative_items:
             continue
         reason_label = _persistence_core_representatives_reason_label(row.get("core_representatives_reason"))
-        for idx, name in enumerate(names, start=1):
+        for idx, item in enumerate(representative_items[:3], start=1):
+            resolved_info = {}
+            if not item.get("code"):
+                resolved_info = _resolve_security_reference(
+                    item.get("name"),
+                    sector_name=sector_name,
+                    security_reference_lookup=security_reference_lookup,
+                )
+            code = _normalize_security_code(item.get("code")) or str(resolved_info.get("code", "") or "")
+            earnings_date = (
+                _normalize_iso_date_text(item.get("earnings_announcement_date"))
+                or (earnings_announcement_lookup or {}).get(code, "")
+                or str(resolved_info.get("earnings_announcement_date", "") or "")
+            )
             rows.append(
                 {
                     "axis_rank": sector_rank_lookup.get(sector_name, ""),
                     "sector_name": sector_name,
-                    "representative_rank": idx,
-                    "name": name,
+                    "code": _normalize_display_text(code, missing=DISPLAY_UNAVAILABLE_MARK),
+                    "name": _normalize_display_text(item.get("name"), missing=DISPLAY_UNAVAILABLE_MARK),
                     "center_note": _build_persistence_representative_note(timeframe, idx, reason_label),
+                    "earnings_announcement_date": _format_display_announcement_date(earnings_date),
                 }
             )
     return pd.DataFrame(rows, columns=columns)
@@ -8015,8 +8218,11 @@ def _build_center_reference_map(
                 working["code"] = ""
             if "name" not in working.columns:
                 working["name"] = ""
-            working["_rep_rank_sort"] = _coerce_numeric(working.get("representative_rank", pd.Series(pd.NA, index=working.index))).fillna(9999)
-            working = working.sort_values(["sector_name", "_rep_rank_sort", "code", "name"], ascending=[True, True, True, True], kind="mergesort")
+            if "representative_rank" in working.columns:
+                working["_rep_rank_sort"] = _coerce_numeric(working.get("representative_rank", pd.Series(pd.NA, index=working.index))).fillna(9999)
+                working = working.sort_values(["sector_name", "_rep_rank_sort", "code", "name"], ascending=[True, True, True, True], kind="mergesort")
+            else:
+                working = working.sort_values(["sector_name"], ascending=[True], kind="mergesort")
             for sector_name, group in working.groupby("sector_name", sort=False):
                 names: list[str] = []
                 codes: dict[str, str] = {}
@@ -8284,6 +8490,7 @@ def _build_today_purchase_candidate_view(
     center_reference_map: dict[str, dict[str, Any]],
     fallback_frame: pd.DataFrame | None = None,
     limit: int = 3,
+    earnings_announcement_lookup: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, str, str]:
     columns = [
         "candidate_rank",
@@ -8388,7 +8595,10 @@ def _build_today_purchase_candidate_view(
                         lambda row: _build_candidate_basis_text(row, center_reference_map, default_reason="当日強セクターの代表株"),
                         axis=1,
                     )
-                    dedicated["earnings_announcement_date"] = dedicated.get("earnings_announcement_date", pd.Series("", index=dedicated.index)).apply(_format_display_announcement_date)
+                    dedicated["earnings_announcement_date"] = _resolve_frame_earnings_announcement_dates(
+                        dedicated,
+                        lookup=earnings_announcement_lookup,
+                    ).apply(_format_display_announcement_date)
                     dedicated["nikkei_search"] = dedicated["nikkei_search"].fillna("").astype(str)
                     dedicated = dedicated.reindex(columns=columns)
     final_frame = dedicated.copy()
@@ -8407,7 +8617,10 @@ def _build_today_purchase_candidate_view(
             fallback["candidate_rank"] = range(len(final_frame) + 1, len(final_frame) + len(fallback) + 1)
             fallback["entry_stance_label"] = fallback.get("entry_stance_label", pd.Series("", index=fallback.index)).apply(_today_shortterm_focus_label)
             fallback["candidate_basis"] = fallback.apply(lambda row: _build_candidate_basis_text(row, center_reference_map), axis=1)
-            fallback["earnings_announcement_date"] = fallback.get("earnings_announcement_date", pd.Series("", index=fallback.index)).apply(_format_display_announcement_date)
+            fallback["earnings_announcement_date"] = _resolve_frame_earnings_announcement_dates(
+                fallback,
+                lookup=earnings_announcement_lookup,
+            ).apply(_format_display_announcement_date)
             fallback["nikkei_search"] = fallback.get("nikkei_search", pd.Series("", index=fallback.index)).fillna("").astype(str)
             fallback = fallback.reindex(columns=columns)
             final_frame = pd.concat([final_frame, fallback], ignore_index=True)
@@ -8493,6 +8706,15 @@ SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS = [
     "representative_quality_flag",
     "representative_fallback_reason",
     "nikkei_search",
+]
+
+PERSISTENCE_REPRESENTATIVES_FOCUS_COLUMNS = [
+    "axis_rank",
+    "sector_name",
+    "code",
+    "name",
+    "center_note",
+    "earnings_announcement_date",
 ]
 
 SECTOR_REPRESENTATIVES_AUDIT_COLUMNS = [
@@ -9265,6 +9487,7 @@ def _prepare_sector_representatives_display_view(
     frame: pd.DataFrame,
     *,
     display_is_source_of_truth: bool = False,
+    earnings_announcement_lookup: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     display_frame = frame.copy() if display_is_source_of_truth else _build_sector_representatives_display_frame(frame)
     compatibility_notes: list[str] = []
@@ -9281,7 +9504,10 @@ def _prepare_sector_representatives_display_view(
     for column in ["sector_name", "code", "name", "live_ret_vs_prev_close", "current_price", "live_turnover_value"]:
         prepared[column] = prepared[column].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
     prepared["representative_selected_reason"] = prepared["representative_selected_reason"].apply(lambda value: _normalize_saved_representative_label(value, _representative_selected_reason_label))
-    prepared["earnings_announcement_date"] = prepared["earnings_announcement_date"].apply(_format_display_announcement_date)
+    prepared["earnings_announcement_date"] = _resolve_frame_earnings_announcement_dates(
+        prepared,
+        lookup=earnings_announcement_lookup,
+    ).apply(_format_display_announcement_date)
     prepared["representative_quality_flag"] = prepared["representative_quality_flag"].apply(lambda value: _normalize_saved_representative_label(value, _representative_quality_flag_label))
     prepared["representative_fallback_reason"] = prepared["representative_fallback_reason"].apply(lambda value: _normalize_saved_representative_label(value, _representative_fallback_reason_label))
     prepared["nikkei_search"] = prepared["nikkei_search"].apply(lambda value: _normalize_display_text(value, missing=""))
@@ -9332,6 +9558,8 @@ def _trim_representatives_for_storage(frame: Any) -> Any:
             "representative_selected_reason",
             "representative_quality_flag",
             "representative_fallback_reason",
+            "earnings_today_announcement_flag",
+            "earnings_announcement_date",
             "was_in_selected50",
             "was_in_must_have",
             "nikkei_search",
@@ -10436,12 +10664,19 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
     empty_reasons = bundle.get("empty_reasons", {})
     snapshot_guard = bundle.get("snapshot_guard", {})
     warning_text = saved_snapshot_timing_warning(meta) if is_saved_snapshot else ""
+    snapshot_security_frames = _snapshot_security_frames(bundle)
+    earnings_announcement_lookup = _build_earnings_announcement_lookup(*snapshot_security_frames)
+    security_reference_lookup = _build_security_reference_lookup(
+        *snapshot_security_frames,
+        earnings_announcement_lookup=earnings_announcement_lookup,
+    )
     today_sector_view, today_sector_notes = _prepare_today_sector_view(bundle.get("today_sector_leaderboard", pd.DataFrame()))
     sector_representatives_raw = bundle.get("sector_representatives", bundle.get("center_stocks", bundle.get("leaders_by_sector", pd.DataFrame())))
     saved_representatives_display = bundle.get("sector_representatives_display", pd.DataFrame())
     sector_representatives_view, sector_representatives_notes = _prepare_sector_representatives_display_view(
         saved_representatives_display if isinstance(saved_representatives_display, pd.DataFrame) and not saved_representatives_display.empty else sector_representatives_raw,
         display_is_source_of_truth=isinstance(saved_representatives_display, pd.DataFrame) and not saved_representatives_display.empty,
+        earnings_announcement_lookup=earnings_announcement_lookup,
     )
     weekly_sector_view, weekly_sector_notes = _prepare_persistence_sector_view(bundle.get("sector_persistence_1w", bundle.get("weekly_sector_summary", pd.DataFrame())))
     monthly_sector_view, monthly_sector_notes = _prepare_persistence_sector_view(bundle.get("sector_persistence_1m", bundle.get("monthly_sector_summary", pd.DataFrame())))
@@ -10522,21 +10757,29 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         sector_rank_lookup=today_sector_lookup,
         timeframe="today",
         representative_frame=sector_representatives_raw if isinstance(sector_representatives_raw, pd.DataFrame) and not sector_representatives_raw.empty else sector_representatives_view,
+        earnings_announcement_lookup=earnings_announcement_lookup,
+        security_reference_lookup=security_reference_lookup,
     )
     weekly_center_focus = _build_center_stock_focus_view(
-        weekly_sector_view,
+        bundle.get("sector_persistence_1w", bundle.get("weekly_sector_summary", pd.DataFrame())),
         sector_rank_lookup=weekly_sector_lookup,
         timeframe="1w",
+        earnings_announcement_lookup=earnings_announcement_lookup,
+        security_reference_lookup=security_reference_lookup,
     )
     monthly_center_focus = _build_center_stock_focus_view(
-        monthly_sector_view,
+        bundle.get("sector_persistence_1m", bundle.get("monthly_sector_summary", pd.DataFrame())),
         sector_rank_lookup=monthly_sector_lookup,
         timeframe="1m",
+        earnings_announcement_lookup=earnings_announcement_lookup,
+        security_reference_lookup=security_reference_lookup,
     )
     quarter_center_focus = _build_center_stock_focus_view(
-        quarter_sector_view,
+        bundle.get("sector_persistence_3m", pd.DataFrame()),
         sector_rank_lookup=quarter_sector_lookup,
         timeframe="3m",
+        earnings_announcement_lookup=earnings_announcement_lookup,
+        security_reference_lookup=security_reference_lookup,
     )
 
     today_center_map = _build_center_reference_map(today_center_focus)
@@ -10550,6 +10793,7 @@ def _render_bundle(bundle: dict[str, Any], *, source_label: str, is_saved_snapsh
         center_reference_map=today_center_map,
         fallback_frame=swing_1w_view,
         limit=3,
+        earnings_announcement_lookup=earnings_announcement_lookup,
     )
     if isinstance(today_candidate_focus, pd.DataFrame) and not today_candidate_focus.empty:
         today_candidate_focus = today_candidate_focus.drop(columns=["candidate_source_label"], errors="ignore")
