@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 .streamlit/secrets.toml
-.venv/
-__pycache__/
-*.pyc
+data/poll_update.lock
+data/cache/
+data/snapshots/[0-9][0-9][0-9][0-9]-*.json
+data/snapshots/[0-9][0-9][0-9][0-9]-*.md
