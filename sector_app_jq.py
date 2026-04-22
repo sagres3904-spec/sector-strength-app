@@ -235,6 +235,13 @@ except ModuleNotFoundError:  # pragma: no cover
 BASE_URL = "https://api.jquants.com/v2"
 ROOT_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = ROOT_DIR / "config" / "settings.toml"
+EDINETDB_BASE_URL = "https://edinetdb.jp"
+EDINETDB_CALENDAR_ENDPOINT = f"{EDINETDB_BASE_URL}/v1/calendar"
+EDINETDB_CALENDAR_CACHE_DIR = ROOT_DIR / "data" / "cache"
+EDINETDB_CALENDAR_CACHE_VERSION = 1
+EDINETDB_CALENDAR_WINDOW_DAYS = 120
+EDINETDB_CALENDAR_CHUNK_DAYS = 7
+EDINETDB_CALENDAR_LIMIT = 2000
 RANKING_TYPE_MAP = {"price_up": 1, "turnover": 4, "volume_surge": 6, "turnover_surge": 7, "industry_up": 14}
 RANKING_SCORE_WEIGHTS = {"price_up": 1.0, "turnover": 1.35, "volume_surge": 1.0, "turnover_surge": 1.25}
 BOARD_REQUEST_EXCHANGES = {1, 3, 5, 6}
@@ -643,6 +650,7 @@ UI_COLUMN_LABELS = {
     "52w_flag": "20日高値近辺",
     "high_20d_flag": "20日高値近辺",
     "earnings_buffer_days": "決算まで日数",
+    "earnings_announcement_date": "決算発表予定日",
     "finance_health_score": "財務健全度",
     "finance_health_flag": "財務健全フラグ",
     "price_block_score": "価格の強さ",
@@ -1603,6 +1611,46 @@ def _normalize_security_text(value: Any) -> str:
     return re.sub(r"\s+", " ", text).upper()
 
 
+def _normalize_security_code(value: Any) -> str:
+    text = _normalize_security_text(value).replace(" ", "")
+    if text.endswith(".T"):
+        text = text[:-2]
+    return text
+
+
+def _security_code_lookup_keys(value: Any) -> list[str]:
+    normalized = _normalize_security_code(value)
+    if not normalized:
+        return []
+    keys = [normalized]
+    if re.fullmatch(r"\d{5}", normalized) and normalized.endswith("0"):
+        keys.append(normalized[:-1])
+    elif re.fullmatch(r"\d{4}", normalized):
+        keys.append(f"{normalized}0")
+    return list(dict.fromkeys([key for key in keys if key]))
+
+
+def _normalize_iso_date_text(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return ""
+    parsed = pd.to_datetime([text], errors="coerce")
+    if len(parsed) and pd.notna(parsed[0]):
+        return parsed[0].strftime("%Y-%m-%d")
+    return text[:10]
+
+
+def get_edinetdb_api_key() -> str:
+    return str(os.environ.get("EDINETDB_API_KEY", "")).strip()
+
+
 def _pick_first_non_empty_text(*values: Any) -> str:
     for value in values:
         text = _normalize_security_text(value)
@@ -1849,6 +1897,176 @@ def _classify_optional_dataset_error(exc: Exception) -> tuple[str, str]:
     return "unknown_error", message
 
 
+def _request_edinetdb_json(
+    url: str,
+    *,
+    params: dict[str, Any],
+    api_key: str = "",
+    timeout: float = 20.0,
+) -> dict[str, Any]:
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+    response = requests.get(url, headers=headers, params=params, timeout=timeout)
+    if response.status_code >= 400:
+        raise RuntimeError(f"HTTP error status={response.status_code} url={response.url} body={_short_body(response.text)}")
+    try:
+        return response.json() if response.text else {}
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid JSON from {response.url}: {_short_body(response.text)}") from exc
+
+
+def _extract_edinetdb_calendar_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    data = payload.get("data", payload)
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    if isinstance(data, dict):
+        for key in ["calendar", "items", "results", "rows"]:
+            value = data.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+    return []
+
+
+def _normalize_edinetdb_calendar_record(row: dict[str, Any]) -> dict[str, str] | None:
+    code = _pick_first_non_empty_text(
+        row.get("secCode"),
+        row.get("sec_code"),
+        row.get("security_code"),
+        row.get("securityCode"),
+        row.get("code"),
+    )
+    announcement_date = _normalize_iso_date_text(
+        _pick_first_non_empty_text(
+            row.get("announcementDate"),
+            row.get("announcement_date"),
+            row.get("date"),
+            row.get("earningsDate"),
+            row.get("earnings_date"),
+            row.get("scheduledDate"),
+            row.get("scheduled_date"),
+            row.get("disclosure_date"),
+        )
+    )
+    normalized_code = _normalize_security_code(code)
+    if not normalized_code or not announcement_date:
+        return None
+    return {
+        "code": normalized_code,
+        "announcement_date": announcement_date,
+        "company_name": _pick_first_non_empty_label(
+            row.get("companyName"),
+            row.get("company_name"),
+            row.get("name"),
+            row.get("filerName"),
+        ),
+        "period_type": _pick_first_non_empty_label(
+            row.get("periodType"),
+            row.get("period_type"),
+            row.get("quarter_type"),
+            row.get("type"),
+        ),
+        "market_segment": _pick_first_non_empty_label(
+            row.get("marketSegment"),
+            row.get("market_segment"),
+            row.get("market"),
+        ),
+    }
+
+
+def _dedupe_edinetdb_calendar_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: dict[tuple[str, str], dict[str, str]] = {}
+    for record in records:
+        key = (str(record.get("code", "")).strip(), str(record.get("announcement_date", "")).strip())
+        if not key[0] or not key[1]:
+            continue
+        deduped.setdefault(key, record)
+    return sorted(deduped.values(), key=lambda item: (item.get("announcement_date", ""), item.get("code", "")))
+
+
+def _edinetdb_calendar_cache_path(target_date: pd.Timestamp) -> Path:
+    return EDINETDB_CALENDAR_CACHE_DIR / f"edinetdb_calendar_{target_date.strftime('%Y%m%d')}.json"
+
+
+def _load_edinetdb_calendar_cache(cache_path: Path) -> dict[str, Any] | None:
+    if not cache_path.exists():
+        return None
+    try:
+        with cache_path.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception as exc:
+        logger.warning("EDINET DB cache read failed path=%s detail=%s", cache_path, exc)
+        return None
+    if int(payload.get("version", 0) or 0) != EDINETDB_CALENDAR_CACHE_VERSION:
+        return None
+    rows = payload.get("rows", [])
+    if not isinstance(rows, list):
+        return None
+    return payload
+
+
+def _write_edinetdb_calendar_cache(cache_path: Path, payload: dict[str, Any]) -> str:
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        return ""
+    except Exception as exc:
+        logger.warning("EDINET DB cache write failed path=%s detail=%s", cache_path, exc)
+        return str(exc)
+
+
+def _fetch_edinetdb_calendar_chunk(
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    *,
+    api_key: str,
+    depth: int = 0,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    params = {
+        "from": start_date.strftime("%Y-%m-%d"),
+        "to": end_date.strftime("%Y-%m-%d"),
+        "limit": EDINETDB_CALENDAR_LIMIT,
+    }
+    payload = _request_edinetdb_json(EDINETDB_CALENDAR_ENDPOINT, params=params, api_key=api_key)
+    normalized_rows = [
+        record
+        for record in (
+            _normalize_edinetdb_calendar_record(row)
+            for row in _extract_edinetdb_calendar_rows(payload)
+        )
+        if record
+    ]
+    if len(normalized_rows) >= EDINETDB_CALENDAR_LIMIT and start_date < end_date and depth < 8:
+        midpoint = start_date + timedelta(days=max(1, (end_date - start_date).days // 2))
+        if midpoint >= end_date:
+            midpoint = end_date - timedelta(days=1)
+        if midpoint >= start_date:
+            left_rows, left_chunks = _fetch_edinetdb_calendar_chunk(start_date, midpoint, api_key=api_key, depth=depth + 1)
+            right_rows, right_chunks = _fetch_edinetdb_calendar_chunk(midpoint + timedelta(days=1), end_date, api_key=api_key, depth=depth + 1)
+            return _dedupe_edinetdb_calendar_records(left_rows + right_rows), left_chunks + right_chunks
+    return normalized_rows, [{"from": params["from"], "to": params["to"], "row_count": int(len(normalized_rows)), "split_depth": int(depth)}]
+
+
+def _fetch_edinetdb_calendar_records(
+    *,
+    target_date: pd.Timestamp,
+    api_key: str,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    start_date = target_date.normalize()
+    end_date = start_date + timedelta(days=EDINETDB_CALENDAR_WINDOW_DAYS)
+    all_rows: list[dict[str, str]] = []
+    chunk_meta: list[dict[str, Any]] = []
+    current = start_date
+    while current <= end_date:
+        chunk_end = min(current + timedelta(days=EDINETDB_CALENDAR_CHUNK_DAYS - 1), end_date)
+        rows, meta = _fetch_edinetdb_calendar_chunk(current, chunk_end, api_key=api_key)
+        all_rows.extend(rows)
+        chunk_meta.extend(meta)
+        current = chunk_end + timedelta(days=1)
+    return _dedupe_edinetdb_calendar_records(all_rows), chunk_meta
+
+
 def _get_optional_dataset(path: str, params: dict[str, Any], *, dataset_name: str, api_key: str | None = None) -> pd.DataFrame:
     try:
         return pd.DataFrame(jquants_get_all(path, params, api_key=api_key))
@@ -1917,20 +2135,28 @@ def _build_topix_return_map(topix_history: pd.DataFrame, trading_dates: list[str
     return result
 
 
-def get_earnings_buffer_frame(trading_dates: list[str], *, api_key: str | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+def get_earnings_buffer_frame(
+    trading_dates: list[str],
+    *,
+    candidate_codes: list[Any] | None = None,
+    api_key: str | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     meta: dict[str, Any] = {
         "status": "empty_dataset",
         "rows_raw": 0,
         "rows_future_window": 0,
         "rows_target_date": 0,
-        "valid_code4_count": 0,
-        "date_col": "",
-        "code_col": "",
         "min_event_date": "",
         "max_event_date": "",
         "target_date": "",
         "request_mode": "",
         "source_path": "",
+        "announcement_source": "edinetdb_calendar",
+        "cache_path": "",
+        "cache_hit": False,
+        "failure_reason": "",
+        "matched_code_count": 0,
+        "jquants_fallback_used": False,
     }
     if not trading_dates:
         meta["status"] = "no_trading_dates"
@@ -1938,65 +2164,106 @@ def get_earnings_buffer_frame(trading_dates: list[str], *, api_key: str | None =
     latest_date = pd.Timestamp(trading_dates[-1])
     target_date = latest_date.normalize()
     meta["target_date"] = target_date.strftime("%Y-%m-%d")
-    df = pd.DataFrame()
-    attempt_specs = [
-        ("/fins/announcement", {}, "announcement_latest"),
-        ("/fins/announcement", {"date": target_date.strftime("%Y-%m-%d")}, "announcement_date"),
-        (
-            "/equities/earnings-calendar",
-            {"from": target_date.strftime("%Y-%m-%d"), "to": (target_date + timedelta(days=90)).strftime("%Y-%m-%d")},
-            "calendar_forward_fallback",
-        ),
+    meta["source_path"] = "/v1/calendar"
+    cache_path = _edinetdb_calendar_cache_path(target_date)
+    meta["cache_path"] = str(cache_path)
+    requested_codes = [
+        code
+        for code in (
+            _normalize_security_code(value)
+            for value in (candidate_codes or [])
+        )
+        if code
     ]
-    for path, params, request_mode in attempt_specs:
-        current = _get_optional_dataset(path, params, dataset_name="earnings_announcement", api_key=api_key)
-        if not current.empty:
-            df = current
-            meta["request_mode"] = request_mode
-            meta["source_path"] = path
-            break
-    if meta["request_mode"] == "":
-        meta["request_mode"] = "announcement_latest"
-        meta["source_path"] = "/fins/announcement"
-    meta["rows_raw"] = int(len(df))
-    if not df.empty:
-        code_col = pick_optional_existing(df, ["Code", "LocalCode", "code"])
-        event_col = pick_optional_existing(df, ["AnnouncementDate", "DisclosedDate", "ExpectedDate", "ScheduledDate", "Date", "date"])
-        meta["date_col"] = str(event_col or "")
-        meta["code_col"] = str(code_col or "")
-        if code_col and event_col:
-            normalized_codes = df[code_col].map(_normalize_code4)
-            event_dates = pd.to_datetime(df[event_col], errors="coerce")
-            valid_dates = event_dates.dropna()
-            if not valid_dates.empty:
-                meta["min_event_date"] = valid_dates.min().strftime("%Y-%m-%d")
-                meta["max_event_date"] = valid_dates.max().strftime("%Y-%m-%d")
-            meta["valid_code4_count"] = int(normalized_codes.map(_is_code4).sum())
-            meta["rows_target_date"] = int(event_dates.dt.normalize().eq(target_date).fillna(False).sum())
-            meta["rows_future_window"] = int(meta["rows_target_date"])
-            out = pd.DataFrame({"code": normalized_codes, "event_date": event_dates})
-            out = out[out["code"].map(_is_code4)].dropna(subset=["event_date"])
-            out = out[out["event_date"].dt.normalize().eq(target_date)].copy()
-            logger.info("earnings announcement endpoint used path=%s rows_raw=%s rows_filtered=%s request_mode=%s target_date=%s", meta["source_path"], len(df), len(out), meta["request_mode"], meta["target_date"])
-            if not out.empty:
-                out["earnings_buffer_days"] = pd.Series([pd.NA] * len(out), index=out.index, dtype="Int64")
-                out["earnings_today_announcement_flag"] = True
-                out["earnings_announcement_date"] = out["event_date"].dt.strftime("%Y-%m-%d")
-                meta["status"] = "ok"
-                return out.sort_values(["code", "event_date"]).drop_duplicates("code")[["code", "earnings_buffer_days", "earnings_today_announcement_flag", "earnings_announcement_date"]].reset_index(drop=True), meta
-            meta["status"] = "no_target_date_announcements" if meta["rows_target_date"] == 0 else "no_usable_rows_after_filter"
+    requested_frame = pd.DataFrame({"code": list(dict.fromkeys(requested_codes))})
+    cache_payload = _load_edinetdb_calendar_cache(cache_path)
+    normalized_records: list[dict[str, str]] = []
+    if cache_payload:
+        meta["cache_hit"] = True
+        meta["request_mode"] = "cache_hit"
+        normalized_records = _dedupe_edinetdb_calendar_records(
+            [record for record in cache_payload.get("rows", []) if isinstance(record, dict)]
+        )
+    else:
+        calendar_api_key = str(api_key or get_edinetdb_api_key() or "").strip()
+        meta["request_mode"] = "api_key" if calendar_api_key else "anonymous"
+        try:
+            normalized_records, chunk_meta = _fetch_edinetdb_calendar_records(target_date=target_date, api_key=calendar_api_key)
+            cache_write_error = _write_edinetdb_calendar_cache(
+                cache_path,
+                {
+                    "version": EDINETDB_CALENDAR_CACHE_VERSION,
+                    "target_date": meta["target_date"],
+                    "request_mode": meta["request_mode"],
+                    "source_path": meta["source_path"],
+                    "rows": normalized_records,
+                    "chunks": chunk_meta,
+                },
+            )
+            if cache_write_error:
+                meta["failure_reason"] = f"cache_write_failed: {cache_write_error}"
+        except Exception as exc:
+            meta["status"] = "request_failed"
+            meta["failure_reason"] = str(exc)
             logger.warning(
-                "earnings announcement target-date rows unavailable target_date=%s rows_raw=%s min_event_date=%s max_event_date=%s rows_target_date=%s request_mode=%s",
-                meta["target_date"],
-                meta["rows_raw"],
-                meta["min_event_date"],
-                meta["max_event_date"],
-                meta["rows_target_date"],
+                "EDINET DB calendar fetch failed request_mode=%s target_date=%s detail=%s",
                 meta["request_mode"],
+                meta["target_date"],
+                exc,
             )
             return pd.DataFrame(columns=["code", "earnings_buffer_days", "earnings_today_announcement_flag", "earnings_announcement_date"]), meta
-        meta["status"] = "missing_required_columns"
-    return pd.DataFrame(columns=["code", "earnings_buffer_days", "earnings_today_announcement_flag", "earnings_announcement_date"]), meta
+    calendar_frame = pd.DataFrame(normalized_records)
+    meta["rows_raw"] = int(len(calendar_frame))
+    if calendar_frame.empty:
+        meta["status"] = "no_rows"
+        return pd.DataFrame(columns=["code", "earnings_buffer_days", "earnings_today_announcement_flag", "earnings_announcement_date"]), meta
+    calendar_frame["announcement_date"] = pd.to_datetime(calendar_frame.get("announcement_date", pd.Series(dtype=str)), errors="coerce")
+    calendar_frame = calendar_frame.dropna(subset=["announcement_date"]).copy()
+    calendar_frame = calendar_frame[calendar_frame["announcement_date"].dt.normalize().ge(target_date)].copy()
+    if calendar_frame.empty:
+        meta["status"] = "no_future_rows"
+        return pd.DataFrame(columns=["code", "earnings_buffer_days", "earnings_today_announcement_flag", "earnings_announcement_date"]), meta
+    meta["rows_future_window"] = int(len(calendar_frame))
+    meta["rows_target_date"] = int(calendar_frame["announcement_date"].dt.normalize().eq(target_date).sum())
+    meta["min_event_date"] = calendar_frame["announcement_date"].min().strftime("%Y-%m-%d")
+    meta["max_event_date"] = calendar_frame["announcement_date"].max().strftime("%Y-%m-%d")
+    lookup_records: list[dict[str, Any]] = []
+    for _, row in calendar_frame.iterrows():
+        announcement_date = row.get("announcement_date", pd.NaT)
+        if pd.isna(announcement_date):
+            continue
+        for lookup_code in _security_code_lookup_keys(row.get("code", "")):
+            lookup_records.append(
+                {
+                    "lookup_code": lookup_code,
+                    "announcement_date": announcement_date,
+                    "announcement_date_text": announcement_date.strftime("%Y-%m-%d"),
+                }
+            )
+    lookup_frame = pd.DataFrame(lookup_records).drop_duplicates()
+    if requested_frame.empty:
+        requested_frame = pd.DataFrame({"code": sorted(set(lookup_frame.get("lookup_code", pd.Series(dtype=str)).astype(str).tolist()))})
+    requested_lookup = requested_frame.assign(lookup_code=requested_frame["code"].map(_security_code_lookup_keys)).explode("lookup_code")
+    matched = requested_lookup.merge(lookup_frame, on="lookup_code", how="left") if not requested_lookup.empty else pd.DataFrame(columns=["code", "announcement_date", "announcement_date_text"])
+    if not matched.empty:
+        matched = matched.dropna(subset=["announcement_date"]).sort_values(["code", "announcement_date", "lookup_code"], kind="mergesort")
+        matched = matched.drop_duplicates("code", keep="first")
+    out = requested_frame.merge(
+        matched[["code", "announcement_date", "announcement_date_text"]] if not matched.empty else pd.DataFrame(columns=["code", "announcement_date", "announcement_date_text"]),
+        on="code",
+        how="left",
+    )
+    if "announcement_date" in out.columns:
+        out["earnings_buffer_days"] = (
+            (pd.to_datetime(out["announcement_date"], errors="coerce").dt.normalize() - target_date).dt.days.astype("Int64")
+        )
+    else:
+        out["earnings_buffer_days"] = pd.Series([pd.NA] * len(out), index=out.index, dtype="Int64")
+    out["earnings_today_announcement_flag"] = out["earnings_buffer_days"].eq(0).fillna(False)
+    out["earnings_announcement_date"] = out.get("announcement_date_text", pd.Series("", index=out.index)).fillna("").astype(str)
+    meta["matched_code_count"] = int(out["earnings_announcement_date"].astype(str).str.strip().ne("").sum()) if "earnings_announcement_date" in out.columns else 0
+    meta["status"] = "ok"
+    return out[["code", "earnings_buffer_days", "earnings_today_announcement_flag", "earnings_announcement_date"]].reset_index(drop=True), meta
 
 
 def get_finance_health_frame(trading_dates: list[str], *, api_key: str | None = None) -> pd.DataFrame:
@@ -2106,7 +2373,11 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
     base["rel_3m"] = base["ret_3m"] - base["sector_rs_vs_topix_3m"]
     sector_counts = base.groupby("sector_name", dropna=False)["code"].nunique().reset_index(name="sector_constituent_count")
     base = base.merge(sector_counts, on="sector_name", how="left")
-    earnings_frame, earnings_meta = get_earnings_buffer_frame(trading_dates, api_key=api_key)
+    earnings_frame, earnings_meta = get_earnings_buffer_frame(
+        trading_dates,
+        candidate_codes=master_df.get("code", pd.Series(dtype=str)).tolist(),
+        api_key=None,
+    )
     finance_frame = get_finance_health_frame(trading_dates, api_key=api_key)
     base = base.merge(earnings_frame, on="code", how="left")
     base = base.merge(finance_frame, on="code", how="left")
@@ -2125,8 +2396,8 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
     base["latest_date"] = pd.to_datetime(base["latest_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     base = _annotate_non_corporate_products(base)
     logger.info("build_daily_base_data end rows=%s", len(base))
-    earnings_forward_buffer_available = False
-    earnings_forward_buffer_reason = ""
+    earnings_forward_buffer_available = bool(base.get("earnings_buffer_days", pd.Series(dtype="Int64")).notna().any())
+    earnings_forward_buffer_reason = "" if earnings_forward_buffer_available else str(earnings_meta.get("failure_reason", "") or earnings_meta.get("status", "") or "")
     return base, {
         "latest_date": max(trading_dates),
         "trading_date_count": len(trading_dates),
@@ -2144,6 +2415,18 @@ def build_daily_base_data(*, fast_check: bool = False) -> tuple[pd.DataFrame, di
         "earnings_announcement_target_date": str(earnings_meta.get("target_date", "") or ""),
         "earnings_announcement_request_mode": str(earnings_meta.get("request_mode", "") or ""),
         "earnings_announcement_source_path": str(earnings_meta.get("source_path", "") or ""),
+        "earnings_announcement_source": str(earnings_meta.get("announcement_source", "") or ""),
+        "earnings_announcement_cache_path": str(earnings_meta.get("cache_path", "") or ""),
+        "earnings_announcement_cache_hit": bool(earnings_meta.get("cache_hit", False)),
+        "earnings_announcement_failure_reason": str(earnings_meta.get("failure_reason", "") or ""),
+        "earnings_announcement_jquants_fallback_used": bool(earnings_meta.get("jquants_fallback_used", False)),
+        "edinetdb_calendar_status": str(earnings_meta.get("status", "") or ""),
+        "edinetdb_calendar_source": str(earnings_meta.get("announcement_source", "") or ""),
+        "edinetdb_calendar_cache_path": str(earnings_meta.get("cache_path", "") or ""),
+        "edinetdb_calendar_cache_hit": bool(earnings_meta.get("cache_hit", False)),
+        "edinetdb_calendar_request_mode": str(earnings_meta.get("request_mode", "") or ""),
+        "edinetdb_calendar_failure_reason": str(earnings_meta.get("failure_reason", "") or ""),
+        "edinetdb_calendar_jquants_fallback_used": bool(earnings_meta.get("jquants_fallback_used", False)),
         "earnings_forward_buffer_available": earnings_forward_buffer_available,
         "earnings_forward_buffer_reason": earnings_forward_buffer_reason,
         "finance_coverage_count": int(base["finance_health_score"].notna().sum()) if "finance_health_score" in base.columns else 0,
@@ -6957,7 +7240,7 @@ def _build_swing_candidate_tables_v2(
             gate_col = "sector_gate_pass_1w"
             sort_columns = [gate_col, "entry_fit_priority_1w", "pass_score_gate_1w", "sector_confidence_priority_1w", "today_not_broken_1w", "one_week_edge_1w", "medium_term_not_broken_1w", "candidate_quality_score_1w", "swing_score_1w", "live_turnover_value", "rs_vs_topix_1w", "price_vs_ma20_abs"]
             ascending = [False, True, False, False, False, False, False, False, False, False, False, True]
-            selected_columns = ["code", "name", "sector_name", "candidate_quality_1w", "entry_fit_1w", "selection_reason_1w", "risk_note_1w", "candidate_commentary_1w", "entry_stance_raw_1w", "entry_stance_label_1w", "stretch_caution_label_1w", "watch_reason_label_1w", "swing_score_1w", "rs_vs_topix_1w", "live_ret_vs_prev_close", "current_price", "current_price_unavailable", "live_turnover_value", "live_turnover_unavailable", "earnings_buffer_days", "nikkei_search", "material_link", gate_col]
+            selected_columns = ["code", "name", "sector_name", "candidate_quality_1w", "entry_fit_1w", "selection_reason_1w", "earnings_announcement_date", "risk_note_1w", "candidate_commentary_1w", "entry_stance_raw_1w", "entry_stance_label_1w", "stretch_caution_label_1w", "watch_reason_label_1w", "swing_score_1w", "rs_vs_topix_1w", "live_ret_vs_prev_close", "current_price", "current_price_unavailable", "live_turnover_value", "live_turnover_unavailable", "earnings_buffer_days", "nikkei_search", "material_link", gate_col]
             rename_map = {
                 "candidate_quality_1w": "candidate_quality",
                 "entry_fit_1w": "entry_fit",
@@ -6973,7 +7256,7 @@ def _build_swing_candidate_tables_v2(
             gate_col = "sector_gate_pass_3m"
             sort_columns = [gate_col, "entry_fit_priority_3m", "sector_confidence_priority_3m", "candidate_quality_score_3m", "pass_score_gate_3m", "swing_score_3m", "rs_vs_topix_3m", "ret_3m", "avg_turnover_20d"]
             ascending = [False, True, False, False, False, False, False, False, False]
-            selected_columns = ["code", "name", "sector_name", "candidate_quality_3m", "entry_fit_3m", "selection_reason_3m", "risk_note_3m", "candidate_commentary_3m", "entry_stance_raw_3m", "entry_stance_label_3m", "stretch_caution_label_3m", "watch_reason_label_3m", "swing_score_3m", "rs_vs_topix_3m", "ret_3m", "avg_turnover_20d", "live_ret_vs_prev_close", "current_price", "current_price_unavailable", "live_turnover_value", "live_turnover_unavailable", "earnings_buffer_days", "nikkei_search", "material_link", gate_col]
+            selected_columns = ["code", "name", "sector_name", "candidate_quality_3m", "entry_fit_3m", "selection_reason_3m", "earnings_announcement_date", "risk_note_3m", "candidate_commentary_3m", "entry_stance_raw_3m", "entry_stance_label_3m", "stretch_caution_label_3m", "watch_reason_label_3m", "swing_score_3m", "rs_vs_topix_3m", "ret_3m", "avg_turnover_20d", "live_ret_vs_prev_close", "current_price", "current_price_unavailable", "live_turnover_value", "live_turnover_unavailable", "earnings_buffer_days", "nikkei_search", "material_link", gate_col]
             rename_map = {
                 "candidate_quality_3m": "candidate_quality",
                 "entry_fit_3m": "entry_fit",
@@ -6989,7 +7272,7 @@ def _build_swing_candidate_tables_v2(
             gate_col = "sector_gate_pass_1m"
             sort_columns = [gate_col, "entry_fit_priority_1m", "sector_confidence_priority_1m", "candidate_quality_score_1m", "pass_score_gate_1m", "swing_score_1m", "rs_vs_topix_1m", "rs_vs_topix_3m", "price_vs_ma20_abs", "live_turnover_value"]
             ascending = [False, True, False, False, False, False, False, False, True, False]
-            selected_columns = ["code", "name", "sector_name", "candidate_quality_1m", "entry_fit_1m", "selection_reason_1m", "risk_note_1m", "candidate_commentary_1m", "entry_stance_raw_1m", "entry_stance_label_1m", "stretch_caution_label_1m", "watch_reason_label_1m", "swing_score_1m", "rs_vs_topix_1m", "rs_vs_topix_3m", "live_ret_vs_prev_close", "current_price", "current_price_unavailable", "live_turnover_value", "live_turnover_unavailable", "price_vs_ma20_pct", "earnings_buffer_days", "finance_health_flag", "nikkei_search", "material_link", gate_col]
+            selected_columns = ["code", "name", "sector_name", "candidate_quality_1m", "entry_fit_1m", "selection_reason_1m", "earnings_announcement_date", "risk_note_1m", "candidate_commentary_1m", "entry_stance_raw_1m", "entry_stance_label_1m", "stretch_caution_label_1m", "watch_reason_label_1m", "swing_score_1m", "rs_vs_topix_1m", "rs_vs_topix_3m", "live_ret_vs_prev_close", "current_price", "current_price_unavailable", "live_turnover_value", "live_turnover_unavailable", "price_vs_ma20_pct", "earnings_buffer_days", "finance_health_flag", "nikkei_search", "material_link", gate_col]
             rename_map = {
                 "candidate_quality_1m": "candidate_quality",
                 "entry_fit_1m": "entry_fit",
@@ -7476,6 +7759,11 @@ def _format_display_value_or_unavailable(value: Any, *, unavailable: bool = Fals
     return str(numeric)
 
 
+def _format_display_announcement_date(value: Any) -> str:
+    text = _normalize_iso_date_text(value)
+    return text or DISPLAY_UNAVAILABLE_MARK
+
+
 def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str, link_columns: bool = False, note: str = "") -> None:
     st.subheader(title)
     if str(note or "").strip():
@@ -7673,6 +7961,7 @@ def _build_center_stock_focus_view(
         working["current_price"] = working["current_price"].apply(_format_today_candidate_price)
         working["live_turnover_value"] = working["live_turnover_value"].apply(_format_display_turnover_value)
         working["representative_selected_reason"] = working.apply(_today_representative_reason_text, axis=1)
+        working["earnings_announcement_date"] = working.get("earnings_announcement_date", pd.Series("", index=working.index)).apply(_format_display_announcement_date)
         working["representative_quality_flag"] = working.apply(_today_representative_quality_text, axis=1)
         working["representative_fallback_reason"] = working["representative_fallback_reason"].apply(_representative_fallback_reason_label)
         working = working.sort_values(
@@ -7731,10 +8020,10 @@ def _build_center_reference_map(
             for sector_name, group in working.groupby("sector_name", sort=False):
                 names: list[str] = []
                 codes: dict[str, str] = {}
-                for _, row in group.head(3).iterrows():
+                for index_within_group, (_, row) in enumerate(group.head(3).iterrows(), start=1):
                     code = _clean_ui_value(row.get("code"))
                     name = _clean_ui_value(row.get("name"))
-                    rep_rank = _clean_ui_value(row.get("representative_rank"))
+                    rep_rank = _clean_ui_value(row.get("representative_rank")) or str(index_within_group)
                     if code and rep_rank:
                         codes[code] = rep_rank
                     if name:
@@ -7924,7 +8213,6 @@ def _build_candidate_focus_view(
 ) -> tuple[pd.DataFrame, str, str]:
     columns = [
         "candidate_rank",
-        "sector_scope",
         "sector_name",
         "code",
         "name",
@@ -7932,6 +8220,7 @@ def _build_candidate_focus_view(
         "current_price",
         "live_ret_vs_prev_close",
         "candidate_basis",
+        "earnings_announcement_date",
         "nikkei_search",
     ]
     if frame is None or frame.empty:
@@ -7967,7 +8256,6 @@ def _build_candidate_focus_view(
             kind="mergesort",
         ).head(limit)
     working["candidate_rank"] = working[rank_col]
-    working["sector_scope"] = working["_sector_lookup_key"].map(lambda value: "内" if str(value or "") in normalized_sector_lookup else "外")
     if restrict_to_sector_scope:
         working["entry_stance_label"] = working.get("entry_stance_label", pd.Series("", index=working.index)).apply(_today_shortterm_focus_label)
 
@@ -7985,6 +8273,7 @@ def _build_candidate_focus_view(
         )
 
     working["candidate_basis"] = working.apply(_build_candidate_basis, axis=1)
+    working["earnings_announcement_date"] = working.get("earnings_announcement_date", pd.Series("", index=working.index)).apply(_format_display_announcement_date)
     return working.drop(columns=["_sector_lookup_key"], errors="ignore")[columns].reset_index(drop=True), "", candidate_note
 
 
@@ -7998,8 +8287,6 @@ def _build_today_purchase_candidate_view(
 ) -> tuple[pd.DataFrame, str, str]:
     columns = [
         "candidate_rank",
-        "candidate_source_label",
-        "sector_scope",
         "sector_name",
         "code",
         "name",
@@ -8007,6 +8294,7 @@ def _build_today_purchase_candidate_view(
         "current_price",
         "live_ret_vs_prev_close",
         "candidate_basis",
+        "earnings_announcement_date",
         "nikkei_search",
     ]
     normalized_sector_lookup = {_normalize_industry_key(key): value for key, value in sector_rank_lookup.items() if _normalize_industry_key(key)}
@@ -8091,8 +8379,6 @@ def _build_today_purchase_candidate_view(
                 dedicated = working.head(limit).copy()
                 if not dedicated.empty:
                     dedicated["candidate_rank"] = range(1, len(dedicated) + 1)
-                    dedicated["candidate_source_label"] = _today_shortterm_candidate_type_label()
-                    dedicated["sector_scope"] = "内"
                     dedicated["entry_stance_label"] = dedicated["_stage_sort"].map(
                         lambda value: _today_shortterm_focus_label("追撃候補" if int(value) == 0 else "監視")
                     )
@@ -8102,6 +8388,7 @@ def _build_today_purchase_candidate_view(
                         lambda row: _build_candidate_basis_text(row, center_reference_map, default_reason="当日強セクターの代表株"),
                         axis=1,
                     )
+                    dedicated["earnings_announcement_date"] = dedicated.get("earnings_announcement_date", pd.Series("", index=dedicated.index)).apply(_format_display_announcement_date)
                     dedicated["nikkei_search"] = dedicated["nikkei_search"].fillna("").astype(str)
                     dedicated = dedicated.reindex(columns=columns)
     final_frame = dedicated.copy()
@@ -8118,10 +8405,9 @@ def _build_today_purchase_candidate_view(
             fallback["_candidate_rank_sort"] = _coerce_numeric(fallback.get("candidate_rank_1w", pd.Series(pd.NA, index=fallback.index))).fillna(9999)
             fallback = fallback.sort_values(["_candidate_rank_sort", "sector_name", "code"], ascending=[True, True, True], kind="mergesort").head(shortage).copy()
             fallback["candidate_rank"] = range(len(final_frame) + 1, len(final_frame) + len(fallback) + 1)
-            fallback["candidate_source_label"] = _today_shortterm_candidate_type_label()
-            fallback["sector_scope"] = fallback["_sector_lookup_key"].map(lambda value: "内" if str(value or "") in normalized_sector_lookup else "外")
             fallback["entry_stance_label"] = fallback.get("entry_stance_label", pd.Series("", index=fallback.index)).apply(_today_shortterm_focus_label)
             fallback["candidate_basis"] = fallback.apply(lambda row: _build_candidate_basis_text(row, center_reference_map), axis=1)
+            fallback["earnings_announcement_date"] = fallback.get("earnings_announcement_date", pd.Series("", index=fallback.index)).apply(_format_display_announcement_date)
             fallback["nikkei_search"] = fallback.get("nikkei_search", pd.Series("", index=fallback.index)).fillna("").astype(str)
             fallback = fallback.reindex(columns=columns)
             final_frame = pd.concat([final_frame, fallback], ignore_index=True)
@@ -8183,13 +8469,13 @@ TODAY_SECTOR_DISPLAY_COLUMNS = [
 SECTOR_REPRESENTATIVES_FOCUS_COLUMNS = [
     "today_rank",
     "sector_name",
-    "representative_rank",
     "code",
     "name",
     "live_ret_vs_prev_close",
     "current_price",
     "live_turnover_value",
     "representative_selected_reason",
+    "earnings_announcement_date",
     "representative_quality_flag",
     "representative_fallback_reason",
 ]
@@ -8197,13 +8483,13 @@ SECTOR_REPRESENTATIVES_FOCUS_COLUMNS = [
 SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS = [
     "today_rank",
     "sector_name",
-    "representative_rank",
     "code",
     "name",
     "live_ret_vs_prev_close",
     "current_price",
     "live_turnover_value",
     "representative_selected_reason",
+    "earnings_announcement_date",
     "representative_quality_flag",
     "representative_fallback_reason",
     "nikkei_search",
@@ -8310,6 +8596,7 @@ SWING_1W_DISPLAY_COLUMNS = [
     "stretch_caution_label",
     "watch_reason_label",
     "selection_reason",
+    "earnings_announcement_date",
     "risk_note",
     "candidate_commentary",
     "rs_vs_topix_1w",
@@ -8329,6 +8616,7 @@ SWING_1M_DISPLAY_COLUMNS = [
     "stretch_caution_label",
     "watch_reason_label",
     "selection_reason",
+    "earnings_announcement_date",
     "risk_note",
     "candidate_commentary",
     "rs_vs_topix_1m",
@@ -8351,6 +8639,7 @@ SWING_3M_DISPLAY_COLUMNS = [
     "stretch_caution_label",
     "watch_reason_label",
     "selection_reason",
+    "earnings_announcement_date",
     "risk_note",
     "candidate_commentary",
     "rs_vs_topix_3m",
@@ -8398,13 +8687,13 @@ def _build_empty_representative_display_rows(today_sector_leaderboard: pd.DataFr
             {
                 "today_rank": _format_display_rank_value(row.get("today_rank")),
                 "sector_name": _normalize_display_text(row.get("sector_name"), missing=DISPLAY_UNAVAILABLE_MARK),
-                "representative_rank": DISPLAY_UNAVAILABLE_MARK,
                 "code": DISPLAY_UNAVAILABLE_MARK,
                 "name": DISPLAY_UNAVAILABLE_MARK,
                 "live_ret_vs_prev_close": DISPLAY_UNAVAILABLE_MARK,
                 "current_price": DISPLAY_UNAVAILABLE_MARK,
                 "live_turnover_value": DISPLAY_UNAVAILABLE_MARK,
                 "representative_selected_reason": "",
+                "earnings_announcement_date": DISPLAY_UNAVAILABLE_MARK,
                 "representative_quality_flag": "",
                 "representative_fallback_reason": reason,
                 "nikkei_search": "",
@@ -8465,6 +8754,7 @@ def _prepare_table_view(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
         "representative_selected_reason",
         "representative_quality_flag",
         "representative_fallback_reason",
+        "earnings_announcement_date",
         "nikkei_search",
     }
     if "core_representatives" in columns and "core_representatives" not in prepared.columns and "representative_stock" in prepared.columns:
@@ -8629,10 +8919,11 @@ def _build_sector_representatives_display_frame(
         "representative_selected_reason",
         "representative_quality_flag",
         "representative_fallback_reason",
+        "earnings_announcement_date",
         "nikkei_search",
     ]:
         if column not in working.columns:
-            if column in {"sector_name", "code", "name", "representative_selected_reason", "representative_quality_flag", "representative_fallback_reason", "nikkei_search"}:
+            if column in {"sector_name", "code", "name", "representative_selected_reason", "representative_quality_flag", "representative_fallback_reason", "earnings_announcement_date", "nikkei_search"}:
                 working[column] = ""
             elif column in {"current_price_unavailable", "live_turnover_unavailable"}:
                 working[column] = True
@@ -8669,11 +8960,12 @@ def _build_sector_representatives_display_frame(
         for value, unavailable in zip(working["live_turnover_value"], working["live_turnover_unavailable"])
     ]
     working["representative_selected_reason"] = working["representative_selected_reason"].apply(_representative_selected_reason_label)
+    working["earnings_announcement_date"] = working["earnings_announcement_date"].apply(_format_display_announcement_date)
     working["representative_quality_flag"] = working["representative_quality_flag"].apply(_representative_quality_flag_label)
     working["representative_fallback_reason"] = working["representative_fallback_reason"].apply(_representative_fallback_reason_label)
     working["nikkei_search"] = working["nikkei_search"].fillna("").astype(str)
     working = working.drop(columns=["current_price_unavailable", "live_turnover_unavailable"], errors="ignore")
-    display = working[SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS].copy()
+    display = working.copy()
     if isinstance(today_sector_leaderboard, pd.DataFrame) and not today_sector_leaderboard.empty:
         empty_rows = _build_empty_representative_display_rows(
             today_sector_leaderboard,
@@ -8727,7 +9019,7 @@ def _build_swing_candidate_display_frame(
     working = frame.copy()
     for column in columns:
         if column not in working.columns:
-            if column in {"sector_name", "code", "name", "candidate_quality", "entry_fit", "entry_stance_label", "stretch_caution_label", "watch_reason_label", "selection_reason", "risk_note", "candidate_commentary", "finance_health_flag", "nikkei_search"}:
+            if column in {"sector_name", "code", "name", "candidate_quality", "entry_fit", "entry_stance_label", "stretch_caution_label", "watch_reason_label", "selection_reason", "earnings_announcement_date", "risk_note", "candidate_commentary", "finance_health_flag", "nikkei_search"}:
                 working[column] = ""
             else:
                 working[column] = pd.NA
@@ -8759,6 +9051,8 @@ def _build_swing_candidate_display_frame(
     for numeric_col in ["rs_vs_topix_1w", "rs_vs_topix_1m", "rs_vs_topix_3m", "ret_3m", "price_vs_ma20_pct"]:
         if numeric_col in working.columns:
             working[numeric_col] = working[numeric_col].apply(_format_display_pct_1dp)
+    if "earnings_announcement_date" in working.columns:
+        working["earnings_announcement_date"] = working["earnings_announcement_date"].apply(_format_display_announcement_date)
     if "avg_turnover_20d" in working.columns:
         working["avg_turnover_20d"] = working["avg_turnover_20d"].apply(
             lambda value: _format_display_value_or_unavailable(
@@ -8792,6 +9086,8 @@ def _prepare_swing_candidate_display_view(
         for column in columns:
             if column in rank_columns:
                 prepared[column] = _coerce_numeric(prepared[column]).round().astype("Int64")
+            elif column == "earnings_announcement_date":
+                prepared[column] = prepared[column].apply(_format_display_announcement_date)
             else:
                 prepared[column] = prepared[column].fillna("").astype(str)
         return prepared.reindex(columns=columns), compatibility_notes
@@ -8806,6 +9102,8 @@ def _prepare_swing_candidate_display_view(
         for column in columns:
             if column in rank_columns:
                 prepared[column] = _coerce_numeric(prepared[column]).round().astype("Int64")
+            elif column == "earnings_announcement_date":
+                prepared[column] = prepared[column].apply(_format_display_announcement_date)
             else:
                 prepared[column] = prepared[column].fillna("").astype(str)
         return prepared.reindex(columns=columns), compatibility_notes
@@ -8978,14 +9276,16 @@ def _prepare_sector_representatives_display_view(
             prepared[column] = ""
             compatibility_notes.append(column)
     prepared["today_rank"] = prepared["today_rank"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
-    prepared["representative_rank"] = prepared["representative_rank"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
+    if "representative_rank" in prepared.columns:
+        prepared["representative_rank"] = prepared["representative_rank"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
     for column in ["sector_name", "code", "name", "live_ret_vs_prev_close", "current_price", "live_turnover_value"]:
         prepared[column] = prepared[column].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
     prepared["representative_selected_reason"] = prepared["representative_selected_reason"].apply(lambda value: _normalize_saved_representative_label(value, _representative_selected_reason_label))
+    prepared["earnings_announcement_date"] = prepared["earnings_announcement_date"].apply(_format_display_announcement_date)
     prepared["representative_quality_flag"] = prepared["representative_quality_flag"].apply(lambda value: _normalize_saved_representative_label(value, _representative_quality_flag_label))
     prepared["representative_fallback_reason"] = prepared["representative_fallback_reason"].apply(lambda value: _normalize_saved_representative_label(value, _representative_fallback_reason_label))
     prepared["nikkei_search"] = prepared["nikkei_search"].apply(lambda value: _normalize_display_text(value, missing=""))
-    prepared = _sort_sector_representatives_display_rows(prepared.reindex(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS))
+    prepared = _sort_sector_representatives_display_rows(prepared).reindex(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS)
     return prepared.reindex(columns=SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS), compatibility_notes
 
 
@@ -10066,7 +10366,41 @@ def run_cli(mode: str, write_drive: bool = False, fast_check: bool = False) -> d
         bundle["meta"]["earnings_announcement_rows_target_date"] = int(base_meta.get("earnings_announcement_rows_target_date", 0) or 0)
         bundle["meta"]["earnings_announcement_target_date"] = str(base_meta.get("earnings_announcement_target_date", "") or "")
         bundle["meta"]["earnings_announcement_source_path"] = str(base_meta.get("earnings_announcement_source_path", "") or "")
-        bundle["diagnostics"].update({"base_meta": base_meta, "ranking": ranking_diag, "deep_watch": deep_watch_diag, "board": board_diag, "write_completed": False})
+        bundle["meta"]["earnings_announcement_source"] = str(base_meta.get("earnings_announcement_source", "") or "")
+        bundle["meta"]["earnings_announcement_source_policy"] = "edinetdb_calendar_only"
+        bundle["meta"]["earnings_announcement_cache_path"] = str(base_meta.get("earnings_announcement_cache_path", "") or "")
+        bundle["meta"]["earnings_announcement_cache_hit"] = bool(base_meta.get("earnings_announcement_cache_hit", False))
+        bundle["meta"]["earnings_announcement_failure_reason"] = str(base_meta.get("earnings_announcement_failure_reason", "") or "")
+        bundle["meta"]["earnings_announcement_jquants_fallback_used"] = bool(base_meta.get("earnings_announcement_jquants_fallback_used", False))
+        bundle["meta"]["earnings_announcement_uses_jquants"] = False
+        bundle["meta"]["edinetdb_calendar_status"] = str(base_meta.get("edinetdb_calendar_status", "") or "")
+        bundle["meta"]["edinetdb_calendar_source"] = str(base_meta.get("edinetdb_calendar_source", "") or "")
+        bundle["meta"]["edinetdb_calendar_cache_path"] = str(base_meta.get("edinetdb_calendar_cache_path", "") or "")
+        bundle["meta"]["edinetdb_calendar_cache_hit"] = bool(base_meta.get("edinetdb_calendar_cache_hit", False))
+        bundle["meta"]["edinetdb_calendar_request_mode"] = str(base_meta.get("edinetdb_calendar_request_mode", "") or "")
+        bundle["meta"]["edinetdb_calendar_failure_reason"] = str(base_meta.get("edinetdb_calendar_failure_reason", "") or "")
+        bundle["meta"]["edinetdb_calendar_jquants_fallback_used"] = bool(base_meta.get("edinetdb_calendar_jquants_fallback_used", False))
+        bundle["diagnostics"].update(
+            {
+                "base_meta": base_meta,
+                "ranking": ranking_diag,
+                "deep_watch": deep_watch_diag,
+                "board": board_diag,
+                "earnings_announcement": {
+                    "source": str(base_meta.get("earnings_announcement_source", "") or ""),
+                    "source_path": str(base_meta.get("earnings_announcement_source_path", "") or ""),
+                    "status": str(base_meta.get("earnings_announcement_status", "") or ""),
+                    "target_date": str(base_meta.get("earnings_announcement_target_date", "") or ""),
+                    "request_mode": str(base_meta.get("earnings_announcement_request_mode", "") or ""),
+                    "cache_path": str(base_meta.get("earnings_announcement_cache_path", "") or ""),
+                    "cache_hit": bool(base_meta.get("earnings_announcement_cache_hit", False)),
+                    "failure_reason": str(base_meta.get("earnings_announcement_failure_reason", "") or ""),
+                    "uses_jquants_fallback": bool(base_meta.get("earnings_announcement_jquants_fallback_used", False)),
+                    "source_policy": "display_and_earnings_buffer_fields_are_derived_from_edinetdb_calendar_only",
+                },
+                "write_completed": False,
+            }
+        )
         bundle["meta"]["today_rank_mode"] = str(bundle["diagnostics"].get("today_rank_mode", "") or "")
         bundle["meta"]["ranking_union_count"] = int(bundle["diagnostics"].get("ranking_union_count", 0) or 0)
         bundle["meta"]["sectors_with_ranking_confirmed_ge5"] = int(bundle["diagnostics"].get("sectors_with_ranking_confirmed_ge5", 0) or 0)
