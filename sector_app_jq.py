@@ -1618,6 +1618,35 @@ def _normalize_security_code(value: Any) -> str:
     return text
 
 
+_EMBEDDED_SECURITY_CODE_PATTERN = re.compile(
+    r"(?:(?<=^)|(?<=[\s\(\[（【]))([0-9]{4,5}|[0-9]{3}[A-Z])(?:(?=$)|(?=[\s\)\]）】]))",
+    re.IGNORECASE,
+)
+
+
+def _extract_embedded_security_codes(value: Any) -> list[str]:
+    if value is None:
+        return []
+    text = unicodedata.normalize("NFKC", str(value))
+    codes: list[str] = []
+    for matched in _EMBEDDED_SECURITY_CODE_PATTERN.findall(text):
+        normalized = _normalize_security_code(matched)
+        if not normalized:
+            continue
+        codes.extend(_security_code_lookup_keys(normalized))
+    return list(dict.fromkeys([code for code in codes if code]))
+
+
+def _strip_embedded_security_codes(value: Any) -> str:
+    text = _normalize_security_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"[\(（【]\s*(?:[0-9]{4,5}|[0-9]{3}[A-Z])\s*[\)）】]", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(?:[0-9]{4,5}|[0-9]{3}[A-Z])\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+(?:[0-9]{4,5}|[0-9]{3}[A-Z])$", "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _security_code_lookup_keys(value: Any) -> list[str]:
     normalized = _normalize_security_code(value)
     if not normalized:
@@ -1713,23 +1742,27 @@ def _build_security_reference_lookup(
             if not normalized_code:
                 continue
             normalized_name = _normalize_security_text(name_value)
+            stripped_name = _strip_embedded_security_codes(name_value)
+            candidate_name = stripped_name or normalized_name
             normalized_sector = _normalize_industry_key(sector_value)
             normalized_date = announcement_lookup.get(normalized_code, "") or _normalize_iso_date_text(raw_date_value)
             candidate = {
                 "code": normalized_code,
-                "name": normalized_name,
+                "name": candidate_name,
                 "sector_name": normalized_sector,
                 "earnings_announcement_date": normalized_date,
             }
             by_code[normalized_code] = _prefer_security_reference(by_code.get(normalized_code), candidate)
-            if normalized_name:
-                by_name.setdefault(normalized_name, {})
-                by_name[normalized_name][normalized_code] = _prefer_security_reference(
-                    by_name[normalized_name].get(normalized_code),
+            for name_key in dict.fromkeys([normalized_name, stripped_name]):
+                if not name_key:
+                    continue
+                by_name.setdefault(name_key, {})
+                by_name[name_key][normalized_code] = _prefer_security_reference(
+                    by_name[name_key].get(normalized_code),
                     candidate,
                 )
                 if normalized_sector:
-                    sector_key = (normalized_sector, normalized_name)
+                    sector_key = (normalized_sector, name_key)
                     by_sector_name[sector_key] = _prefer_security_reference(by_sector_name.get(sector_key), candidate)
     return {
         "by_code": by_code,
@@ -1746,26 +1779,44 @@ def _resolve_security_reference(
 ) -> dict[str, Any]:
     if not isinstance(security_reference_lookup, dict) or not security_reference_lookup:
         return {}
-    normalized_name = _normalize_security_text(name)
-    if not normalized_name:
-        return {}
+    by_code = security_reference_lookup.get("by_code", {})
     normalized_sector = _normalize_industry_key(sector_name)
-    by_sector_name = security_reference_lookup.get("by_sector_name", {})
+    explicit_code_candidates = [by_code.get(code) for code in _extract_embedded_security_codes(name)]
+    explicit_code_candidates = [candidate for candidate in explicit_code_candidates if isinstance(candidate, dict) and candidate]
     if normalized_sector:
-        matched = by_sector_name.get((normalized_sector, normalized_name))
-        if isinstance(matched, dict) and matched:
-            return matched
-    candidates = security_reference_lookup.get("by_name", {}).get(normalized_name, [])
-    if not candidates:
+        sector_matched = [
+            candidate
+            for candidate in explicit_code_candidates
+            if _normalize_industry_key(candidate.get("sector_name")) == normalized_sector
+        ]
+        if len(sector_matched) == 1:
+            return sector_matched[0]
+    if len(explicit_code_candidates) == 1:
+        return explicit_code_candidates[0]
+    normalized_name = _normalize_security_text(name)
+    stripped_name = _strip_embedded_security_codes(name)
+    name_keys = [key for key in dict.fromkeys([stripped_name, normalized_name]) if key]
+    if not name_keys:
         return {}
-    if len(candidates) == 1:
-        return candidates[0]
-    with_date = [candidate for candidate in candidates if str(candidate.get("earnings_announcement_date", "") or "").strip()]
-    unique_codes = {str(candidate.get("code", "") or "").strip() for candidate in candidates if str(candidate.get("code", "") or "").strip()}
-    if len(with_date) == 1:
-        return with_date[0]
-    if len(unique_codes) == 1:
-        return candidates[0]
+    by_sector_name = security_reference_lookup.get("by_sector_name", {})
+    for name_key in name_keys:
+        if normalized_sector:
+            matched = by_sector_name.get((normalized_sector, name_key))
+            if isinstance(matched, dict) and matched:
+                return matched
+    by_name = security_reference_lookup.get("by_name", {})
+    for name_key in name_keys:
+        candidates = by_name.get(name_key, [])
+        if not candidates:
+            continue
+        if len(candidates) == 1:
+            return candidates[0]
+        with_date = [candidate for candidate in candidates if str(candidate.get("earnings_announcement_date", "") or "").strip()]
+        unique_codes = {str(candidate.get("code", "") or "").strip() for candidate in candidates if str(candidate.get("code", "") or "").strip()}
+        if len(with_date) == 1:
+            return with_date[0]
+        if len(unique_codes) == 1:
+            return candidates[0]
     return {}
 
 
@@ -1808,9 +1859,10 @@ def _snapshot_security_frames(bundle: dict[str, Any]) -> list[pd.DataFrame]:
         frame = bundle.get(key, pd.DataFrame())
         if isinstance(frame, pd.DataFrame) and not frame.empty:
             frames.append(frame)
-    representative_stocks_frame = _representative_stocks_to_frame(bundle.get("today_sector_leaderboard", pd.DataFrame()))
-    if not representative_stocks_frame.empty:
-        frames.append(representative_stocks_frame)
+    for key in ["today_sector_leaderboard", "sector_persistence_1w", "sector_persistence_1m", "sector_persistence_3m"]:
+        representative_stocks_frame = _representative_stocks_to_frame(bundle.get(key, pd.DataFrame()))
+        if not representative_stocks_frame.empty:
+            frames.append(representative_stocks_frame)
     return frames
 
 
@@ -4671,6 +4723,7 @@ def _build_persistence_core_representatives(
     result["core_representatives"] = ""
     result["core_representatives_count"] = 0
     result["core_representatives_reason"] = ""
+    result["representative_stocks"] = [[] for _ in range(len(result))]
     if result.empty:
         return result
     horizon_config = {
@@ -4742,6 +4795,10 @@ def _build_persistence_core_representatives(
         sector_key = str(sector_key or "").strip()
         if sector_key == "" or sector_key not in target_sector_names:
             continue
+        sector_indices = result.index[result["sector_name"].eq(sector_key)].tolist()
+        if not sector_indices:
+            continue
+        sector_index = sector_indices[0]
         raw_group = raw_working[raw_working["sector_name"].eq(sector_key)].copy()
         group = working[working["sector_name"].eq(sector_key)].copy()
         if group.empty:
@@ -4762,7 +4819,7 @@ def _build_persistence_core_representatives(
                         sector_reason.append(f"{column}_missing")
             if not sector_reason:
                 sector_reason.append("no_eligible_candidates")
-            result.loc[result["sector_name"].eq(sector_key), "core_representatives_reason"] = "|".join(dict.fromkeys(sector_reason))
+            result.at[sector_index, "core_representatives_reason"] = "|".join(dict.fromkeys(sector_reason))
             continue
         eligible = group[group["name"].ne("")].copy()
         for column in numeric_columns:
@@ -4789,7 +4846,7 @@ def _build_persistence_core_representatives(
                     sector_reason.append(f"{column}_missing")
             if not sector_reason:
                 sector_reason.append("no_eligible_candidates")
-            result.loc[result["sector_name"].eq(sector_key), "core_representatives_reason"] = "|".join(sector_reason)
+            result.at[sector_index, "core_representatives_reason"] = "|".join(sector_reason)
             continue
         sorted_eligible = eligible.sort_values(
             horizon_config["sort_columns"],
@@ -4805,13 +4862,30 @@ def _build_persistence_core_representatives(
                 break
         chosen = pd.DataFrame(chosen_rows)
         if chosen.empty:
-            result.loc[result["sector_name"].eq(sector_key), "core_representatives_reason"] = "non_corporate_products_only"
+            result.at[sector_index, "core_representatives_reason"] = "non_corporate_products_only"
             continue
         chosen_names = chosen["name"].astype(str).tolist()
-        result.loc[result["sector_name"].eq(sector_key), "core_representatives"] = " / ".join(chosen_names)
-        result.loc[result["sector_name"].eq(sector_key), "core_representatives_count"] = int(len(chosen_names))
+        representative_records: list[dict[str, Any]] = []
+        for representative_rank, (_, chosen_row) in enumerate(chosen.head(3).iterrows(), start=1):
+            record_code = _normalize_security_code(chosen_row.get("code", ""))
+            record_name = str(chosen_row.get("name", "") or "").strip()
+            record_date = _normalize_iso_date_text(chosen_row.get("earnings_announcement_date"))
+            representative_records.append(
+                {
+                    "horizon": str(horizon),
+                    "sector_name": sector_key,
+                    "representative_rank": int(representative_rank),
+                    "code": record_code,
+                    "name": record_name,
+                    "earnings_announcement_date": record_date,
+                    "nikkei_search": _make_nikkei_search_link(record_name, record_code),
+                }
+            )
+        result.at[sector_index, "core_representatives"] = " / ".join(chosen_names)
+        result.at[sector_index, "core_representatives_count"] = int(len(chosen_names))
+        result.at[sector_index, "representative_stocks"] = representative_records
         if len(chosen_names) < 3:
-            result.loc[result["sector_name"].eq(sector_key), "core_representatives_reason"] = f"insufficient_candidates:{len(chosen_names)}"
+            result.at[sector_index, "core_representatives_reason"] = f"insufficient_candidates:{len(chosen_names)}"
     return result
 
 
@@ -5292,6 +5366,124 @@ def _build_sector_persistence_tables(base_df: pd.DataFrame, *, display_base_df: 
         return frame
 
     return {"1w": _build("1w", "sector_rank_1w"), "1m": _build("1m", "sector_rank_1m"), "3m": _build("3m", "sector_rank_3m")}
+
+
+def _resolve_persistence_representatives_for_storage(
+    frame: pd.DataFrame,
+    *,
+    horizon: str,
+    earnings_announcement_lookup: dict[str, str] | None = None,
+    security_reference_lookup: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if frame is None or frame.empty:
+        return frame, {
+            "source": "missing",
+            "resolved_count": 0,
+            "unresolved_count": 0,
+            "earnings_date_count": 0,
+            "unresolved_samples": [],
+        }
+    working = frame.copy()
+    if "representative_stocks" not in working.columns:
+        working["representative_stocks"] = [[] for _ in range(len(working))]
+    structured_sector_count = 0
+    fallback_sector_count = 0
+    resolved_count = 0
+    unresolved_count = 0
+    earnings_date_count = 0
+    unresolved_samples: list[dict[str, str]] = []
+    by_code = security_reference_lookup.get("by_code", {}) if isinstance(security_reference_lookup, dict) else {}
+    for row_index, row in working.iterrows():
+        sector_name = str(row.get("sector_name", "") or "").strip()
+        raw_items = row.get("representative_stocks", [])
+        representative_items: list[dict[str, Any]] = []
+        if isinstance(raw_items, list):
+            for item in raw_items[:3]:
+                if isinstance(item, dict):
+                    representative_items.append(dict(item))
+        if representative_items:
+            structured_sector_count += 1
+        else:
+            names = _split_ui_stock_names(row.get("core_representatives")) or _split_ui_stock_names(row.get("representative_stock"))
+            representative_items = [{"name": name} for name in names[:3] if str(name or "").strip()]
+            if representative_items:
+                fallback_sector_count += 1
+        if not representative_items:
+            working.at[row_index, "representative_stocks"] = []
+            continue
+        reason_label = _persistence_core_representatives_reason_label(row.get("core_representatives_reason"))
+        resolved_items: list[dict[str, Any]] = []
+        for representative_rank, item in enumerate(representative_items[:3], start=1):
+            raw_name = _clean_ui_value(item.get("name")) or _strip_embedded_security_codes(item.get("name"))
+            raw_code = _normalize_security_code(item.get("code"))
+            resolved_info = {}
+            if raw_code and raw_code in by_code:
+                resolved_info = by_code.get(raw_code, {}) or {}
+            if not resolved_info and raw_name:
+                resolved_info = _resolve_security_reference(
+                    item.get("name", raw_name),
+                    sector_name=sector_name,
+                    security_reference_lookup=security_reference_lookup,
+                )
+            resolved_code = raw_code or _normalize_security_code(resolved_info.get("code"))
+            resolved_name = raw_name or _clean_ui_value(resolved_info.get("name")) or _strip_embedded_security_codes(item.get("name"))
+            earnings_date = (
+                _normalize_iso_date_text(item.get("earnings_announcement_date"))
+                or (earnings_announcement_lookup or {}).get(resolved_code, "")
+                or _normalize_iso_date_text(resolved_info.get("earnings_announcement_date"))
+            )
+            representative_reason = _pick_first_non_empty_label(
+                item.get("representative_reason"),
+                item.get("center_note"),
+                _build_persistence_representative_note(horizon, representative_rank, reason_label),
+            )
+            nikkei_search = str(item.get("nikkei_search", "") or "").strip() or _make_nikkei_search_link(resolved_name, resolved_code)
+            if resolved_code:
+                resolved_count += 1
+            else:
+                unresolved_count += 1
+                if len(unresolved_samples) < 10:
+                    unresolved_samples.append(
+                        {
+                            "sector_name": sector_name,
+                            "name": resolved_name or _clean_ui_value(item.get("name")),
+                            "reason": "code_unresolved_after_structured_and_name_lookup",
+                        }
+                    )
+            if earnings_date:
+                earnings_date_count += 1
+            resolved_items.append(
+                {
+                    "horizon": str(horizon),
+                    "sector_name": sector_name,
+                    "representative_rank": int(representative_rank),
+                    "code": resolved_code,
+                    "name": resolved_name,
+                    "representative_reason": representative_reason,
+                    "center_note": representative_reason,
+                    "earnings_announcement_date": earnings_date,
+                    "nikkei_search": nikkei_search,
+                }
+            )
+        working.at[row_index, "representative_stocks"] = resolved_items
+        if resolved_items:
+            names_joined = " / ".join([str(item.get("name", "") or "").strip() for item in resolved_items if str(item.get("name", "") or "").strip()][:3])
+            if "core_representatives" in working.columns and not str(row.get("core_representatives", "") or "").strip():
+                working.at[row_index, "core_representatives"] = names_joined
+            if "representative_stock" in working.columns and not str(row.get("representative_stock", "") or "").strip():
+                working.at[row_index, "representative_stock"] = str(resolved_items[0].get("name", "") or "")
+            if "leaders" in working.columns and not str(row.get("leaders", "") or "").strip():
+                working.at[row_index, "leaders"] = names_joined
+    source_label = "structured" if structured_sector_count > 0 else ("name_fallback" if fallback_sector_count > 0 else "missing")
+    return working, {
+        "source": source_label,
+        "structured_sector_count": int(structured_sector_count),
+        "fallback_sector_count": int(fallback_sector_count),
+        "resolved_count": int(resolved_count),
+        "unresolved_count": int(unresolved_count),
+        "earnings_date_count": int(earnings_date_count),
+        "unresolved_samples": unresolved_samples,
+    }
 
 
 def _empty_sector_representatives_frame() -> pd.DataFrame:
@@ -8169,12 +8361,14 @@ def _build_center_stock_focus_view(
                     {
                         "code": _normalize_security_code(item.get("code")),
                         "name": _clean_ui_value(item.get("name")),
+                        "center_note": _pick_first_non_empty_label(item.get("center_note"), item.get("representative_reason")),
                         "earnings_announcement_date": _normalize_iso_date_text(item.get("earnings_announcement_date")),
+                        "nikkei_search": str(item.get("nikkei_search", "") or "").strip(),
                     }
                 )
         if not representative_items:
             names = _split_ui_stock_names(row.get("core_representatives")) or _split_ui_stock_names(row.get("representative_stock"))
-            representative_items = [{"code": "", "name": name, "earnings_announcement_date": ""} for name in names]
+            representative_items = [{"code": "", "name": name, "center_note": "", "earnings_announcement_date": "", "nikkei_search": ""} for name in names]
         if not representative_items:
             continue
         reason_label = _persistence_core_representatives_reason_label(row.get("core_representatives_reason"))
@@ -8192,14 +8386,26 @@ def _build_center_stock_focus_view(
                 or (earnings_announcement_lookup or {}).get(code, "")
                 or str(resolved_info.get("earnings_announcement_date", "") or "")
             )
+            resolved_name = _normalize_display_text(
+                item.get("name") or resolved_info.get("name"),
+                missing=DISPLAY_UNAVAILABLE_MARK,
+            )
+            center_note = _pick_first_non_empty_label(
+                item.get("center_note"),
+                _build_persistence_representative_note(timeframe, idx, reason_label),
+            )
+            nikkei_search = str(item.get("nikkei_search", "") or "").strip() or _make_nikkei_search_link(
+                "" if resolved_name == DISPLAY_UNAVAILABLE_MARK else resolved_name,
+                code,
+            )
             rows.append(
                 {
-                    "axis_rank": sector_rank_lookup.get(sector_name, ""),
                     "sector_name": sector_name,
                     "code": _normalize_display_text(code, missing=DISPLAY_UNAVAILABLE_MARK),
-                    "name": _normalize_display_text(item.get("name"), missing=DISPLAY_UNAVAILABLE_MARK),
-                    "center_note": _build_persistence_representative_note(timeframe, idx, reason_label),
+                    "name": resolved_name,
+                    "center_note": _normalize_display_text(center_note, missing=DISPLAY_UNAVAILABLE_MARK),
                     "earnings_announcement_date": _format_display_announcement_date(earnings_date),
+                    "nikkei_search": nikkei_search,
                 }
             )
     return pd.DataFrame(rows, columns=columns)
@@ -8709,12 +8915,12 @@ SECTOR_REPRESENTATIVES_DISPLAY_COLUMNS = [
 ]
 
 PERSISTENCE_REPRESENTATIVES_FOCUS_COLUMNS = [
-    "axis_rank",
     "sector_name",
     "code",
     "name",
     "center_note",
     "earnings_announcement_date",
+    "nikkei_search",
 ]
 
 SECTOR_REPRESENTATIVES_AUDIT_COLUMNS = [
@@ -10102,6 +10308,12 @@ def build_live_snapshot(
         sector_representatives,
         today_sector_leaderboard=today_sector_leaderboard,
     )
+    persistence_reference_frames = [stock_base_df, sector_representatives, sector_representatives_display]
+    persistence_earnings_lookup = _build_earnings_announcement_lookup(*persistence_reference_frames)
+    persistence_security_reference_lookup = _build_security_reference_lookup(
+        *persistence_reference_frames,
+        earnings_announcement_lookup=persistence_earnings_lookup,
+    )
     baseline_persistence_tables = _build_sector_persistence_tables(base_df, display_base_df=stock_base_df)
     persistence_tables = _build_sector_persistence_tables(base_df, display_base_df=stock_base_df)
     rep_key_map = pd.Series(dtype=str)
@@ -10129,6 +10341,26 @@ def build_live_snapshot(
             current_representative = persistence_tables[key]["representative_stock"] if "representative_stock" in persistence_tables[key].columns else pd.Series([""] * len(persistence_tables[key]), index=persistence_tables[key].index)
             persistence_tables[key]["representative_stock"] = current_representative.where(current_representative.astype(str).str.strip() != "", persistence_tables[key]["normalized_sector_name"].map(rep_key_map).fillna(persistence_tables[key]["sector_name"].map(rep_map).fillna("")))
             persistence_tables[key]["leaders"] = persistence_tables[key]["normalized_sector_name"].map(leaders_key_map).fillna(persistence_tables[key]["sector_name"].map(leaders_map).fillna(""))
+        if not baseline_persistence_tables[key].empty:
+            baseline_persistence_tables[key] = baseline_persistence_tables[key].copy()
+            baseline_persistence_tables[key]["normalized_sector_name"] = baseline_persistence_tables[key].get("sector_name", pd.Series(dtype=str)).map(_normalize_industry_key)
+            baseline_current_representative = baseline_persistence_tables[key]["representative_stock"] if "representative_stock" in baseline_persistence_tables[key].columns else pd.Series([""] * len(baseline_persistence_tables[key]), index=baseline_persistence_tables[key].index)
+            baseline_persistence_tables[key]["representative_stock"] = baseline_current_representative.where(baseline_current_representative.astype(str).str.strip() != "", baseline_persistence_tables[key]["sector_name"].map(rep_map).fillna(""))
+            baseline_persistence_tables[key]["leaders"] = baseline_persistence_tables[key]["sector_name"].map(leaders_map).fillna("")
+    horizon_representative_diagnostics: dict[str, dict[str, Any]] = {}
+    for key in ["1w", "1m", "3m"]:
+        baseline_persistence_tables[key], _ = _resolve_persistence_representatives_for_storage(
+            baseline_persistence_tables[key],
+            horizon=key,
+            earnings_announcement_lookup=persistence_earnings_lookup,
+            security_reference_lookup=persistence_security_reference_lookup,
+        )
+        persistence_tables[key], horizon_representative_diagnostics[key] = _resolve_persistence_representatives_for_storage(
+            persistence_tables[key],
+            horizon=key,
+            earnings_announcement_lookup=persistence_earnings_lookup,
+            security_reference_lookup=persistence_security_reference_lookup,
+        )
     baseline_swing_candidates = _build_swing_candidate_tables_v2(
         stock_merged,
         baseline_today_sector_leaderboard,
@@ -10277,6 +10509,21 @@ def build_live_snapshot(
             "buy_candidate_count": int(len(swing_candidates["1m"])),
             "swing_3m_candidate_count": int(len(swing_candidates["3m"])),
             "center_stock_count": int(len(sector_representatives)),
+            "horizon_representative_source_1w": str(horizon_representative_diagnostics.get("1w", {}).get("source", "") or ""),
+            "horizon_representative_source_1m": str(horizon_representative_diagnostics.get("1m", {}).get("source", "") or ""),
+            "horizon_representative_source_3m": str(horizon_representative_diagnostics.get("3m", {}).get("source", "") or ""),
+            "horizon_representative_code_resolved_1w": int(horizon_representative_diagnostics.get("1w", {}).get("resolved_count", 0) or 0),
+            "horizon_representative_code_resolved_1m": int(horizon_representative_diagnostics.get("1m", {}).get("resolved_count", 0) or 0),
+            "horizon_representative_code_resolved_3m": int(horizon_representative_diagnostics.get("3m", {}).get("resolved_count", 0) or 0),
+            "horizon_representative_code_unresolved_1w": int(horizon_representative_diagnostics.get("1w", {}).get("unresolved_count", 0) or 0),
+            "horizon_representative_code_unresolved_1m": int(horizon_representative_diagnostics.get("1m", {}).get("unresolved_count", 0) or 0),
+            "horizon_representative_code_unresolved_3m": int(horizon_representative_diagnostics.get("3m", {}).get("unresolved_count", 0) or 0),
+            "horizon_representative_earnings_date_count_1w": int(horizon_representative_diagnostics.get("1w", {}).get("earnings_date_count", 0) or 0),
+            "horizon_representative_earnings_date_count_1m": int(horizon_representative_diagnostics.get("1m", {}).get("earnings_date_count", 0) or 0),
+            "horizon_representative_earnings_date_count_3m": int(horizon_representative_diagnostics.get("3m", {}).get("earnings_date_count", 0) or 0),
+            "horizon_representative_unresolved_samples_1w": horizon_representative_diagnostics.get("1w", {}).get("unresolved_samples", []),
+            "horizon_representative_unresolved_samples_1m": horizon_representative_diagnostics.get("1m", {}).get("unresolved_samples", []),
+            "horizon_representative_unresolved_samples_3m": horizon_representative_diagnostics.get("3m", {}).get("unresolved_samples", []),
             "sector_live_aggregate_source_of_truth": sector_live_aggregate_source_meta or {"source_frame": "stock_merged_observed_live_rows"},
             "sector_live_aggregate_fail_closed_rule": "live_aggregate_status must be observed before any live aggregate is eligible for score usage",
             "representative_candidate_pool_basis": "representative_pool is built from stock_merged = base_df inner board_df, and board_df is limited to the deep_watch selected universe",
