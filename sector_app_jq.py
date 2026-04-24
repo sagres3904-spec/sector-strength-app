@@ -5611,6 +5611,19 @@ def _empty_sector_representatives_frame() -> pd.DataFrame:
             "live_ret_from_open",
             "sector_live_ret_pct",
             "sector_today_flow_pct",
+            "sector_turnover_share",
+            "exclude_spike",
+            "exclude_spike_hard_reject",
+            "exclude_spike_warning_only",
+            "spike_quality",
+            "poor_quality_spike",
+            "material_supported_breakout",
+            "breakout_support_reason",
+            "centrality_score",
+            "liquidity_score",
+            "today_leadership_score",
+            "representative_final_score",
+            "selected_reason",
             "rep_score_today_strength",
             "rep_score_relative_strength",
             "rep_score_liquidity",
@@ -5642,6 +5655,10 @@ def _append_gate_reason(existing: Any, reason: str) -> str:
     return "|".join(parts)
 
 
+def _remove_gate_reason(existing: Any, reason: str) -> str:
+    return "|".join(part for part in [p.strip() for p in str(existing or "").split("|")] if part and part != reason)
+
+
 def _apply_today_representative_gate(working: pd.DataFrame) -> pd.DataFrame:
     if working is None or working.empty:
         return working
@@ -5662,6 +5679,10 @@ def _apply_today_representative_gate(working: pd.DataFrame) -> pd.DataFrame:
     market_positive_rate = _coerce_numeric(result.get("market_positive_rate", pd.Series(0.5, index=result.index))).fillna(0.5)
     sector_median = _coerce_numeric(result.get("sector_median_return", result.get("sector_live_ret_median", pd.Series(0.0, index=result.index)))).fillna(0.0)
     sector_return_percentile = _coerce_numeric(result.get("stock_return_percentile_in_sector", result.get("sector_live_ret_pct", pd.Series(0.5, index=result.index)))).fillna(0.5)
+    sector_return_rank = _coerce_numeric(result.get("stock_return_rank_in_sector", result.get("sector_live_ret_rank_desc", pd.Series(float("inf"), index=result.index)))).fillna(float("inf"))
+    live_turnover = _coerce_numeric(result.get("live_turnover", result.get("live_turnover_value", pd.Series(0.0, index=result.index)))).fillna(0.0)
+    sector_turnover_share = _coerce_numeric(result.get("stock_turnover_share_of_sector", result.get("sector_turnover_share", pd.Series(0.0, index=result.index)))).fillna(0.0)
+    centrality_score = _coerce_numeric(result.get("rep_score_centrality", result.get("centrality_score", pd.Series(0.0, index=result.index)))).fillna(0.0)
     liquidity_ok = result.get("liquidity_ok", pd.Series(True, index=result.index)).fillna(False).astype(bool)
     exclude_spike = result.get("exclude_spike", pd.Series(False, index=result.index)).fillna(False).astype(bool)
     gate_reasons = pd.Series("", index=result.index, dtype=object)
@@ -5674,10 +5695,48 @@ def _apply_today_representative_gate(working: pd.DataFrame) -> pd.DataFrame:
     broad_positive_large_negative = broad_positive_sector & live_ret.lt(0.0) & (live_ret.le(-3.0) | lower_group | materially_below_median)
     not_weak_context_under_median = (~weak_market) & (~weak_sector) & live_ret.lt(0.0) & materially_below_median
     lower_group_under_median = lower_group & live_ret.lt(sector_median)
+    material_supported_breakout = result.get("material_supported_breakout", pd.Series(False, index=result.index)).fillna(False).astype(bool)
+    material_supported_breakout = material_supported_breakout | (
+        exclude_spike
+        & live_ret.ge(12.0)
+        & (sector_return_percentile.ge(0.75) | sector_return_rank.le(2.0))
+        & liquidity_ok
+        & (live_turnover.ge(1_000_000_000.0) | sector_turnover_share.ge(0.20))
+        & (sector_turnover_share.ge(0.15) | live_turnover.ge(5_000_000_000.0))
+        & (~event_drop)
+    )
+    poor_quality_spike = result.get("poor_quality_spike", pd.Series(False, index=result.index)).fillna(False).astype(bool)
+    low_spike_turnover = live_turnover.lt(500_000_000.0)
+    low_spike_share = sector_turnover_share.lt(0.05)
+    low_spike_centrality = centrality_score.lt(1.25)
+    poor_quality_spike = poor_quality_spike | (
+        exclude_spike
+        & (~material_supported_breakout)
+        & ((~liquidity_ok) | (low_spike_turnover & low_spike_share) | (low_spike_centrality & low_spike_share))
+    )
+    result["material_supported_breakout"] = material_supported_breakout
+    result["poor_quality_spike"] = poor_quality_spike
+    result["exclude_spike_hard_reject"] = exclude_spike & poor_quality_spike
+    result["exclude_spike_warning_only"] = exclude_spike & (~poor_quality_spike)
+    result["spike_quality"] = pd.Series("", index=result.index, dtype=object)
+    result.loc[exclude_spike & material_supported_breakout, "spike_quality"] = "material_supported_breakout"
+    result.loc[exclude_spike & poor_quality_spike, "spike_quality"] = "poor_quality_spike"
+    result.loc[exclude_spike & (~material_supported_breakout) & (~poor_quality_spike), "spike_quality"] = "warning_only"
+    result["breakout_support_reason"] = ""
+    result.loc[exclude_spike & material_supported_breakout, "breakout_support_reason"] = "high_return_top_sector_rank_with_large_turnover_or_sector_share"
+    result.loc[exclude_spike & poor_quality_spike, "breakout_support_reason"] = "spike_lacks_turnover_share_liquidity_or_centrality"
+    spike_warning_only = exclude_spike & (~poor_quality_spike)
+    if spike_warning_only.any():
+        for column in ["rep_excluded_reason", "hard_block_reason"]:
+            result.loc[spike_warning_only, column] = result.loc[spike_warning_only, column].apply(
+                lambda value: _remove_gate_reason(value, "exclude_spike")
+            )
+        result.loc[spike_warning_only & result["hard_block_reason"].astype(str).eq(""), "rep_hard_block"] = False
 
     masks = [
         (~liquidity_ok, "liquidity_not_ok", True),
-        (exclude_spike, "exclude_spike", True),
+        (exclude_spike & (~poor_quality_spike), "exclude_spike_warning_only", False),
+        (poor_quality_spike, "poor_quality_spike", True),
         (lower_group_under_median, "sector_lower_group_under_median", True),
         (materially_below_median, "materially_below_sector_median", True),
         (broad_positive_large_negative, "broad_positive_sector_large_negative", True),
@@ -5689,14 +5748,20 @@ def _apply_today_representative_gate(working: pd.DataFrame) -> pd.DataFrame:
         if mask.any():
             gate_reasons.loc[mask] = gate_reasons.loc[mask].apply(lambda value: _append_gate_reason(value, reason))
             result.loc[mask, "rep_excluded_reason"] = result.loc[mask, "rep_excluded_reason"].apply(lambda value: _append_gate_reason(value, reason))
-            result.loc[mask, "hard_block_reason"] = result.loc[mask, "hard_block_reason"].apply(lambda value: _append_gate_reason(value, reason))
             if hard:
+                result.loc[mask, "hard_block_reason"] = result.loc[mask, "hard_block_reason"].apply(lambda value: _append_gate_reason(value, reason))
                 result.loc[mask, "rep_hard_block"] = True
 
-    result["representative_gate_pass"] = gate_reasons.astype(str).eq("")
+    result["representative_gate_pass"] = ~result["rep_hard_block"].fillna(False)
     result["representative_gate_reason"] = gate_reasons.where(gate_reasons.astype(str).ne(""), "today_gate_pass")
     result["hard_reject_reason"] = result["hard_block_reason"]
     result["fallback_blocked_reason"] = result["hard_block_reason"].where(result["rep_hard_block"].fillna(False), "")
+    result["sector_turnover_share"] = sector_turnover_share
+    result["centrality_score"] = centrality_score
+    result["liquidity_score"] = _coerce_numeric(result.get("rep_score_liquidity", result.get("rep_score_today_flow", pd.Series(0.0, index=result.index)))).fillna(0.0)
+    result["today_leadership_score"] = _coerce_numeric(result.get("rep_score_today_leadership", pd.Series(0.0, index=result.index))).fillna(0.0)
+    result["representative_final_score"] = _coerce_numeric(result.get("rep_score_total", result.get("representative_score", pd.Series(0.0, index=result.index)))).fillna(0.0)
+    result["selected_reason"] = result.get("representative_selected_reason", result.get("rep_selected_reason", pd.Series("", index=result.index))).fillna("").astype(str)
     result["market_context"] = pd.Series(
         ["weak_market" if weak else "normal_or_positive_market" for weak in weak_market.fillna(False).tolist()],
         index=result.index,
@@ -5889,9 +5954,56 @@ def _score_sector_center_candidates(
     working["sector_today_flow_pct"] = _score_percentile_within_group(working["rep_score_today_flow"], sector_groups)
     working["sector_today_leadership_pct"] = _score_percentile_within_group(working["rep_score_today_leadership"], sector_groups)
     working["sector_live_ret_top_band_cutoff"] = working["sector_candidate_count"].apply(lambda count: max(1, math.ceil(float(count or 0) * 0.35)))
+    working["material_supported_breakout"] = (
+        working["exclude_spike"].fillna(False)
+        & (_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(0.0) >= 12.0)
+        & (
+            (_coerce_numeric(working["sector_live_ret_pct"]).fillna(0.0) >= 0.75)
+            | (_coerce_numeric(working["sector_live_ret_rank_desc"]).fillna(float("inf")) <= 2.0)
+        )
+        & working["liquidity_ok"].fillna(False)
+        & (
+            (_coerce_numeric(working["live_turnover"]).fillna(0.0) >= 1_000_000_000.0)
+            | (_coerce_numeric(working["stock_turnover_share_of_sector"]).fillna(0.0) >= 0.20)
+        )
+        & (
+            (_coerce_numeric(working["stock_turnover_share_of_sector"]).fillna(0.0) >= 0.15)
+            | (_coerce_numeric(working["live_turnover"]).fillna(0.0) >= 5_000_000_000.0)
+        )
+    )
+    low_spike_turnover = _coerce_numeric(working["live_turnover"]).fillna(0.0) < 500_000_000.0
+    low_spike_share = _coerce_numeric(working["stock_turnover_share_of_sector"]).fillna(0.0) < 0.05
+    low_spike_centrality = _coerce_numeric(working["rep_score_centrality"]).fillna(0.0) < 1.25
+    working["poor_quality_spike"] = (
+        working["exclude_spike"].fillna(False)
+        & (~working["material_supported_breakout"].fillna(False))
+        & ((~working["liquidity_ok"].fillna(False)) | (low_spike_turnover & low_spike_share) | (low_spike_centrality & low_spike_share))
+    )
+    working["exclude_spike_hard_reject"] = working["exclude_spike"].fillna(False) & working["poor_quality_spike"].fillna(False)
+    working["exclude_spike_warning_only"] = working["exclude_spike"].fillna(False) & (~working["poor_quality_spike"].fillna(False))
+    working["spike_quality"] = ""
+    working.loc[working["exclude_spike"].fillna(False) & working["material_supported_breakout"].fillna(False), "spike_quality"] = "material_supported_breakout"
+    working.loc[working["exclude_spike"].fillna(False) & working["poor_quality_spike"].fillna(False), "spike_quality"] = "poor_quality_spike"
+    working.loc[
+        working["exclude_spike"].fillna(False)
+        & (~working["material_supported_breakout"].fillna(False))
+        & (~working["poor_quality_spike"].fillna(False)),
+        "spike_quality",
+    ] = "warning_only"
+    working["breakout_support_reason"] = ""
+    working.loc[
+        working["exclude_spike"].fillna(False) & working["material_supported_breakout"].fillna(False),
+        "breakout_support_reason",
+    ] = "high_return_top_sector_rank_with_large_turnover_or_sector_share"
+    working.loc[
+        working["exclude_spike"].fillna(False) & working["poor_quality_spike"].fillna(False),
+        "breakout_support_reason",
+    ] = "spike_lacks_turnover_share_liquidity_or_centrality"
     working["rep_score_sanity"] = 0.0
     working.loc[working["liquidity_ok"].fillna(False), "rep_score_sanity"] += 1.00
     working.loc[~working["exclude_spike"].fillna(False), "rep_score_sanity"] += 0.80
+    working.loc[working["material_supported_breakout"].fillna(False), "rep_score_sanity"] += 0.70
+    working.loc[working["poor_quality_spike"].fillna(False), "rep_score_sanity"] -= 1.20
     working.loc[_coerce_numeric(working["live_ret_vs_prev_close"]).fillna(-999.0) >= _coerce_numeric(working["sector_live_ret_median"]).fillna(0.0), "rep_score_sanity"] += 0.60
     working.loc[_coerce_numeric(working["closing_strength_signal"]).fillna(0.0) >= _coerce_numeric(working["sector_closing_strength_median"]).fillna(0.0), "rep_score_sanity"] += 0.45
     working.loc[_coerce_numeric(working["sector_today_flow_pct"]).fillna(0.0) >= 0.67, "rep_score_sanity"] += 0.30
@@ -5917,13 +6029,13 @@ def _score_sector_center_candidates(
     working["rep_excluded_reason"] = ""
     working["hard_block_reason"] = ""
     hard_block_liquidity = ~working["liquidity_ok"].fillna(False)
-    hard_block_spike = working["exclude_spike"].fillna(False)
+    hard_block_spike = working["poor_quality_spike"].fillna(False)
     working.loc[hard_block_liquidity, "rep_hard_block"] = True
     working.loc[hard_block_liquidity, "rep_excluded_reason"] = "liquidity_not_ok"
     working.loc[hard_block_liquidity, "hard_block_reason"] = "liquidity_not_ok"
     working.loc[hard_block_spike, "rep_hard_block"] = True
-    working.loc[hard_block_spike, "rep_excluded_reason"] = working["rep_excluded_reason"].where(working["rep_excluded_reason"].astype(str) != "", "exclude_spike")
-    working.loc[hard_block_spike, "hard_block_reason"] = working["hard_block_reason"].where(working["hard_block_reason"].astype(str) != "", "exclude_spike")
+    working.loc[hard_block_spike, "rep_excluded_reason"] = working["rep_excluded_reason"].where(working["rep_excluded_reason"].astype(str) != "", "poor_quality_spike")
+    working.loc[hard_block_spike, "hard_block_reason"] = working["hard_block_reason"].where(working["hard_block_reason"].astype(str) != "", "poor_quality_spike")
     working = _apply_today_representative_gate(working)
     working["rep_relative_leadership_pass"] = (
         (_coerce_numeric(working["sector_live_ret_rank_desc"]).fillna(float("inf")) <= _coerce_numeric(working["sector_live_ret_top_band_cutoff"]).fillna(0.0))
@@ -6187,6 +6299,19 @@ def _build_sector_representatives(scored_candidates: pd.DataFrame) -> pd.DataFra
             "live_ret_from_open",
             "sector_live_ret_pct",
             "sector_today_flow_pct",
+            "sector_turnover_share",
+            "exclude_spike",
+            "exclude_spike_hard_reject",
+            "exclude_spike_warning_only",
+            "spike_quality",
+            "poor_quality_spike",
+            "material_supported_breakout",
+            "breakout_support_reason",
+            "centrality_score",
+            "liquidity_score",
+            "today_leadership_score",
+            "representative_final_score",
+            "selected_reason",
             "rep_score_today_strength",
             "rep_score_relative_strength",
             "rep_score_liquidity",
@@ -6243,6 +6368,19 @@ def _build_sector_representatives(scored_candidates: pd.DataFrame) -> pd.DataFra
                     "live_ret_from_open",
                     "sector_live_ret_pct",
                     "sector_today_flow_pct",
+                    "sector_turnover_share",
+                    "exclude_spike",
+                    "exclude_spike_hard_reject",
+                    "exclude_spike_warning_only",
+                    "spike_quality",
+                    "poor_quality_spike",
+                    "material_supported_breakout",
+                    "breakout_support_reason",
+                    "centrality_score",
+                    "liquidity_score",
+                    "today_leadership_score",
+                    "representative_final_score",
+                    "selected_reason",
                     "rep_score_today_strength",
                     "rep_score_relative_strength",
                     "rep_score_liquidity",
@@ -9502,6 +9640,19 @@ SECTOR_REPRESENTATIVES_AUDIT_COLUMNS = [
     "live_ret_from_open",
     "sector_live_ret_pct",
     "sector_today_flow_pct",
+    "sector_turnover_share",
+    "exclude_spike",
+    "exclude_spike_hard_reject",
+    "exclude_spike_warning_only",
+    "spike_quality",
+    "poor_quality_spike",
+    "material_supported_breakout",
+    "breakout_support_reason",
+    "centrality_score",
+    "liquidity_score",
+    "today_leadership_score",
+    "representative_final_score",
+    "selected_reason",
     "rep_score_today_strength",
     "rep_score_relative_strength",
     "rep_score_liquidity",
@@ -10217,6 +10368,19 @@ def _build_sector_representatives_audit_frame(
                     "live_ret_from_open": None,
                     "sector_live_ret_pct": None,
                     "sector_today_flow_pct": None,
+                    "sector_turnover_share": None,
+                    "exclude_spike": False,
+                    "exclude_spike_hard_reject": False,
+                    "exclude_spike_warning_only": False,
+                    "spike_quality": "",
+                    "poor_quality_spike": False,
+                    "material_supported_breakout": False,
+                    "breakout_support_reason": "",
+                    "centrality_score": None,
+                    "liquidity_score": None,
+                    "today_leadership_score": None,
+                    "representative_final_score": None,
+                    "selected_reason": "",
                     "rep_score_today_strength": None,
                     "rep_score_relative_strength": None,
                     "rep_score_liquidity": None,
@@ -10291,6 +10455,19 @@ def _build_sector_representatives_audit_frame(
                     "live_ret_from_open": float(row.get("live_ret_from_open", 0.0) or 0.0) if pd.notna(row.get("live_ret_from_open", pd.NA)) else None,
                     "sector_live_ret_pct": float(row.get("sector_live_ret_pct", 0.0) or 0.0) if pd.notna(row.get("sector_live_ret_pct", pd.NA)) else None,
                     "sector_today_flow_pct": float(row.get("sector_today_flow_pct", 0.0) or 0.0) if pd.notna(row.get("sector_today_flow_pct", pd.NA)) else None,
+                    "sector_turnover_share": float(row.get("sector_turnover_share", row.get("stock_turnover_share_of_sector", 0.0)) or 0.0) if pd.notna(row.get("sector_turnover_share", row.get("stock_turnover_share_of_sector", pd.NA))) else None,
+                    "exclude_spike": bool(row.get("exclude_spike", False)),
+                    "exclude_spike_hard_reject": bool(row.get("exclude_spike_hard_reject", False)),
+                    "exclude_spike_warning_only": bool(row.get("exclude_spike_warning_only", False)),
+                    "spike_quality": str(row.get("spike_quality", "") or ""),
+                    "poor_quality_spike": bool(row.get("poor_quality_spike", False)),
+                    "material_supported_breakout": bool(row.get("material_supported_breakout", False)),
+                    "breakout_support_reason": str(row.get("breakout_support_reason", "") or ""),
+                    "centrality_score": float(row.get("centrality_score", row.get("rep_score_centrality", 0.0)) or 0.0) if pd.notna(row.get("centrality_score", row.get("rep_score_centrality", pd.NA))) else None,
+                    "liquidity_score": float(row.get("liquidity_score", row.get("rep_score_liquidity", 0.0)) or 0.0) if pd.notna(row.get("liquidity_score", row.get("rep_score_liquidity", pd.NA))) else None,
+                    "today_leadership_score": float(row.get("today_leadership_score", row.get("rep_score_today_leadership", 0.0)) or 0.0) if pd.notna(row.get("today_leadership_score", row.get("rep_score_today_leadership", pd.NA))) else None,
+                    "representative_final_score": float(row.get("representative_final_score", row.get("rep_score_total", 0.0)) or 0.0) if pd.notna(row.get("representative_final_score", row.get("rep_score_total", pd.NA))) else None,
+                    "selected_reason": str(row.get("selected_reason", selected_reason_raw) or ""),
                     "rep_score_today_strength": float(row.get("rep_score_today_strength", row.get("rep_score_today_leadership", 0.0)) or 0.0) if pd.notna(row.get("rep_score_today_strength", row.get("rep_score_today_leadership", pd.NA))) else None,
                     "rep_score_relative_strength": float(row.get("rep_score_relative_strength", 0.0) or 0.0) if pd.notna(row.get("rep_score_relative_strength", pd.NA)) else None,
                     "rep_score_liquidity": float(row.get("rep_score_liquidity", row.get("rep_score_today_flow", 0.0)) or 0.0) if pd.notna(row.get("rep_score_liquidity", row.get("rep_score_today_flow", pd.NA))) else None,
@@ -10426,6 +10603,19 @@ def _trim_representatives_for_storage(frame: Any) -> Any:
             "live_ret_from_open",
             "sector_live_ret_pct",
             "sector_today_flow_pct",
+            "sector_turnover_share",
+            "exclude_spike",
+            "exclude_spike_hard_reject",
+            "exclude_spike_warning_only",
+            "spike_quality",
+            "poor_quality_spike",
+            "material_supported_breakout",
+            "breakout_support_reason",
+            "centrality_score",
+            "liquidity_score",
+            "today_leadership_score",
+            "representative_final_score",
+            "selected_reason",
             "rep_score_today_strength",
             "rep_score_relative_strength",
             "rep_score_liquidity",
@@ -10907,6 +11097,13 @@ def build_live_snapshot(
                         "turnover_rank_in_sector": int(row.get("turnover_rank_in_sector", 0) or 0) if pd.notna(row.get("turnover_rank_in_sector")) else None,
                         "liquidity_ok": bool(row.get("liquidity_ok", False)),
                         "exclude_spike": bool(row.get("exclude_spike", False)),
+                        "exclude_spike_hard_reject": bool(row.get("exclude_spike_hard_reject", False)),
+                        "exclude_spike_warning_only": bool(row.get("exclude_spike_warning_only", False)),
+                        "spike_quality": str(row.get("spike_quality", "") or ""),
+                        "poor_quality_spike": bool(row.get("poor_quality_spike", False)),
+                        "material_supported_breakout": bool(row.get("material_supported_breakout", False)),
+                        "breakout_support_reason": str(row.get("breakout_support_reason", "") or ""),
+                        "sector_turnover_share": float(row.get("sector_turnover_share", row.get("stock_turnover_share_of_sector", 0.0)) or 0.0) if pd.notna(row.get("sector_turnover_share", row.get("stock_turnover_share_of_sector", pd.NA))) else None,
                     }
                 )
             representative_trace_by_sector[str(sector_key or "")] = rows
@@ -11294,7 +11491,7 @@ def build_live_snapshot(
             "representative_rejected_large_drop_count": representative_rejected_large_drop_count,
             "representative_fallback_blocked_by_hard_gate_count": representative_fallback_blocked_by_hard_gate_count,
             "representative_no_valid_today_count": representative_no_valid_today_count,
-            "representative_today_hard_gate_rule": "fallback never bypasses liquidity/exclude_spike/negative-while-positive/today <= -3% and especially <= -5% hard gates",
+            "representative_today_hard_gate_rule": "fallback never bypasses liquidity/poor_quality_spike/event-like large drop/relative weakness hard gates; exclude_spike alone is warning unless spike quality is poor",
             "representative_sector_trace_top10": representative_sector_trace,
             "today_sector_removed_live_inputs": [
                 "median_live_ret_norm",

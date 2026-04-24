@@ -21,7 +21,13 @@ def _candidate(
     return_rank=1,
     market_positive_rate=0.5,
     selected_from="primary",
+    live_turnover=100000000.0,
+    sector_turnover_share=0.5,
+    liquidity_ok=True,
+    exclude_spike=False,
 ):
+    centrality = score / 3.0
+    today_leadership = score / 2.0
     return {
         "sector_name": "卸売業",
         "today_rank": 1,
@@ -33,13 +39,13 @@ def _candidate(
         "current_price_unavailable": False,
         "live_ret_vs_prev_close": live_ret,
         "live_ret_from_open": live_ret / 2.0,
-        "live_turnover": 100000000.0,
-        "live_turnover_value": 100000000.0,
+        "live_turnover": live_turnover,
+        "live_turnover_value": live_turnover,
         "live_turnover_unavailable": False,
-        "stock_turnover_share_of_sector": 0.5,
+        "stock_turnover_share_of_sector": sector_turnover_share,
         "rep_score_total": score,
-        "rep_score_centrality": score / 3.0,
-        "rep_score_today_leadership": score / 2.0,
+        "rep_score_centrality": centrality,
+        "rep_score_today_leadership": today_leadership,
         "rep_score_sanity": 1.0,
         "rep_selected_reason": "",
         "rep_excluded_reason": "",
@@ -53,8 +59,8 @@ def _candidate(
         "was_in_must_have": False,
         "nikkei_search": "",
         "material_link": "",
-        "liquidity_ok": True,
-        "exclude_spike": False,
+        "liquidity_ok": liquidity_ok,
+        "exclude_spike": exclude_spike,
         "rep_hard_block": hard,
         "hard_block_reason": "",
         "rep_relative_leadership_pass": True,
@@ -79,6 +85,12 @@ def _candidate(
         "sector_context": "",
         "sector_live_ret_pct": return_percentile,
         "sector_today_flow_pct": 0.5,
+        "sector_turnover_share": sector_turnover_share,
+        "centrality_score": centrality,
+        "liquidity_score": 1.0,
+        "today_leadership_score": today_leadership,
+        "representative_final_score": score,
+        "selected_reason": "",
         "selected_horizon": "today",
         "selected_universe": "test",
         "selected_from_primary_or_supplemental": selected_from,
@@ -122,6 +134,68 @@ class RepresentativeLogicTests(unittest.TestCase):
         selected = _select_today(rows)
         self.assertEqual(selected.iloc[0]["code"], "2737")
         self.assertNotIn("7426", set(selected["code"].astype(str)))
+
+    def test_material_backed_breakout_is_not_hard_rejected(self):
+        row = _candidate(
+            "2737",
+            "トーメンデバイス",
+            19.06,
+            28.0,
+            positive_count=4,
+            negative_count=1,
+            sector_median=3.3,
+            return_percentile=0.8,
+            return_rank=2,
+            live_turnover=16_649_500_000.0,
+            sector_turnover_share=0.9837,
+            exclude_spike=True,
+        )
+        gated = app._apply_today_representative_gate(pd.DataFrame([row]))
+        self.assertFalse(bool(gated.iloc[0]["rep_hard_block"]))
+        self.assertTrue(bool(gated.iloc[0]["representative_gate_pass"]))
+        self.assertTrue(bool(gated.iloc[0]["material_supported_breakout"]))
+        self.assertTrue(bool(gated.iloc[0]["exclude_spike_warning_only"]))
+        self.assertFalse(bool(gated.iloc[0]["exclude_spike_hard_reject"]))
+        self.assertIn("exclude_spike_warning_only", gated.iloc[0]["representative_gate_reason"])
+
+    def test_poor_quality_spike_is_rejected(self):
+        row = _candidate(
+            "9941",
+            "太洋物産",
+            22.24,
+            7.0,
+            positive_count=4,
+            negative_count=1,
+            sector_median=3.3,
+            return_percentile=1.0,
+            return_rank=1,
+            live_turnover=177_900_000.0,
+            sector_turnover_share=0.0105,
+            exclude_spike=True,
+        )
+        gated = app._apply_today_representative_gate(pd.DataFrame([row]))
+        self.assertTrue(bool(gated.iloc[0]["rep_hard_block"]))
+        self.assertFalse(bool(gated.iloc[0]["representative_gate_pass"]))
+        self.assertTrue(bool(gated.iloc[0]["poor_quality_spike"]))
+        self.assertTrue(bool(gated.iloc[0]["exclude_spike_hard_reject"]))
+        self.assertIn("poor_quality_spike", gated.iloc[0]["hard_reject_reason"])
+
+    def test_wholesale_1530_replay_spike_quality_audit(self):
+        rows = [
+            _candidate("7426", "山大", -11.2, 9.0, positive_count=4, negative_count=1, sector_median=3.297, return_percentile=0.2, return_rank=5, live_turnover=244_000_000.0, sector_turnover_share=0.0144),
+            _candidate("9941", "太洋物産", 22.24, 18.0, positive_count=4, negative_count=1, sector_median=3.297, return_percentile=1.0, return_rank=1, live_turnover=177_900_000.0, sector_turnover_share=0.0105, exclude_spike=True),
+            _candidate("2737", "トーメンデバイス", 19.06, 30.0, positive_count=4, negative_count=1, sector_median=3.297, return_percentile=0.8, return_rank=2, live_turnover=16_649_500_000.0, sector_turnover_share=0.9837, exclude_spike=True),
+            _candidate("8058", "三菱商事", 3.3, 24.0, positive_count=4, negative_count=1, sector_median=3.297, return_percentile=0.6, return_rank=3, live_turnover=53_842_386_600.0, sector_turnover_share=0.20, selected_from="supplemental"),
+        ]
+        frame = app._apply_today_representative_gate(pd.DataFrame(rows))
+        by_code = frame.set_index("code")
+        self.assertTrue(bool(by_code.loc["7426", "rep_hard_block"]))
+        self.assertFalse(bool(by_code.loc["2737", "rep_hard_block"]))
+        self.assertTrue(bool(by_code.loc["2737", "material_supported_breakout"]))
+        self.assertTrue(bool(by_code.loc["9941", "poor_quality_spike"]))
+        selected = _select_today(rows)
+        self.assertEqual(selected.iloc[0]["code"], "2737")
+        self.assertGreater(float(by_code.loc["2737", "representative_final_score"]), float(by_code.loc["8058", "representative_final_score"]))
 
     def test_today_strong_sector_prefers_upper_return_group(self):
         rows = [
@@ -210,6 +284,16 @@ class RepresentativeLogicTests(unittest.TestCase):
         )
         self.assertEqual(app._apply_1m_representative_gate(frame)["code"].tolist(), ["B"])
         self.assertEqual(app._apply_3m_representative_gate(frame)["code"].tolist(), ["B"])
+
+    def test_1m_and_3m_do_not_rehabilitate_event_drop_spike(self):
+        frame = pd.DataFrame(
+            [
+                {"code": "SPIKE", "live_ret_vs_prev_close": -7.5, "ret_1m": 30.0, "ret_3m": 45.0, "rs_vs_topix_1m": 8.0, "rs_vs_topix_3m": 10.0, "avg_turnover_20d": 1000.0},
+                {"code": "CORE", "live_ret_vs_prev_close": -0.5, "ret_1m": 6.0, "ret_3m": 9.0, "rs_vs_topix_1m": 1.0, "rs_vs_topix_3m": 2.0, "avg_turnover_20d": 1000.0},
+            ]
+        )
+        self.assertEqual(app._apply_1m_representative_gate(frame)["code"].tolist(), ["CORE"])
+        self.assertEqual(app._apply_3m_representative_gate(frame)["code"].tolist(), ["CORE"])
 
     def test_saved_latest_snapshot_display_tables_do_not_break(self):
         for name in ["latest_0915.json", "latest_1130.json", "latest_1530.json"]:
