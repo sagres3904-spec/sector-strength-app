@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-04-24T00:19:21.272918+00:00",
-  "status": "success",
-  "message": "Forced latest_0915.json updated at 2026-04-24T00:19:21.272918+00:00",
-  "request_mode": "0915"
+  "last_run_at": "2026-04-24T02:30:02.522376+00:00",
+  "status": "running",
+  "message": "Forced 1130 snapshot refresh is running.",
+  "request_mode": "1130"
 }
