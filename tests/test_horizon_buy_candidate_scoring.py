@@ -260,6 +260,104 @@ class HorizonBuyCandidateScoringTests(unittest.TestCase):
             self.assertIsInstance(components, dict)
             self.assertLessEqual(len(components), 16)
 
+    def test_entry_decision_includes_compact_cautions_without_duplicates(self):
+        row = pd.Series(
+            {
+                "entry_stance_label": "押し待ち",
+                "entry_caution": "決算近い / 20日線乖離大",
+                "candidate_bucket_label": "追いかけ注意",
+                "event_caution_reason": "20日線乖離大。追いかけ注意",
+                "fallback_used": False,
+            }
+        )
+
+        text = app._format_candidate_entry_decision(row)
+
+        self.assertEqual(text, "押し待ち\n注意: 決算近い / 20日線乖離大 / 追いかけ注意")
+        self.assertEqual(text.count("20日線乖離大"), 1)
+        self.assertEqual(text.count("追いかけ注意"), 1)
+
+    def test_entry_decision_keeps_normal_candidate_single_line(self):
+        row = pd.Series(
+            {
+                "entry_stance_label": "長期主導で買い検討",
+                "entry_caution": "",
+                "candidate_bucket_label": "通常候補",
+                "event_caution_reason": "",
+                "fallback_used": False,
+            }
+        )
+
+        self.assertEqual(app._format_candidate_entry_decision(row), "長期主導で買い検討")
+
+    def test_entry_decision_marks_fallback_candidate(self):
+        row = pd.Series(
+            {
+                "entry_stance_label": "補完・監視",
+                "entry_caution": "",
+                "candidate_bucket_label": "通常候補",
+                "event_caution_reason": "",
+                "fallback_used": True,
+            }
+        )
+
+        self.assertEqual(app._format_candidate_entry_decision(row), "補完・監視\n注意: 補完候補")
+
+    def test_candidate_basis_is_not_truncated_and_nikkei_link_is_kept(self):
+        long_reason = " / ".join(
+            [
+                "3か月の強さが続いている",
+                "直近1か月も大きく崩れていない",
+                "流動性がある",
+                "3か月トレンド良好",
+                "業種主導性が残っている",
+            ]
+        )
+        frame = pd.DataFrame(
+            [
+                {
+                    "candidate_rank_3m": 1,
+                    "sector_name": "電気機器",
+                    "code": "6920",
+                    "name": "レーザーテック",
+                    "entry_stance_label": "押し待ち",
+                    "selection_reason": long_reason,
+                    "horizon_fit_reason": "業種主導性 / 中期資金継続 / 3か月トレンド良好",
+                    "entry_caution": "決算近い / 20日線乖離大",
+                    "candidate_bucket_label": "追いかけ注意",
+                    "event_caution_reason": "20日線乖離大。追いかけ注意",
+                    "fallback_used": False,
+                    "current_price": "100",
+                    "live_ret_vs_prev_close": "1.2",
+                    "earnings_announcement_date": "2026-04-30",
+                    "nikkei_search": "https://www.nikkei.com/search?keyword=レーザーテック",
+                }
+            ]
+        )
+
+        view, reason, note = app._build_candidate_focus_view(
+            frame,
+            rank_col="candidate_rank_3m",
+            sector_rank_lookup={"電気機器": 1},
+            center_reference_map={},
+            scope_label="3か月軸",
+        )
+
+        self.assertEqual(reason, "")
+        self.assertEqual(note, "")
+        row = view.iloc[0]
+        self.assertIn("注意: 決算近い / 20日線乖離大 / 追いかけ注意", row["entry_stance_label"])
+        self.assertIn(long_reason, row["candidate_basis"])
+        self.assertNotIn("…", row["candidate_basis"])
+        self.assertEqual(row["nikkei_search"], "https://www.nikkei.com/search?keyword=レーザーテック")
+
+    def test_candidate_table_links_only_http_urls(self):
+        html = app._candidate_table_cell_html("https://www.nikkei.com/search?keyword=5801", column_label="日経リンク")
+
+        self.assertIn('href="https://www.nikkei.com/search?keyword=5801"', html)
+        self.assertIn("日経リンク", html)
+        self.assertEqual(app._candidate_table_cell_html("javascript:alert(1)", column_label="日経リンク"), "")
+
 
 if __name__ == "__main__":
     unittest.main()

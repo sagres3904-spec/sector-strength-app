@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import html
 import json
 import logging
 import math
@@ -9302,6 +9303,101 @@ def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str,
     st.dataframe(frame.rename(columns=UI_COLUMN_LABELS), **kwargs)
 
 
+def _safe_link_url(value: Any) -> str:
+    text = _normalize_display_text(value, missing="")
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    return text
+
+
+def _candidate_table_cell_html(value: Any, *, column_label: str) -> str:
+    text = _normalize_display_text(value, missing="")
+    if column_label == "日経リンク":
+        url = _safe_link_url(text)
+        if not url:
+            return ""
+        return f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">日経リンク</a>'
+    return html.escape(text)
+
+
+def _render_candidate_table_or_reason(title: str, frame: pd.DataFrame, *, reason: str, note: str = "") -> None:
+    st.subheader(title)
+    if str(note or "").strip():
+        st.caption(str(note).strip())
+    if frame.empty:
+        st.caption(reason)
+        return
+    display = frame.rename(columns=UI_COLUMN_LABELS)
+    labels = [str(column) for column in display.columns]
+    width_by_label = {
+        "順位": "4.2rem",
+        "コード": "5rem",
+        "現在値": "6rem",
+        "前日終値比(%)": "7rem",
+        "決算発表予定日": "8rem",
+        "日経リンク": "5.5rem",
+        "エントリー判断": "13rem",
+        "根拠": "38%",
+    }
+    colgroup = "".join(
+        f'<col style="width:{html.escape(width_by_label.get(label, "auto"), quote=True)}">'
+        for label in labels
+    )
+    header_html = "".join(f"<th>{html.escape(label)}</th>" for label in labels)
+    body_rows: list[str] = []
+    for _, row in display.iterrows():
+        cells: list[str] = []
+        for label in labels:
+            css_class = "reason-cell" if label == "根拠" else ("entry-cell" if label == "エントリー判断" else "")
+            class_attr = f' class="{css_class}"' if css_class else ""
+            cells.append(f"<td{class_attr}>{_candidate_table_cell_html(row.get(label, ''), column_label=label)}</td>")
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+    table_html = f"""
+<style>
+.buy-candidate-table-wrap {{
+  width: 100%;
+  overflow-x: auto;
+}}
+.buy-candidate-table {{
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}}
+.buy-candidate-table th,
+.buy-candidate-table td {{
+  border-bottom: 1px solid rgba(49, 51, 63, 0.14);
+  padding: 0.45rem 0.5rem;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}}
+.buy-candidate-table th {{
+  font-weight: 600;
+  background: rgba(49, 51, 63, 0.04);
+}}
+.buy-candidate-table .entry-cell {{
+  white-space: pre-line;
+}}
+.buy-candidate-table .reason-cell {{
+  white-space: normal;
+}}
+</style>
+<div class="buy-candidate-table-wrap">
+  <table class="buy-candidate-table">
+    <colgroup>{colgroup}</colgroup>
+    <thead><tr>{header_html}</tr></thead>
+    <tbody>{''.join(body_rows)}</tbody>
+  </table>
+</div>
+"""
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
 def _build_earnings_candidate_table_note(base_meta: dict[str, Any] | None) -> str:
     return ""
 
@@ -9322,6 +9418,55 @@ def _first_ui_value(*values: Any) -> str:
 def _join_ui_fragments(*parts: Any) -> str:
     cleaned = [_clean_ui_value(part) for part in parts]
     return " / ".join([part for part in cleaned if part])
+
+
+def _split_candidate_caution_terms(value: Any) -> list[str]:
+    text = _clean_ui_value(value)
+    if not text or text in {"通常候補", "特記なし", DISPLAY_UNAVAILABLE_MARK}:
+        return []
+    normalized = re.sub(r"[、,。／|]+", "/", text)
+    terms: list[str] = []
+    for part in [item.strip() for item in normalized.split("/") if item.strip()]:
+        if part in {"通常候補", "特記なし", DISPLAY_UNAVAILABLE_MARK}:
+            continue
+        if "本日決算" in part or "決算当日" in part:
+            terms.append("本日決算")
+        elif "決算近い" in part or "決算直前" in part or "決算3営業日前" in part:
+            terms.append("決算近い")
+        elif "20日線乖離大" in part:
+            terms.append("20日線乖離大")
+        elif "追いかけ注意" in part or "追撃は慎重" in part:
+            terms.append("追いかけ注意")
+        elif "イベント注意" in part:
+            terms.append("イベント注意")
+        elif "補完" in part:
+            terms.append("補完候補")
+        elif "流動性注意" in part:
+            terms.append("流動性注意")
+        elif "決算通過後" in part:
+            terms.append("決算通過後候補")
+    return terms
+
+
+def _candidate_entry_caution_terms(row: pd.Series) -> list[str]:
+    terms: list[str] = []
+    for value in [row.get("entry_caution"), row.get("candidate_bucket_label"), row.get("event_caution_reason")]:
+        terms.extend(_split_candidate_caution_terms(value))
+    fallback_value = row.get("fallback_used", False)
+    fallback_used = False
+    if not _is_missing_display_value(fallback_value):
+        fallback_used = str(fallback_value).strip().lower() in {"true", "1", "yes"}
+    if fallback_used:
+        terms.append("補完候補")
+    return list(dict.fromkeys([term for term in terms if term]))
+
+
+def _format_candidate_entry_decision(row: pd.Series) -> str:
+    base = _clean_ui_value(row.get("entry_stance_label")) or "監視"
+    terms = _candidate_entry_caution_terms(row)
+    if not terms:
+        return base
+    return f"{base}\n注意: {' / '.join(terms)}"
 
 
 def _shorten_ui_text(text: str, *, limit: int = 84) -> str:
@@ -9635,16 +9780,12 @@ def _build_candidate_basis_text(
     default_reason: str = "既存候補ロジック通過",
     default_caution: str = "特記なし",
 ) -> str:
+    del default_caution
     center_note = _resolve_candidate_center_note(row, center_reference_map)
     reason = _candidate_reason_display_text(row, default=default_reason)
-    caution = _candidate_risk_display_text(row, default=default_caution)
-    return _shorten_ui_text(
-        _join_ui_fragments(
-            f"理由 {reason}" if reason else f"理由 {default_reason}",
-            f"代表 {center_note}",
-            f"注意 {caution}" if caution else f"注意 {default_caution}",
-        ),
-        limit=92,
+    return _join_ui_fragments(
+        f"理由 {reason}" if reason else f"理由 {default_reason}",
+        f"代表 {center_note}",
     )
 
 
@@ -9834,17 +9975,13 @@ def _build_candidate_focus_view(
     def _build_candidate_basis(row: pd.Series) -> str:
         center_note = _resolve_candidate_center_note(row, center_reference_map)
         reason = _candidate_reason_display_text(row, default="既存候補ロジック通過")
-        caution = _candidate_risk_display_text(row, default="特記なし")
-        return _shorten_ui_text(
-            _join_ui_fragments(
-                f"理由 {reason}" if reason else "理由 既存候補ロジック通過",
-                f"代表 {center_note}",
-                f"注意 {caution}" if caution else "注意 特記なし",
-            ),
-            limit=92,
+        return _join_ui_fragments(
+            f"理由 {reason}" if reason else "理由 既存候補ロジック通過",
+            f"代表 {center_note}",
         )
 
     working["candidate_basis"] = working.apply(_build_candidate_basis, axis=1)
+    working["entry_stance_label"] = working.apply(_format_candidate_entry_decision, axis=1)
     working["earnings_announcement_date"] = working.get("earnings_announcement_date", pd.Series("", index=working.index)).apply(_format_display_announcement_date)
     return working.drop(columns=["_sector_lookup_key"], errors="ignore")[columns].reset_index(drop=True), "", candidate_note
 
@@ -9994,6 +10131,7 @@ def _build_today_purchase_candidate_view(
     if final_frame.empty:
         return pd.DataFrame(columns=columns), "today 短期注目銘柄を抽出できませんでした。", candidate_note
     final_frame = final_frame.head(limit).reset_index(drop=True)
+    final_frame["entry_stance_label"] = final_frame.apply(_format_candidate_entry_decision, axis=1)
     return final_frame, "", candidate_note
 
 
@@ -10014,7 +10152,7 @@ def _render_timeframe_panel(
     st.caption(f"{timeframe_label}: {timeframe_note}")
     _render_dataframe_or_reason(sector_title, sector_frame, reason=sector_reason)
     _render_dataframe_or_reason("セクター代表銘柄", center_frame, reason=center_reason)
-    _render_dataframe_or_reason(candidate_title, candidate_frame, reason=candidate_reason, link_columns=True, note=candidate_note)
+    _render_candidate_table_or_reason(candidate_title, candidate_frame, reason=candidate_reason, note=candidate_note)
 
 
 def _persistence_gate_fail_warn_label(reason: Any) -> str:
@@ -10760,6 +10898,21 @@ def _prepare_swing_candidate_display_view(
 ) -> tuple[pd.DataFrame, list[str]]:
     compatibility_notes: list[str] = []
     rank_columns = [column for column in ["candidate_rank_1w", "candidate_rank_1m", "candidate_rank_3m", "earnings_buffer_days"] if column in columns]
+    auxiliary_columns = ["fallback_used"]
+
+    def _attach_auxiliary_columns(prepared_frame: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(raw_fallback, pd.DataFrame) or raw_fallback.empty or "code" not in prepared_frame.columns or "code" not in raw_fallback.columns:
+            return prepared_frame
+        output = prepared_frame.copy()
+        raw_lookup = raw_fallback.copy()
+        raw_lookup["_code_key"] = raw_lookup["code"].astype(str)
+        for auxiliary_column in auxiliary_columns:
+            if auxiliary_column in output.columns or auxiliary_column not in raw_lookup.columns:
+                continue
+            lookup = raw_lookup.drop_duplicates("_code_key").set_index("_code_key")[auxiliary_column]
+            output[auxiliary_column] = output["code"].astype(str).map(lookup)
+        return output
+
     if isinstance(saved_display, pd.DataFrame) and not saved_display.empty:
         prepared = saved_display.copy()
         for column in columns:
@@ -10773,7 +10926,8 @@ def _prepare_swing_candidate_display_view(
                 prepared[column] = prepared[column].apply(_format_display_announcement_date)
             else:
                 prepared[column] = prepared[column].fillna("").astype(str)
-        return prepared.reindex(columns=columns), compatibility_notes
+        prepared = _attach_auxiliary_columns(prepared)
+        return prepared.reindex(columns=columns + [column for column in auxiliary_columns if column in prepared.columns]), compatibility_notes
     if isinstance(raw_fallback, pd.DataFrame) and not raw_fallback.empty:
         compatibility_notes.append("スイング候補表は旧 snapshot 互換表示です。raw swing_candidates から表示列だけ抽出しています。")
         horizon = "1w" if "candidate_rank_1w" in columns else ("3m" if "candidate_rank_3m" in columns else "1m")
@@ -10789,7 +10943,8 @@ def _prepare_swing_candidate_display_view(
                 prepared[column] = prepared[column].apply(_format_display_announcement_date)
             else:
                 prepared[column] = prepared[column].fillna("").astype(str)
-        return prepared.reindex(columns=columns), compatibility_notes
+        prepared = _attach_auxiliary_columns(prepared)
+        return prepared.reindex(columns=columns + [column for column in auxiliary_columns if column in prepared.columns]), compatibility_notes
     return pd.DataFrame(columns=columns), compatibility_notes
 
 
