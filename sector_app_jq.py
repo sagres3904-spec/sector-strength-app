@@ -705,6 +705,8 @@ UI_COLUMN_LABELS = {
     "stretch_caution_label": "過熱注意",
     "watch_reason_label": "監視理由",
     "selection_reason": "採用理由",
+    "horizon_fit_reason": "時間軸理由",
+    "entry_caution": "買い注意",
     "risk_note": "注意点",
     "candidate_commentary": "コメント",
     "axis_rank": "順位",
@@ -10126,6 +10128,8 @@ SWING_1W_DISPLAY_COLUMNS = [
     "stretch_caution_label",
     "watch_reason_label",
     "selection_reason",
+    "horizon_fit_reason",
+    "entry_caution",
     "earnings_announcement_date",
     "risk_note",
     "candidate_commentary",
@@ -10146,6 +10150,8 @@ SWING_1M_DISPLAY_COLUMNS = [
     "stretch_caution_label",
     "watch_reason_label",
     "selection_reason",
+    "horizon_fit_reason",
+    "entry_caution",
     "earnings_announcement_date",
     "risk_note",
     "candidate_commentary",
@@ -10169,6 +10175,8 @@ SWING_3M_DISPLAY_COLUMNS = [
     "stretch_caution_label",
     "watch_reason_label",
     "selection_reason",
+    "horizon_fit_reason",
+    "entry_caution",
     "earnings_announcement_date",
     "risk_note",
     "candidate_commentary",
@@ -10551,7 +10559,7 @@ def _build_swing_candidate_display_frame(
     working = frame.copy()
     for column in columns:
         if column not in working.columns:
-            if column in {"sector_name", "code", "name", "candidate_quality", "entry_fit", "entry_stance_label", "stretch_caution_label", "watch_reason_label", "selection_reason", "earnings_announcement_date", "risk_note", "candidate_commentary", "finance_health_flag", "nikkei_search"}:
+            if column in {"sector_name", "code", "name", "candidate_quality", "entry_fit", "entry_stance_label", "stretch_caution_label", "watch_reason_label", "selection_reason", "horizon_fit_reason", "entry_caution", "earnings_announcement_date", "risk_note", "candidate_commentary", "finance_health_flag", "nikkei_search"}:
                 working[column] = ""
             else:
                 working[column] = pd.NA
@@ -10564,7 +10572,7 @@ def _build_swing_candidate_display_frame(
     working["sector_name"] = working["sector_name"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
     working["code"] = working["code"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
     working["name"] = working["name"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
-    for column in ["candidate_quality", "entry_fit", "entry_stance_label", "stretch_caution_label", "watch_reason_label", "selection_reason", "risk_note", "candidate_commentary", "finance_health_flag"]:
+    for column in ["candidate_quality", "entry_fit", "entry_stance_label", "stretch_caution_label", "watch_reason_label", "selection_reason", "horizon_fit_reason", "entry_caution", "risk_note", "candidate_commentary", "finance_health_flag"]:
         if column in working.columns:
             working[column] = working[column].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
     working["live_ret_vs_prev_close"] = working["live_ret_vs_prev_close"].apply(_format_display_pct_1dp)

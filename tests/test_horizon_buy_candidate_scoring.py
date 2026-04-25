@@ -1,4 +1,5 @@
 import json
+import math
 import unittest
 from pathlib import Path
 
@@ -151,6 +152,56 @@ class HorizonBuyCandidateScoringTests(unittest.TestCase):
         self.assertEqual(meta.get("edinetdb_calendar_status"), "ok")
         self.assertFalse(bool(meta.get("edinetdb_calendar_jquants_fallback_used")))
         self.assertFalse(bool(meta.get("earnings_announcement_jquants_fallback_used")))
+
+    def test_candidate_display_retains_buy_reason_and_entry_caution(self):
+        tables = _build_tables()
+        for horizon in ["1w", "1m", "3m"]:
+            frame = tables[horizon].copy()
+            self.assertFalse(frame.empty)
+            first_index = frame.index[0]
+            first_code = str(frame.loc[first_index, "code"])
+            frame.loc[first_index, "horizon_fit_reason"] = f"{horizon}検証理由"
+            frame.loc[first_index, "entry_caution"] = "決算当日注意"
+
+            display = app._build_swing_candidate_display_frame(frame, horizon=horizon)
+
+            self.assertIn("horizon_fit_reason", display.columns)
+            self.assertIn("entry_caution", display.columns)
+            displayed_row = display.loc[display["code"].astype(str).eq(first_code)].iloc[0]
+            self.assertEqual(displayed_row["horizon_fit_reason"], f"{horizon}検証理由")
+            self.assertEqual(displayed_row["entry_caution"], "決算当日注意")
+
+    def test_buy_candidate_storage_json_is_finite_and_compact(self):
+        tables = _build_tables()
+        bundle = {
+            "meta": {"mode": "1530", "generated_at": "2026-04-24T06:30:00+00:00"},
+            "swing_candidates_1w": tables["1w"],
+            "swing_candidates_1m": tables["1m"],
+            "swing_candidates_3m": tables["3m"],
+            "swing_1w_candidates_audit": tables["audit_1w"],
+            "swing_1m_candidates_audit": tables["audit_1m"],
+            "swing_3m_candidates_audit": tables["audit_3m"],
+            "diagnostics": {"base_meta": {"edinetdb_calendar_status": "ok"}},
+        }
+        storage_bundle = app._bundle_for_storage(bundle)
+        text = app.bundle_to_json_text(storage_bundle)
+        payload = json.loads(text)
+
+        def walk(value):
+            if isinstance(value, float):
+                self.assertTrue(math.isfinite(value))
+            elif isinstance(value, dict):
+                for item in value.values():
+                    walk(item)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        for key in ["swing_candidates_1w", "swing_candidates_1m", "swing_candidates_3m"]:
+            components = payload[key][0].get("score_components", {})
+            self.assertIsInstance(components, dict)
+            self.assertLessEqual(len(components), 16)
 
 
 if __name__ == "__main__":
