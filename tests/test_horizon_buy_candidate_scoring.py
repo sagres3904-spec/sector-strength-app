@@ -358,6 +358,70 @@ class HorizonBuyCandidateScoringTests(unittest.TestCase):
         self.assertIn("日経リンク", html)
         self.assertEqual(app._candidate_table_cell_html("javascript:alert(1)", column_label="日経リンク"), "")
 
+    def test_persistence_representative_focus_keeps_reason_without_nikkei_link(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "sector_name": "電気機器",
+                    "representative_stocks": [
+                        {
+                            "code": "6920",
+                            "name": "レーザーテック",
+                            "center_note": "3か月の中心銘柄",
+                            "earnings_announcement_date": "2026-04-30",
+                            "nikkei_search": "https://www.nikkei.com/search?keyword=6920",
+                        }
+                    ],
+                    "core_representatives_reason": "strong_3m",
+                }
+            ]
+        )
+
+        view = app._build_center_stock_focus_view(
+            frame,
+            sector_rank_lookup={"電気機器": 1},
+            timeframe="3m",
+        )
+
+        self.assertEqual(
+            list(view.columns),
+            ["sector_name", "code", "name", "center_note", "earnings_announcement_date"],
+        )
+        self.assertEqual(view.iloc[0]["center_note"], "3か月の中心銘柄")
+        self.assertNotIn("nikkei_search", view.columns)
+
+    def test_today_representative_focus_keeps_quality_and_omits_nikkei_link(self):
+        representative_frame = pd.DataFrame(
+            [
+                {
+                    "today_rank": 1,
+                    "representative_rank": 1,
+                    "sector_name": "卸売業",
+                    "code": "2737",
+                    "name": "トーメンデバイス",
+                    "live_ret_vs_prev_close": 5.0,
+                    "current_price": 1000,
+                    "live_turnover_value": 100000000,
+                    "representative_selected_reason": "material_supported_breakout",
+                    "representative_quality_flag": "本日決算注意",
+                    "representative_fallback_reason": "",
+                    "earnings_announcement_date": "2026-04-25",
+                    "nikkei_search": "https://www.nikkei.com/search?keyword=2737",
+                }
+            ]
+        )
+
+        view = app._build_center_stock_focus_view(
+            pd.DataFrame([{"sector_name": "卸売業"}]),
+            sector_rank_lookup={"卸売業": 1},
+            timeframe="today",
+            representative_frame=representative_frame,
+        )
+
+        self.assertIn("representative_selected_reason", view.columns)
+        self.assertIn("representative_quality_flag", view.columns)
+        self.assertNotIn("nikkei_search", view.columns)
+
 
 if __name__ == "__main__":
     unittest.main()

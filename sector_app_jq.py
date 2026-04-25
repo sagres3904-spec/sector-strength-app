@@ -10218,7 +10218,6 @@ PERSISTENCE_REPRESENTATIVES_FOCUS_COLUMNS = [
     "name",
     "center_note",
     "earnings_announcement_date",
-    "nikkei_search",
 ]
 
 SECTOR_REPRESENTATIVES_AUDIT_COLUMNS = [
