@@ -9286,6 +9286,349 @@ def _format_display_announcement_date(value: Any) -> str:
     return text or DISPLAY_UNAVAILABLE_MARK
 
 
+def _requested_view_mode() -> str:
+    try:
+        raw = st.query_params.get("view", "")
+    except Exception:
+        raw = ""
+    if isinstance(raw, list):
+        raw = raw[0] if raw else ""
+    value = str(raw or "").strip().lower()
+    return value if value in {"mobile", "desktop"} else ""
+
+
+def _responsive_view_class() -> str:
+    mode = _requested_view_mode()
+    if mode == "mobile":
+        return "view-force-mobile"
+    if mode == "desktop":
+        return "view-force-desktop"
+    return "view-auto"
+
+
+def _safe_css_class(value: Any, default: str = "responsive-table") -> str:
+    text = re.sub(r"[^a-zA-Z0-9_-]", "", str(value or default))
+    return text or default
+
+
+def _line_break_text_html(value: Any) -> str:
+    text = _normalize_display_text(value, missing="")
+    if not text:
+        return ""
+    return "<br>".join(html.escape(part.strip()) for part in re.split(r"\s*/\s*|\n+", text) if part.strip())
+
+
+def _field_html(label: str, value: Any, *, css_class: str = "") -> str:
+    text = _normalize_display_text(value, missing="")
+    if not text:
+        return ""
+    classes = "mobile-card-value"
+    if css_class:
+        classes = f"{classes} {_safe_css_class(css_class)}"
+    return (
+        f'<div class="mobile-card-field">'
+        f'<div class="mobile-card-label">{html.escape(label)}</div>'
+        f'<div class="{html.escape(classes, quote=True)}">{_line_break_text_html(text)}</div>'
+        f'</div>'
+    )
+
+
+def _row_value(row: pd.Series, *labels: str) -> str:
+    for label in labels:
+        if label in row.index:
+            value = _normalize_display_text(row.get(label, ""), missing="")
+            if value:
+                return value
+    return ""
+
+
+def _stock_link_cell_html(value: Any, *, column_label: str, code: Any = "", enable_stock_link: bool = True) -> str:
+    text = _normalize_display_text(value, missing="")
+    if column_label == "銘柄名" and enable_stock_link:
+        return _stock_name_cell_html(text, code)
+    if column_label in {"日経リンク", "日経で検索"}:
+        return ""
+    if column_label == "材料リンク":
+        url = _safe_link_url(text)
+        if url:
+            return f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">リンクを開く</a>'
+        return ""
+    return html.escape(text)
+
+
+def _build_mobile_card_html(row: pd.Series, *, card_kind: str) -> str:
+    rank = _row_value(row, "順位", "表示順位", "今日の順位", "継続順位")
+    sector = _row_value(row, "セクター名")
+    code = _row_value(row, "コード")
+    name = _row_value(row, "銘柄名")
+    name_html = _stock_name_cell_html(name, code) if name else ""
+    prefix = f"【{html.escape(rank)}】 " if rank else ""
+    if code and name_html:
+        title_html = f"{prefix}{html.escape(code)} {name_html}"
+    elif name_html:
+        title_html = f"{prefix}{name_html}"
+    elif sector:
+        title_html = f"{prefix}{html.escape(sector)}"
+    else:
+        title_html = prefix.rstrip() or "項目"
+
+    parts: list[str] = [f'<article class="mobile-stock-card {html.escape(card_kind, quote=True)}">']
+    parts.append(f'<div class="mobile-card-title">{title_html}</div>')
+    if sector and card_kind != "sector-card":
+        parts.append(f'<div class="mobile-card-sector">{html.escape(sector)}</div>')
+
+    if card_kind == "candidate-card":
+        parts.append(_field_html("エントリー判断", _row_value(row, "エントリー判断", "今の判定"), css_class="preline"))
+        parts.append(_field_html("現在値", _row_value(row, "現在値")))
+        parts.append(_field_html("前日比", _row_value(row, "前日終値比(%)")))
+        parts.append(_field_html("決算", _row_value(row, "決算発表予定日")))
+        parts.append(_field_html("根拠", _row_value(row, "根拠", "採用理由", "時間軸理由"), css_class="reason"))
+    elif card_kind == "representative-card":
+        parts.append(_field_html("代表理由", _row_value(row, "代表理由", "代表抽出理由")))
+        parts.append(_field_html("品質/注意", _row_value(row, "品質/注意", "補足")))
+        parts.append(_field_html("決算", _row_value(row, "決算発表予定日")))
+    else:
+        detail_labels = [
+            label
+            for label in row.index
+            if label not in {"順位", "表示順位", "今日の順位", "継続順位", "セクター名", "コード", "銘柄名", "日経リンク", "日経で検索"}
+        ]
+        for label in detail_labels[:4]:
+            parts.append(_field_html(str(label), row.get(label, "")))
+    parts.append("</article>")
+    return "".join(part for part in parts if part)
+
+
+def _build_mobile_cards_html(display: pd.DataFrame, *, card_kind: str) -> str:
+    cards = [_build_mobile_card_html(row, card_kind=card_kind) for _, row in display.iterrows()]
+    return '<div class="mobile-card-list">' + "".join(cards) + "</div>"
+
+
+def _format_responsive_candidate_entry_decision(row: pd.Series) -> str:
+    base = _clean_ui_value(row.get("エントリー判断")) or _clean_ui_value(row.get("entry_stance_label")) or "監視"
+    fallback_used = row.get("fallback_used", row.get("補完使用", False))
+    if "補完" in base:
+        fallback_used = True
+    caution_row = pd.Series(
+        {
+            "entry_stance_label": base,
+            "entry_caution": _first_ui_value(row.get("買い注意"), row.get("entry_caution")),
+            "candidate_bucket_label": _first_ui_value(row.get("候補分類"), row.get("candidate_bucket_label")),
+            "event_caution_reason": _first_ui_value(row.get("イベント注意"), row.get("event_caution_reason")),
+            "fallback_used": fallback_used,
+        }
+    )
+    return _format_candidate_entry_decision(caution_row)
+
+
+def _prepare_responsive_display_frame(display: pd.DataFrame, *, card_kind: str) -> pd.DataFrame:
+    prepared = display.copy()
+    if card_kind != "candidate-card" or prepared.empty:
+        return prepared
+    if "エントリー判断" in prepared.columns or "entry_stance_label" in prepared.columns:
+        prepared["エントリー判断"] = prepared.apply(_format_responsive_candidate_entry_decision, axis=1)
+    return prepared.drop(
+        columns=[
+            "買い注意",
+            "候補分類",
+            "イベント注意",
+            "entry_caution",
+            "candidate_bucket_label",
+            "event_caution_reason",
+            "fallback_used",
+            "補完使用",
+        ],
+        errors="ignore",
+    )
+
+
+def _build_responsive_table_html(
+    display: pd.DataFrame,
+    *,
+    table_class: str,
+    card_kind: str,
+    width_by_label: dict[str, str] | None = None,
+    enable_stock_link: bool = True,
+) -> str:
+    display = _prepare_responsive_display_frame(display, card_kind=card_kind)
+    labels = [str(column) for column in display.columns if str(column) not in {"日経リンク", "日経で検索", "nikkei_search"}]
+    resolved_width_by_label = {
+        "順位": "4.2rem",
+        "表示順位": "5rem",
+        "今日の順位": "5.5rem",
+        "コード": "5rem",
+        "現在値": "6rem",
+        "前日終値比(%)": "7rem",
+        "決算発表予定日": "8rem",
+        "エントリー判断": "13rem",
+        "根拠": "38%",
+        "代表理由": "30%",
+        "品質/注意": "10rem",
+    }
+    if width_by_label:
+        resolved_width_by_label.update(width_by_label)
+    colgroup = "".join(
+        f'<col style="width:{html.escape(resolved_width_by_label.get(label, "auto"), quote=True)}">'
+        for label in labels
+    )
+    header_html = "".join(f"<th>{html.escape(label)}</th>" for label in labels)
+    body_rows: list[str] = []
+    for _, row in display.iterrows():
+        code = row.get("コード", "")
+        cells: list[str] = []
+        for label in labels:
+            css_class = "reason-cell" if label in {"根拠", "代表理由"} else ("entry-cell" if label == "エントリー判断" else "")
+            class_attr = f' class="{css_class}"' if css_class else ""
+            cells.append(
+                f"<td{class_attr}>{_stock_link_cell_html(row.get(label, ''), column_label=label, code=code, enable_stock_link=enable_stock_link)}</td>"
+            )
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+    table_class = _safe_css_class(table_class)
+    view_class = _responsive_view_class()
+    mobile_cards_html = _build_mobile_cards_html(display, card_kind=card_kind)
+    return f"""
+<style>
+.stock-responsive-root {{
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}}
+.stock-responsive-root .mobile-only {{
+  display: none;
+}}
+.stock-responsive-root .desktop-only {{
+  display: block;
+}}
+.stock-responsive-root.view-force-mobile .desktop-only {{
+  display: none;
+}}
+.stock-responsive-root.view-force-mobile .mobile-only {{
+  display: block;
+}}
+.stock-responsive-root.view-force-desktop .desktop-only {{
+  display: block;
+}}
+.stock-responsive-root.view-force-desktop .mobile-only {{
+  display: none;
+}}
+@media (max-width: 767px) {{
+  .stock-responsive-root.view-auto .desktop-only {{
+    display: none;
+  }}
+  .stock-responsive-root.view-auto .mobile-only {{
+    display: block;
+  }}
+}}
+@media (min-width: 768px) {{
+  .stock-responsive-root.view-auto .desktop-only {{
+    display: block;
+  }}
+  .stock-responsive-root.view-auto .mobile-only {{
+    display: none;
+  }}
+}}
+.{table_class}-wrap {{
+  width: 100%;
+  overflow-x: auto;
+}}
+.{table_class} {{
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}}
+.{table_class} th,
+.{table_class} td {{
+  border-bottom: 1px solid rgba(49, 51, 63, 0.14);
+  padding: 0.45rem 0.5rem;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}}
+.{table_class} th {{
+  font-weight: 600;
+  background: rgba(49, 51, 63, 0.04);
+}}
+.{table_class} .entry-cell {{
+  white-space: pre-line;
+}}
+.{table_class} .reason-cell {{
+  white-space: normal;
+}}
+.mobile-card-list {{
+  display: grid;
+  gap: 0.75rem;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}}
+.mobile-stock-card {{
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0.8rem 0.85rem;
+  border: 1px solid rgba(49, 51, 63, 0.16);
+  border-radius: 8px;
+  background: rgba(250, 250, 250, 0.96);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+}}
+.mobile-card-title {{
+  font-weight: 700;
+  font-size: 1rem;
+  margin-bottom: 0.25rem;
+}}
+.mobile-card-sector {{
+  color: rgba(49, 51, 63, 0.74);
+  font-size: 0.9rem;
+  margin-bottom: 0.45rem;
+}}
+.mobile-card-field {{
+  margin-top: 0.5rem;
+}}
+.mobile-card-label {{
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: rgba(49, 51, 63, 0.66);
+  margin-bottom: 0.12rem;
+}}
+.mobile-card-value {{
+  font-size: 0.92rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}}
+.mobile-card-value.preline {{
+  white-space: pre-line;
+}}
+.mobile-card-value.reason {{
+  line-height: 1.5;
+}}
+.mobile-stock-card a,
+.{table_class} a {{
+  text-decoration: none;
+}}
+</style>
+<div class="stock-responsive-root {view_class}">
+  <div class="desktop-only">
+    <div class="{table_class}-wrap">
+      <table class="{table_class}">
+        <colgroup>{colgroup}</colgroup>
+        <thead><tr>{header_html}</tr></thead>
+        <tbody>{''.join(body_rows)}</tbody>
+      </table>
+    </div>
+  </div>
+  <div class="mobile-only">
+    {mobile_cards_html}
+  </div>
+</div>
+"""
+
+
 def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str, link_columns: bool = False, note: str = "") -> None:
     st.subheader(title)
     if str(note or "").strip():
@@ -9293,12 +9636,14 @@ def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str,
     if frame.empty:
         st.caption(reason)
         return
-    kwargs: dict[str, Any] = {"width": "stretch", "hide_index": True}
-    if link_columns:
-        kwargs["column_config"] = {
-            "材料リンク": st.column_config.LinkColumn("材料リンク", display_text="リンクを開く"),
-        }
-    st.dataframe(frame.drop(columns=["nikkei_search"], errors="ignore").rename(columns=UI_COLUMN_LABELS), **kwargs)
+    display = _prepare_stock_link_display_frame(frame)
+    table_html = _build_responsive_table_html(
+        display,
+        table_class="sector-rank-table",
+        card_kind="sector-card",
+        enable_stock_link=False,
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
 
 
 def _make_sbi_stock_link(code: Any) -> str:
@@ -9365,74 +9710,14 @@ def _render_stock_link_table_or_reason(
         st.caption(reason)
         return
     display = _prepare_stock_link_display_frame(frame)
-    labels = [str(column) for column in display.columns]
-    resolved_width_by_label = {
-        "順位": "4.2rem",
-        "コード": "5rem",
-        "現在値": "6rem",
-        "前日終値比(%)": "7rem",
-        "決算発表予定日": "8rem",
-        "エントリー判断": "13rem",
-        "根拠": "38%",
-    }
-    if width_by_label:
-        resolved_width_by_label.update(width_by_label)
-    colgroup = "".join(
-        f'<col style="width:{html.escape(resolved_width_by_label.get(label, "auto"), quote=True)}">'
-        for label in labels
+    card_kind = "candidate-card" if str(table_class) == "buy-candidate-table" else "representative-card"
+    table_html = _build_responsive_table_html(
+        display,
+        table_class=table_class,
+        card_kind=card_kind,
+        width_by_label=width_by_label,
+        enable_stock_link=True,
     )
-    header_html = "".join(f"<th>{html.escape(label)}</th>" for label in labels)
-    body_rows: list[str] = []
-    for _, row in display.iterrows():
-        cells: list[str] = []
-        for label in labels:
-            css_class = "reason-cell" if label == "根拠" else ("entry-cell" if label == "エントリー判断" else "")
-            class_attr = f' class="{css_class}"' if css_class else ""
-            cells.append(
-                f"<td{class_attr}>{_candidate_table_cell_html(row.get(label, ''), column_label=label, code=row.get('コード', ''))}</td>"
-            )
-        body_rows.append("<tr>" + "".join(cells) + "</tr>")
-    table_class = re.sub(r"[^a-zA-Z0-9_-]", "", str(table_class or "stock-link-table")) or "stock-link-table"
-    table_html = f"""
-<style>
-.{table_class}-wrap {{
-  width: 100%;
-  overflow-x: auto;
-}}
-.{table_class} {{
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-  font-size: 0.92rem;
-  line-height: 1.45;
-}}
-.{table_class} th,
-.{table_class} td {{
-  border-bottom: 1px solid rgba(49, 51, 63, 0.14);
-  padding: 0.45rem 0.5rem;
-  vertical-align: top;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}}
-.{table_class} th {{
-  font-weight: 600;
-  background: rgba(49, 51, 63, 0.04);
-}}
-.{table_class} .entry-cell {{
-  white-space: pre-line;
-}}
-.{table_class} .reason-cell {{
-  white-space: normal;
-}}
-</style>
-<div class="{table_class}-wrap">
-  <table class="{table_class}">
-    <colgroup>{colgroup}</colgroup>
-    <thead><tr>{header_html}</tr></thead>
-    <tbody>{''.join(body_rows)}</tbody>
-  </table>
-</div>
-"""
     st.markdown(table_html, unsafe_allow_html=True)
 
 

@@ -449,6 +449,139 @@ class HorizonBuyCandidateScoringTests(unittest.TestCase):
         self.assertNotIn("日経リンク", display.columns)
         self.assertNotIn("nikkei_search", display.columns)
 
+    def test_responsive_candidate_html_keeps_desktop_table_and_mobile_card(self):
+        display = pd.DataFrame(
+            [
+                {
+                    "順位": 1,
+                    "セクター名": "電気機器",
+                    "コード": "6920",
+                    "銘柄名": "レーザーテック",
+                    "エントリー判断": "押し待ち\n注意: 決算近い / 20日線乖離大 / 追いかけ注意",
+                    "現在値": "1000",
+                    "前日終値比(%)": "+1.2",
+                    "決算発表予定日": "2026-04-30",
+                    "根拠": "3か月の強さが続いている / 直近1か月も大きく崩れていない / 流動性がある",
+                    "買い注意": "決算近い / 20日線乖離大",
+                    "候補分類": "追いかけ注意",
+                    "イベント注意": "20日線乖離大。追いかけ注意",
+                    "日経リンク": "https://www.nikkei.com/search?keyword=6920",
+                },
+                {
+                    "順位": 2,
+                    "セクター名": "鉱業",
+                    "コード": "1605",
+                    "銘柄名": "ＩＮＰＥＸ",
+                    "エントリー判断": "補完・監視",
+                    "現在値": "4074",
+                    "前日終値比(%)": "+2.6",
+                    "決算発表予定日": "2026-05-13",
+                    "根拠": "表示件数不足のため補完 / 流動性がある",
+                },
+            ]
+        )
+
+        with mock.patch.object(app, "_requested_view_mode", return_value=""):
+            table_html = app._build_responsive_table_html(
+                display,
+                table_class="buy-candidate-table",
+                card_kind="candidate-card",
+            )
+
+        self.assertIn("desktop-only", table_html)
+        self.assertIn("mobile-only", table_html)
+        self.assertIn("@media (max-width: 767px)", table_html)
+        self.assertIn("view-auto", table_html)
+        self.assertIn("押し待ち", table_html)
+        self.assertIn("注意: 決算近い", table_html)
+        self.assertIn("20日線乖離大", table_html)
+        self.assertIn("追いかけ注意", table_html)
+        self.assertIn("注意: 補完候補", table_html)
+        self.assertIn("3か月の強さが続いている", table_html)
+        self.assertIn(">SBI証券</a>", table_html)
+        self.assertNotIn("日経リンク", table_html)
+        self.assertNotIn("https://www.nikkei.com", table_html)
+        self.assertNotIn("<th>買い注意</th>", table_html)
+        self.assertNotIn("<th>候補分類</th>", table_html)
+        self.assertNotIn("<th>イベント注意</th>", table_html)
+
+    def test_responsive_representative_and_sector_cards_are_generated(self):
+        representative_display = pd.DataFrame(
+            [
+                {
+                    "セクター名": "卸売業",
+                    "コード": "2737",
+                    "銘柄名": "トーメンデバイス",
+                    "代表理由": "材料・出来高を伴う上昇",
+                    "品質/注意": "本日決算発表日",
+                    "決算発表予定日": "2026-04-25",
+                }
+            ]
+        )
+        sector_display = pd.DataFrame(
+            [
+                {
+                    "表示順位": 1,
+                    "セクター名": "電気機器",
+                    "スコア": "91.2",
+                    "根拠": "資金流入が継続",
+                }
+            ]
+        )
+
+        representative_html = app._build_responsive_table_html(
+            representative_display,
+            table_class="stock-link-table",
+            card_kind="representative-card",
+        )
+        sector_html = app._build_responsive_table_html(
+            sector_display,
+            table_class="sector-rank-table",
+            card_kind="sector-card",
+            enable_stock_link=False,
+        )
+
+        self.assertIn("representative-card", representative_html)
+        self.assertIn("材料・出来高を伴う上昇", representative_html)
+        self.assertIn("本日決算発表日", representative_html)
+        self.assertIn(">SBI証券</a>", representative_html)
+        self.assertIn("sector-card", sector_html)
+        self.assertIn("電気機器", sector_html)
+        self.assertIn("資金流入が継続", sector_html)
+
+    def test_view_query_parameter_can_force_mobile_or_desktop(self):
+        with mock.patch.object(app, "_requested_view_mode", return_value="mobile"):
+            self.assertEqual(app._responsive_view_class(), "view-force-mobile")
+        with mock.patch.object(app, "_requested_view_mode", return_value="desktop"):
+            self.assertEqual(app._responsive_view_class(), "view-force-desktop")
+        with mock.patch.object(app, "_requested_view_mode", return_value=""):
+            self.assertEqual(app._responsive_view_class(), "view-auto")
+
+    def test_mobile_card_html_escapes_snapshot_text(self):
+        display = pd.DataFrame(
+            [
+                {
+                    "順位": 1,
+                    "セクター名": "電気機器",
+                    "コード": "6920",
+                    "銘柄名": "<script>alert(1)</script>",
+                    "エントリー判断": "押し待ち",
+                    "根拠": "<b>強い</b>",
+                }
+            ]
+        )
+
+        table_html = app._build_responsive_table_html(
+            display,
+            table_class="buy-candidate-table",
+            card_kind="candidate-card",
+        )
+
+        self.assertNotIn("<script>alert(1)</script>", table_html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", table_html)
+        self.assertNotIn("<b>強い</b>", table_html)
+        self.assertIn("&lt;b&gt;強い&lt;/b&gt;", table_html)
+
     def test_timeframe_panel_renders_primary_candidates_before_sector_rank(self):
         frame = pd.DataFrame([{"code": "6920", "name": "レーザーテック"}])
         cases = [
