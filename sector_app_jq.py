@@ -517,14 +517,22 @@ SWING_SELECTION_CONFIG = {
     "volume_ratio_gate_1m": 0.90,
     "score_gate_1w": 2.30,
     "score_gate_1m": 2.90,
+    "score_gate_3m": 3.00,
+    "buy_score_gate_1w": 1.05,
+    "buy_score_gate_1m": 1.25,
+    "buy_score_gate_3m": 1.85,
     "sector_tailwind_bonus_strong_1w": 0.70,
     "sector_tailwind_bonus_mid_1w": 0.28,
     "sector_tailwind_bonus_strong_1m": 0.85,
     "sector_tailwind_bonus_mid_1m": 0.45,
+    "sector_tailwind_bonus_strong_3m": 0.90,
+    "sector_tailwind_bonus_mid_3m": 0.42,
     "display_total_limit_1w": 5,
     "display_total_limit_1m": 5,
+    "display_total_limit_3m": 5,
     "display_sector_limit_1w": 2,
     "display_sector_limit_1m": 2,
+    "display_sector_limit_3m": 2,
 }
 CLOUD_VIEWER_MODES = ("0915", "1130", "1530", "now")
 VIEWER_ONLY_SNAPSHOT_MODES = CLOUD_VIEWER_MODES
@@ -7183,8 +7191,6 @@ def _join_reason_tags(tags: list[str], *, fallback: str = "") -> str:
 
 def _hard_block_reason_1w_v2(row: pd.Series) -> str:
     reasons: list[str] = []
-    if bool(row.get("earnings_risk_flag_1w")):
-        reasons.append("earnings_near")
     if bool(row.get("current_price_unavailable")):
         reasons.append("no_live_price")
     if bool(row.get("severe_extension_flag_1w")):
@@ -7194,8 +7200,6 @@ def _hard_block_reason_1w_v2(row: pd.Series) -> str:
 
 def _hard_block_reason_1m_v2(row: pd.Series) -> str:
     reasons: list[str] = []
-    if bool(row.get("earnings_risk_flag_1m")):
-        reasons.append("earnings_near")
     if bool(row.get("finance_risk_flag")):
         reasons.append("finance_risk")
     if bool(row.get("current_price_unavailable")):
@@ -7207,8 +7211,6 @@ def _hard_block_reason_1m_v2(row: pd.Series) -> str:
 
 def _hard_block_reason_3m_v2(row: pd.Series) -> str:
     reasons: list[str] = []
-    if bool(row.get("earnings_risk_flag_1m")):
-        reasons.append("earnings_near")
     if bool(row.get("finance_risk_flag")):
         reasons.append("finance_risk")
     if bool(row.get("current_price_unavailable")):
@@ -7277,6 +7279,7 @@ def _swing_reason_3m_v2(row: pd.Series) -> str:
 def _swing_risk_note_1w_v2(row: pd.Series) -> str:
     tags = [
         TODAY_EARNINGS_ANNOUNCEMENT_NOTE if bool(row.get("earnings_today_announcement_flag")) else "",
+        "決算近い" if bool(row.get("earnings_risk_flag_1w")) and not bool(row.get("earnings_today_announcement_flag")) else "",
         "追撃は慎重" if bool(row.get("chase_risk_flag_1w")) else ("短期過熱注意" if bool(row.get("moderate_extension_flag_1w")) else ""),
         "today失速" if bool(row.get("intraday_fade_flag_1w")) or bool(row.get("today_breakdown_flag_1w")) else "",
         "流動性注意" if not bool(row.get("liquidity_ok")) else "",
@@ -7289,6 +7292,7 @@ def _swing_risk_note_1w_v2(row: pd.Series) -> str:
 def _swing_risk_note_1m_v2(row: pd.Series) -> str:
     tags = [
         TODAY_EARNINGS_ANNOUNCEMENT_NOTE if bool(row.get("earnings_today_announcement_flag")) else "",
+        "決算近い" if bool(row.get("earnings_risk_flag_1m")) and not bool(row.get("earnings_today_announcement_flag")) else "",
         "20日線乖離大" if bool(row.get("moderate_extension_flag_1m")) else "",
         "財務注意" if bool(row.get("finance_risk_flag")) else "",
         "流動性注意" if not bool(row.get("liquidity_ok")) else "",
@@ -7299,6 +7303,7 @@ def _swing_risk_note_1m_v2(row: pd.Series) -> str:
 def _swing_risk_note_3m_v2(row: pd.Series) -> str:
     tags = [
         TODAY_EARNINGS_ANNOUNCEMENT_NOTE if bool(row.get("earnings_today_announcement_flag")) else "",
+        "決算近い" if bool(row.get("earnings_risk_flag_1m")) and not bool(row.get("earnings_today_announcement_flag")) else "",
         "財務注意" if bool(row.get("finance_risk_flag")) else "",
         "1か月側が失速" if bool(row.get("month_confirmation_broken_3m")) else "",
         "流動性注意" if not bool(row.get("liquidity_ok")) else "",
@@ -7651,7 +7656,11 @@ def _build_swing_candidate_audit_frame(
     working.loc[(working["unselected_reason"] == "") & ~working[score_col].fillna(False).astype(bool), "unselected_reason"] = "all_failed_score_gate"
     working.loc[(working["unselected_reason"] == "") & ~working["selected_flag"], "unselected_reason"] = "not_selected_after_ranking"
     working.loc[working["selected_flag"], "unselected_reason"] = ""
-    score_component_columns = [column for column in working.columns if column.endswith(f"_{horizon}") and ("component" in column or "score" in column)]
+    score_component_columns = [
+        column
+        for column in working.columns
+        if column.endswith(f"_{horizon}") and ("component" in column or "score" in column) and not column.startswith("score_components_")
+    ]
     audit_rows: list[dict[str, Any]] = []
     for _, row in working.iterrows():
         component_payload = {column: (float(row.get(column)) if pd.notna(row.get(column)) else None) for column in score_component_columns}
@@ -7676,12 +7685,256 @@ def _build_swing_candidate_audit_frame(
                 "empty_reason_label": str(row.get(f"empty_reason_label_{horizon}", "") or ""),
                 "score_total_raw": float(row.get(score_total_col, 0.0) or 0.0) if pd.notna(row.get(score_total_col)) else None,
                 "score_subcomponents_raw": component_payload,
+                "selected_horizon": horizon,
+                "buy_score_total": float(row.get(f"buy_score_{horizon}", 0.0) or 0.0) if pd.notna(row.get(f"buy_score_{horizon}", pd.NA)) else None,
+                "buy_score_1w": float(row.get("buy_score_1w", 0.0) or 0.0) if pd.notna(row.get("buy_score_1w", pd.NA)) else None,
+                "buy_score_1m": float(row.get("buy_score_1m", 0.0) or 0.0) if pd.notna(row.get("buy_score_1m", pd.NA)) else None,
+                "buy_score_3m": float(row.get("buy_score_3m", 0.0) or 0.0) if pd.notna(row.get("buy_score_3m", pd.NA)) else None,
+                "score_components": row.get(f"score_components_{horizon}", component_payload),
+                "sector_strength_score": float(row.get(f"sector_strength_score_{horizon}", 0.0) or 0.0) if pd.notna(row.get(f"sector_strength_score_{horizon}", pd.NA)) else None,
+                "relative_strength_score": float(row.get(f"relative_strength_score_{horizon}", 0.0) or 0.0) if pd.notna(row.get(f"relative_strength_score_{horizon}", pd.NA)) else None,
+                "liquidity_score": float(row.get("liquidity_score", 0.0) or 0.0) if pd.notna(row.get("liquidity_score", pd.NA)) else None,
+                "earnings_risk_score": float(row.get(f"earnings_risk_score_{horizon}", 0.0) or 0.0) if pd.notna(row.get(f"earnings_risk_score_{horizon}", pd.NA)) else None,
+                "overheating_penalty": float(row.get(f"overheating_penalty_{horizon}", 0.0) or 0.0) if pd.notna(row.get(f"overheating_penalty_{horizon}", pd.NA)) else None,
+                "abnormal_event_penalty": float(row.get(f"abnormal_event_penalty_{horizon}", 0.0) or 0.0) if pd.notna(row.get(f"abnormal_event_penalty_{horizon}", pd.NA)) else None,
+                "fallback_penalty": float(row.get(f"fallback_penalty_{horizon}", 0.0) or 0.0) if pd.notna(row.get(f"fallback_penalty_{horizon}", pd.NA)) else None,
+                "selected_reason": str(row.get(display_reason_col, "") or ""),
+                "rejected_reason": "" if bool(row.get("selected_flag", False)) else str(row.get("unselected_reason", "") or ""),
+                "horizon_fit_reason": str(row.get(f"horizon_fit_reason_{horizon}", "") or ""),
+                "entry_caution": str(row.get(f"entry_caution_{horizon}", "") or ""),
+                "fallback_used": bool(row.get(f"fallback_used_{horizon}", False)),
                 "selected_flag": bool(row.get("selected_flag", False)),
                 "unselected_reason": str(row.get("unselected_reason", "") or ""),
                 "display_reason_raw": str(row.get(display_reason_col, "") or ""),
             }
         )
     return pd.DataFrame(audit_rows, columns=SWING_CANDIDATE_AUDIT_COLUMNS)
+
+
+def _candidate_core_stock_score_series(frame: pd.DataFrame) -> pd.Series:
+    if frame is None or frame.empty:
+        return pd.Series(dtype="float64")
+    index = frame.index
+    avg_turnover = _score_percentile(_coerce_numeric(frame.get("avg_turnover_20d", pd.Series(pd.NA, index=index)))).fillna(0.0)
+    latest_turnover = _score_percentile(_coerce_numeric(frame.get("TradingValue_latest", pd.Series(pd.NA, index=index)))).fillna(0.0)
+    sector_contribution = _score_percentile(_coerce_numeric(frame.get("sector_contribution_full", pd.Series(pd.NA, index=index)))).fillna(0.0)
+    turnover_rank = _score_rank_ascending(_coerce_numeric(frame.get("turnover_rank_in_sector", pd.Series(pd.NA, index=index)))).fillna(0.0)
+    must_have_rank = _score_rank_ascending(_coerce_numeric(frame.get("must_have_rank_in_sector", pd.Series(pd.NA, index=index)))).fillna(0.0)
+    was_must_have = frame.get("was_in_must_have", pd.Series(False, index=index)).fillna(False).astype(bool).astype(float)
+    liquidity_ok = frame.get("liquidity_ok", pd.Series(False, index=index)).fillna(False).astype(bool).astype(float)
+    score = (
+        avg_turnover * 0.26
+        + latest_turnover * 0.22
+        + sector_contribution * 0.20
+        + turnover_rank * 0.14
+        + must_have_rank * 0.10
+        + was_must_have * 0.05
+        + liquidity_ok * 0.03
+    )
+    return score.clip(lower=0.0, upper=1.0)
+
+
+def _earnings_risk_score_series(frame: pd.DataFrame, *, horizon: str) -> pd.Series:
+    index = frame.index
+    raw_days = _coerce_numeric(frame.get("earnings_buffer_days", pd.Series(pd.NA, index=index)))
+    days = raw_days.fillna(999.0)
+    today = frame.get("earnings_today_announcement_flag", pd.Series(False, index=index)).fillna(False).astype(bool)
+    unknown = frame.get("earnings_unknown_flag", pd.Series(False, index=index)).fillna(False).astype(bool)
+    score = pd.Series(0.0, index=index)
+    score.loc[unknown] -= 0.15
+    score.loc[days.le(7)] -= 0.35 if horizon == "1w" else 0.25
+    score.loc[days.le(3)] -= 0.45 if horizon == "1w" else 0.35
+    score.loc[today | days.eq(0)] -= 0.80 if horizon == "1w" else 0.65
+    return score
+
+
+def _build_horizon_fit_reason(row: pd.Series, *, horizon: str) -> str:
+    if horizon == "1w":
+        tags = [
+            "短期資金流入" if bool(row.get("pass_flow_gate_1w")) else "",
+            "today強セクター" if bool(row.get("belongs_today_sector")) else "",
+            "セクター上位" if str(row.get("sector_tailwind_band_1w", "")) in {"strong", "mid"} else "",
+            "過熱許容範囲" if not bool(row.get("chase_risk_flag_1w")) else "",
+        ]
+        return _join_reason_tags(tags, fallback="短期条件はあるが確認待ち")
+    if horizon == "1m":
+        tags = [
+            "セクター強さ継続" if str(row.get("sector_tailwind_band_1m", "")) in {"strong", "mid"} else "",
+            "中期トレンド良好" if bool(row.get("pass_trend_gate_1m")) else "",
+            "資金継続" if bool(row.get("pass_flow_gate_1m")) else "",
+            "決算リスク低め" if float(row.get("earnings_risk_score_1m", 0.0) or 0.0) >= -0.25 else "",
+        ]
+        return _join_reason_tags(tags, fallback="中期継続の確認待ち")
+    tags = [
+        "中核株" if float(row.get("core_stock_score", 0.0) or 0.0) >= 0.66 else "",
+        "業種主導性" if str(row.get("sector_tailwind_band_3m", "")) in {"strong", "mid"} else "",
+        "中期資金継続" if bool(row.get("pass_flow_gate_3m")) else "",
+        "3か月トレンド良好" if bool(row.get("pass_trend_gate_3m")) else "",
+    ]
+    return _join_reason_tags(tags, fallback="長めの主導性は確認待ち")
+
+
+def _apply_horizon_buy_scores(working: pd.DataFrame, *, selection_config: dict[str, float]) -> pd.DataFrame:
+    if working is None or working.empty:
+        return working
+    working = working.copy()
+    index = working.index
+
+    def num(column: str, default: float = 0.0) -> pd.Series:
+        return _coerce_numeric(working.get(column, pd.Series(pd.NA, index=index))).fillna(default)
+
+    def flag(column: str) -> pd.Series:
+        return working.get(column, pd.Series(False, index=index)).fillna(False).astype(bool)
+
+    if "core_stock_score" not in working.columns:
+        working["core_stock_score"] = _candidate_core_stock_score_series(working)
+    working["liquidity_score"] = (
+        _score_percentile(num("avg_turnover_20d")).fillna(0.0) * 0.55
+        + _score_percentile(num("live_turnover_value")).fillna(0.0) * 0.30
+        + flag("liquidity_ok").astype(float) * 0.15
+    ).clip(lower=0.0, upper=1.0)
+
+    working["sector_rank_score_1w"] = _score_rank_ascending(num("persistence_rank_1w", 9999.0)).fillna(0.0)
+    working["sector_rank_score_1m"] = (
+        _score_rank_ascending(num("persistence_rank_1m", 9999.0)).fillna(0.0) * 0.65
+        + _score_rank_ascending(num("persistence_rank_3m", 9999.0)).fillna(0.0) * 0.35
+    )
+    working["sector_rank_score_3m"] = _score_rank_ascending(num("persistence_rank_3m", 9999.0)).fillna(0.0)
+    working["sector_strength_score_1w"] = (
+        working["sector_rank_score_1w"] * 0.45
+        + flag("belongs_today_sector").astype(float) * 0.35
+        + _score_percentile(num("sector_positive_ratio_1w")).fillna(0.0) * 0.20
+    )
+    working["sector_strength_score_1m"] = (
+        working["sector_rank_score_1m"] * 0.50
+        + _score_percentile(num("sector_positive_ratio_1m")).fillna(0.0) * 0.30
+        + (1.0 - _score_percentile(num("leader_concentration_share_1m")).fillna(0.0)) * 0.20
+    )
+    working["sector_strength_score_3m"] = (
+        working["sector_rank_score_3m"] * 0.55
+        + _score_percentile(num("sector_positive_ratio_3m")).fillna(0.0) * 0.25
+        + flag("sector_gate_pass_3m").astype(float) * 0.20
+    )
+    working["relative_strength_score_1w"] = (
+        _score_percentile(num("rs_vs_topix_1w")).fillna(0.0) * 0.50
+        + _score_percentile(num("ret_1w")).fillna(0.0) * 0.25
+        + _score_percentile(num("live_ret_vs_prev_close")).fillna(0.0) * 0.15
+        + _score_percentile(num("high_close_score")).fillna(0.0) * 0.10
+    )
+    working["relative_strength_score_1m"] = (
+        _score_percentile(num("rs_vs_topix_1m")).fillna(0.0) * 0.50
+        + _score_percentile(num("rs_vs_topix_3m")).fillna(0.0) * 0.25
+        + (1.0 - _score_percentile(num("price_vs_ma20_abs")).fillna(0.0)) * 0.15
+        + _score_percentile(num("live_turnover_ratio_20d")).fillna(0.0) * 0.10
+    )
+    working["relative_strength_score_3m"] = (
+        _score_percentile(num("rs_vs_topix_3m")).fillna(0.0) * 0.50
+        + _score_percentile(num("ret_3m")).fillna(0.0) * 0.30
+        + _score_percentile(num("rs_vs_topix_1m")).fillna(0.0) * 0.20
+    )
+
+    for horizon in ["1w", "1m", "3m"]:
+        working[f"earnings_risk_score_{horizon}"] = _earnings_risk_score_series(working, horizon=horizon)
+        working[f"fallback_penalty_{horizon}"] = 0.0
+
+    one_day_spike = num("live_ret_vs_prev_close").gt(5.0) & num("price_vs_ma20_abs").gt(8.0)
+    small_short_spike = one_day_spike & working["core_stock_score"].lt(0.62)
+    working["overheating_penalty_1w"] = 0.0
+    working.loc[flag("moderate_extension_flag_1w"), "overheating_penalty_1w"] -= 0.30
+    working.loc[flag("severe_extension_flag_1w"), "overheating_penalty_1w"] -= 0.70
+    working.loc[num("live_ret_vs_prev_close").gt(6.0), "overheating_penalty_1w"] -= 0.25
+    working["overheating_penalty_1m"] = 0.0
+    working.loc[flag("moderate_extension_flag_1m"), "overheating_penalty_1m"] -= 0.45
+    working.loc[flag("severe_extension_flag_1m"), "overheating_penalty_1m"] -= 0.85
+    working.loc[one_day_spike, "overheating_penalty_1m"] -= 0.45
+    working["overheating_penalty_3m"] = 0.0
+    working.loc[flag("moderate_extension_flag_1m"), "overheating_penalty_3m"] -= 0.50
+    working.loc[flag("severe_extension_flag_1m"), "overheating_penalty_3m"] -= 0.95
+    working.loc[small_short_spike, "overheating_penalty_3m"] -= 0.70
+
+    working["abnormal_event_penalty_1w"] = 0.0
+    working.loc[flag("today_breakdown_flag_1w") | flag("intraday_fade_flag_1w"), "abnormal_event_penalty_1w"] -= 0.85
+    working.loc[num("live_ret_vs_prev_close").lt(-5.0), "abnormal_event_penalty_1w"] -= 0.80
+    working["abnormal_event_penalty_1m"] = 0.0
+    working.loc[num("live_ret_vs_prev_close").lt(-4.0), "abnormal_event_penalty_1m"] -= 0.65
+    working.loc[flag("finance_risk_flag"), "abnormal_event_penalty_1m"] -= 0.60
+    working["abnormal_event_penalty_3m"] = 0.0
+    working.loc[flag("month_confirmation_broken_3m"), "abnormal_event_penalty_3m"] -= 0.75
+    working.loc[num("live_ret_vs_prev_close").lt(-4.0), "abnormal_event_penalty_3m"] -= 0.45
+    working.loc[flag("finance_risk_flag"), "abnormal_event_penalty_3m"] -= 0.70
+
+    working["short_momentum_score_1w"] = (
+        _score_percentile(num("live_ret_vs_prev_close")).fillna(0.0) * 0.35
+        + _score_percentile(num("live_turnover_ratio_20d").where(num("live_turnover_ratio_20d").notna(), num("live_volume_ratio_20d"))).fillna(0.0) * 0.35
+        + _score_percentile(num("high_close_score")).fillna(0.0) * 0.30
+    )
+    working["medium_trend_score_1m"] = (
+        flag("pass_trend_gate_1m").astype(float) * 0.45
+        + _score_percentile(num("rs_vs_topix_1m")).fillna(0.0) * 0.35
+        + _score_percentile(num("rs_vs_topix_3m")).fillna(0.0) * 0.20
+    )
+    working["long_story_score_3m"] = (
+        flag("pass_trend_gate_3m").astype(float) * 0.40
+        + working["core_stock_score"] * 0.30
+        + _score_percentile(num("ret_3m")).fillna(0.0) * 0.30
+    )
+
+    working["buy_score_1w"] = (
+        working["short_momentum_score_1w"] * 0.75
+        + working["sector_strength_score_1w"] * 0.70
+        + working["relative_strength_score_1w"] * 0.65
+        + working["liquidity_score"] * 0.45
+        + working["sector_rank_score_1w"] * 0.25
+        + working["earnings_risk_score_1w"]
+        + working["overheating_penalty_1w"]
+        + working["abnormal_event_penalty_1w"]
+        + working["fallback_penalty_1w"]
+    )
+    working["buy_score_1m"] = (
+        working["medium_trend_score_1m"] * 0.80
+        + working["sector_strength_score_1m"] * 0.75
+        + working["relative_strength_score_1m"] * 0.65
+        + working["liquidity_score"] * 0.45
+        + working["sector_rank_score_1m"] * 0.30
+        + working["core_stock_score"] * 0.25
+        + working["earnings_risk_score_1m"]
+        + working["overheating_penalty_1m"]
+        + working["abnormal_event_penalty_1m"]
+        + working["fallback_penalty_1m"]
+    )
+    working["buy_score_3m"] = (
+        working["long_story_score_3m"] * 0.90
+        + working["sector_strength_score_3m"] * 0.80
+        + working["relative_strength_score_3m"] * 0.70
+        + working["liquidity_score"] * 0.45
+        + working["sector_rank_score_3m"] * 0.35
+        + working["core_stock_score"] * 0.45
+        + working["earnings_risk_score_3m"]
+        + working["overheating_penalty_3m"]
+        + working["abnormal_event_penalty_3m"]
+        + working["fallback_penalty_3m"]
+    )
+
+    for horizon in ["1w", "1m", "3m"]:
+        working[f"score_components_{horizon}"] = working.apply(
+            lambda row, h=horizon: {
+                "sector_strength_score": float(row.get(f"sector_strength_score_{h}", 0.0) or 0.0),
+                "sector_rank_score": float(row.get(f"sector_rank_score_{h}", 0.0) or 0.0),
+                "relative_strength_score": float(row.get(f"relative_strength_score_{h}", 0.0) or 0.0),
+                "liquidity_score": float(row.get("liquidity_score", 0.0) or 0.0),
+                "earnings_risk_score": float(row.get(f"earnings_risk_score_{h}", 0.0) or 0.0),
+                "overheating_penalty": float(row.get(f"overheating_penalty_{h}", 0.0) or 0.0),
+                "abnormal_event_penalty": float(row.get(f"abnormal_event_penalty_{h}", 0.0) or 0.0),
+                "fallback_penalty": float(row.get(f"fallback_penalty_{h}", 0.0) or 0.0),
+                "core_stock_score": float(row.get("core_stock_score", 0.0) or 0.0),
+            },
+            axis=1,
+        )
+        working[f"horizon_fit_reason_{horizon}"] = working.apply(lambda row, h=horizon: _build_horizon_fit_reason(row, horizon=h), axis=1)
+        working[f"entry_caution_{horizon}"] = working.apply(lambda row, h=horizon: str(row.get(f"risk_note_{h}", "") or "").strip(), axis=1)
+        working[f"rejected_reason_{horizon}"] = ""
+        working[f"fallback_used_{horizon}"] = False
+    return working
 
 
 def _build_swing_candidate_tables_v2(
@@ -7884,6 +8137,27 @@ def _build_swing_candidate_tables_v2(
     working["in_scope_1w"] = working["belongs_persistence_sector_1w"] | working["belongs_today_sector"]
     working["in_scope_1m"] = working["belongs_persistence_sector"]
     working["in_scope_3m"] = working["belongs_persistence_sector_3m"]
+    working["core_stock_score"] = _candidate_core_stock_score_series(working)
+    core_stock_flag = working["core_stock_score"].ge(0.68)
+    working["core_stock_flag"] = core_stock_flag
+    working["in_scope_1m"] = (
+        working["in_scope_1m"]
+        | (
+            core_stock_flag
+            & (working["belongs_today_sector"] | working["persistence_rank_1m"].le(15).fillna(False) | working["persistence_rank_3m"].le(15).fillna(False))
+            & _coerce_numeric(working["rs_vs_topix_1m"]).fillna(-999.0).gt(-5.0)
+            & _coerce_numeric(working["ret_1m"]).fillna(-999.0).gt(-8.0)
+        )
+    )
+    working["in_scope_3m"] = (
+        working["in_scope_3m"]
+        | (
+            core_stock_flag
+            & (working["belongs_today_sector"] | working["persistence_rank_3m"].le(15).fillna(False))
+            & _coerce_numeric(working["rs_vs_topix_3m"]).fillna(-999.0).gt(-3.0)
+            & _coerce_numeric(working["ret_3m"]).fillna(-999.0).gt(-5.0)
+        )
+    )
     working["sector_tailwind_band_1w"] = working["persistence_rank_1w"].apply(lambda value: _tailwind_band_from_rank(value, strong_max=5, mid_max=10))
     working["sector_tailwind_band_1m"] = working.apply(
         lambda row: "strong"
@@ -7951,7 +8225,7 @@ def _build_swing_candidate_tables_v2(
         | (working["live_volume_ratio_20d"].fillna(0.0) >= volume_gate_1w)
         | ((working["live_turnover_rank_norm"].fillna(0.0) >= 0.65) & working["live_ret_vs_prev_close"].fillna(-999.0).gt(0.0))
     )
-    working["pass_quality_gate_1w"] = working["liquidity_ok"] & ~working["earnings_risk_flag_1w"] & working["in_scope_1w"]
+    working["pass_quality_gate_1w"] = working["liquidity_ok"] & working["in_scope_1w"]
     working["today_breakdown_flag_1w"] = (
         working["live_ret_vs_prev_close"].fillna(-999.0).lt(-2.2)
         | (
@@ -7992,13 +8266,18 @@ def _build_swing_candidate_tables_v2(
         working["live_ret_vs_prev_close"].fillna(-999.0).ge(0.0)
         | (working["live_turnover_ratio_20d"].fillna(0.0) >= flow_gate_1m)
     )
-    working["pass_trend_gate_1m"] = working["medium_term_rs_ok"]
+    working["medium_duration_ok_1m"] = (
+        _coerce_numeric(working["rs_vs_topix_1m"]).fillna(-999.0).gt(1.0)
+        | _coerce_numeric(working["ret_1m"]).fillna(-999.0).gt(3.0)
+        | working["core_stock_score"].ge(0.68)
+    )
+    working["pass_trend_gate_1m"] = working["medium_term_rs_ok"] & working["medium_duration_ok_1m"]
     working["pass_flow_gate_1m"] = (
         (working["live_turnover_ratio_20d"].fillna(0.0) >= flow_gate_1m)
         | (working["live_volume_ratio_20d"].fillna(0.0) >= volume_gate_1m)
         | (_score_percentile(working["avg_turnover_20d"]).fillna(0.0) >= 0.55)
     )
-    working["pass_quality_gate_1m"] = working["liquidity_ok"] & ~working["earnings_risk_flag_1m"] & ~working["finance_risk_flag"] & working["in_scope_1m"]
+    working["pass_quality_gate_1m"] = working["liquidity_ok"] & ~working["finance_risk_flag"] & working["in_scope_1m"]
     working["hard_block_reason_raw_1m"] = working.apply(_hard_block_reason_1m_v2, axis=1)
     working["pass_live_gate_3m"] = working["month_confirmation_ok_3m"] & working["in_scope_3m"]
     working["pass_trend_gate_3m"] = working["long_term_rs_ok"]
@@ -8006,7 +8285,7 @@ def _build_swing_candidate_tables_v2(
         working["liquidity_ok"]
         | (_score_percentile(working["avg_turnover_20d"]).fillna(0.0) >= 0.55)
     )
-    working["pass_quality_gate_3m"] = working["liquidity_ok"] & ~working["earnings_risk_flag_1m"] & ~working["finance_risk_flag"] & working["in_scope_3m"]
+    working["pass_quality_gate_3m"] = working["liquidity_ok"] & ~working["finance_risk_flag"] & working["in_scope_3m"]
     working["sector_gate_fail_3m"] = ~working["sector_gate_pass_3m"]
     working["hard_block_reason_raw_3m"] = working.apply(_hard_block_reason_3m_v2, axis=1)
 
@@ -8173,6 +8452,32 @@ def _build_swing_candidate_tables_v2(
     working["risk_note_1w"] = working.apply(_swing_risk_note_1w_v2, axis=1)
     working["risk_note_1m"] = working.apply(_swing_risk_note_1m_v2, axis=1)
     working["risk_note_3m"] = working.apply(_swing_risk_note_3m_v2, axis=1)
+    working = _apply_horizon_buy_scores(working, selection_config=selection_config)
+    working["swing_score_1w"] = working["buy_score_1w"]
+    working["swing_score_1m"] = working["buy_score_1m"]
+    working["swing_score_3m"] = working["buy_score_3m"]
+    buy_score_gate_1w = float(selection_config.get("buy_score_gate_1w", 1.05) or 1.05)
+    buy_score_gate_1m = float(selection_config.get("buy_score_gate_1m", 1.25) or 1.25)
+    buy_score_gate_3m = float(selection_config.get("buy_score_gate_3m", 1.85) or 1.85)
+    working["pass_score_gate_1w"] = (
+        working["buy_score_1w"].fillna(-999.0).ge(buy_score_gate_1w)
+        & working["in_scope_1w"]
+        & (working["pass_live_gate_1w"] | working["pass_trend_gate_1w"])
+    )
+    working["pass_score_gate_1m"] = (
+        working["buy_score_1m"].fillna(-999.0).ge(buy_score_gate_1m)
+        & working["in_scope_1m"]
+        & working["pass_trend_gate_1m"]
+    )
+    working["pass_score_gate_3m"] = (
+        working["buy_score_3m"].fillna(-999.0).ge(buy_score_gate_3m)
+        & working["in_scope_3m"]
+        & working["pass_trend_gate_3m"]
+        & working["pass_live_gate_3m"]
+    )
+    working.loc[working["buy_score_1w"].fillna(-999.0).lt(buy_score_gate_1w - 0.25), "candidate_quality_1w"] = "低"
+    working.loc[working["buy_score_1m"].fillna(-999.0).lt(buy_score_gate_1m - 0.25), "candidate_quality_1m"] = "低"
+    working.loc[working["buy_score_3m"].fillna(-999.0).lt(buy_score_gate_3m - 0.25), "candidate_quality_3m"] = "低"
     working["candidate_commentary_1w"] = working.apply(
         lambda row: _build_candidate_commentary(row.get("selection_reason_1w", ""), row.get("risk_note_1w", "")),
         axis=1,
@@ -8303,6 +8608,42 @@ def _build_swing_candidate_tables_v2(
                 "stretch_caution_label_1m": "stretch_caution_label",
                 "watch_reason_label_1m": "watch_reason_label",
             }
+        source = source.copy()
+        source["selected_horizon"] = horizon
+        source["buy_score_total"] = source.get(f"buy_score_{horizon}", pd.Series(0.0, index=source.index))
+        source["sector_strength_score"] = source.get(f"sector_strength_score_{horizon}", pd.Series(0.0, index=source.index))
+        source["relative_strength_score"] = source.get(f"relative_strength_score_{horizon}", pd.Series(0.0, index=source.index))
+        source["earnings_risk_score"] = source.get(f"earnings_risk_score_{horizon}", pd.Series(0.0, index=source.index))
+        source["overheating_penalty"] = source.get(f"overheating_penalty_{horizon}", pd.Series(0.0, index=source.index))
+        source["abnormal_event_penalty"] = source.get(f"abnormal_event_penalty_{horizon}", pd.Series(0.0, index=source.index))
+        source["fallback_penalty"] = source.get(f"fallback_penalty_{horizon}", pd.Series(0.0, index=source.index))
+        source["score_components"] = source.get(f"score_components_{horizon}", pd.Series([{} for _ in range(len(source))], index=source.index))
+        source["selected_reason"] = source.get(f"selection_reason_{horizon}", pd.Series("", index=source.index))
+        source["rejected_reason"] = source.get(f"rejected_reason_{horizon}", pd.Series("", index=source.index))
+        source["horizon_fit_reason"] = source.get(f"horizon_fit_reason_{horizon}", pd.Series("", index=source.index))
+        source["entry_caution"] = source.get(f"entry_caution_{horizon}", pd.Series("", index=source.index))
+        source["fallback_used"] = source.get(f"fallback_used_{horizon}", pd.Series(False, index=source.index)).fillna(False).astype(bool)
+        common_audit_columns = [
+            "selected_horizon",
+            "buy_score_total",
+            "buy_score_1w",
+            "buy_score_1m",
+            "buy_score_3m",
+            "score_components",
+            "sector_strength_score",
+            "relative_strength_score",
+            "liquidity_score",
+            "earnings_risk_score",
+            "overheating_penalty",
+            "abnormal_event_penalty",
+            "fallback_penalty",
+            "selected_reason",
+            "rejected_reason",
+            "horizon_fit_reason",
+            "entry_caution",
+            "fallback_used",
+        ]
+        selected_columns.extend([column for column in common_audit_columns if column in source.columns and column not in selected_columns])
         ordered = source.sort_values(sort_columns, ascending=ascending, kind="mergesort").copy()
         table = ordered[selected_columns].reset_index(drop=True).rename(columns=rename_map)
         gate_pass = ordered.get(gate_col, pd.Series(True, index=ordered.index)).fillna(False).astype(bool).reset_index(drop=True)
@@ -8341,6 +8682,21 @@ def _build_swing_candidate_tables_v2(
                     final.loc[supplemented_mask, "entry_fit"] = "補完・監視"
                 final.loc[supplemented_mask, "entry_stance_label"] = "補完・監視"
                 final.loc[supplemented_mask, "watch_reason_label"] = "表示件数不足のため補完"
+                if "fallback_used" in final.columns:
+                    final.loc[supplemented_mask, "fallback_used"] = True
+                if "fallback_penalty" in final.columns:
+                    final.loc[supplemented_mask, "fallback_penalty"] = -0.85
+                if "buy_score_total" in final.columns:
+                    final.loc[supplemented_mask, "buy_score_total"] = _coerce_numeric(final.loc[supplemented_mask, "buy_score_total"]).fillna(0.0) - 0.85
+                for score_horizon in ["1w", "1m", "3m"]:
+                    score_column = f"buy_score_{score_horizon}"
+                    if score_column in final.columns:
+                        horizon_mask = supplemented_mask & final.get("selected_horizon", pd.Series("", index=final.index)).astype(str).eq(score_horizon)
+                        final.loc[horizon_mask, score_column] = _coerce_numeric(final.loc[horizon_mask, score_column]).fillna(0.0) - 0.85
+                if "score_components" in final.columns:
+                    final.loc[supplemented_mask, "score_components"] = final.loc[supplemented_mask, "score_components"].apply(
+                        lambda value: {**(value if isinstance(value, dict) else {}), "fallback_penalty": -0.85}
+                    )
                 for column in ["selection_reason", "candidate_commentary"]:
                     if column in final.columns:
                         final.loc[supplemented_mask, column] = final.loc[supplemented_mask, column].apply(
@@ -8348,6 +8704,8 @@ def _build_swing_candidate_tables_v2(
                             if pd.isna(value) or not str(value).strip()
                             else f"表示件数不足のため補完。通常の買い候補より信頼度は低い / {str(value).strip()}"
                         )
+                if "selected_reason" in final.columns:
+                    final.loc[supplemented_mask, "selected_reason"] = final.loc[supplemented_mask, "selection_reason"] if "selection_reason" in final.columns else "表示件数不足のため補完。通常の買い候補より信頼度は低い"
         return final, {code for code in all_codes if code and code not in selected_codes}
 
     swing_1w_source = working[
@@ -8435,6 +8793,20 @@ def _build_swing_candidate_tables_v2(
     selected_codes_1w = set(swing_1w.get("code", pd.Series(dtype=str)).astype(str).tolist())
     selected_codes_1m = set(swing_1m.get("code", pd.Series(dtype=str)).astype(str).tolist())
     selected_codes_3m = set(swing_3m.get("code", pd.Series(dtype=str)).astype(str).tolist())
+    for horizon, table in [("1w", swing_1w), ("1m", swing_1m), ("3m", swing_3m)]:
+        if table is None or table.empty or "fallback_used" not in table.columns:
+            continue
+        fallback_codes = set(table.loc[table["fallback_used"].fillna(False).astype(bool), "code"].astype(str).tolist())
+        if not fallback_codes:
+            continue
+        fallback_mask = working["code"].astype(str).isin(fallback_codes)
+        working.loc[fallback_mask, f"fallback_used_{horizon}"] = True
+        working.loc[fallback_mask, f"fallback_penalty_{horizon}"] = -0.85
+        working.loc[fallback_mask, f"buy_score_{horizon}"] = _coerce_numeric(working.loc[fallback_mask, f"buy_score_{horizon}"]).fillna(0.0) - 0.85
+        working.loc[fallback_mask, f"swing_score_{horizon}"] = working.loc[fallback_mask, f"buy_score_{horizon}"]
+        working.loc[fallback_mask, f"score_components_{horizon}"] = working.loc[fallback_mask, f"score_components_{horizon}"].apply(
+            lambda value: {**(value if isinstance(value, dict) else {}), "fallback_penalty": -0.85}
+        )
     working["display_sector_cap_pruned_1w"] = working["code"].astype(str).isin(pruned_codes_1w)
     working["display_sector_cap_pruned_1m"] = working["code"].astype(str).isin(pruned_codes_1m)
     working["display_sector_cap_pruned_3m"] = working["code"].astype(str).isin(pruned_codes_3m)
@@ -8642,6 +9014,7 @@ DISPLAY_REASON_TEXT_ALIASES = {
 DISPLAY_RISK_TEXT_ALIASES = {
     "追撃は慎重": "すぐ買うより押し目待ち寄り",
     "短期過熱注意": "短期で上がりすぎ注意",
+    "決算近い": "決算直前は買い注意",
     "today失速": "今日は伸びが鈍い",
     "流動性注意": "売買代金がやや少ない",
     "出来高弱め": "出来高がやや弱い",
@@ -9708,6 +10081,24 @@ SWING_CANDIDATE_AUDIT_COLUMNS = [
     "empty_reason_label",
     "score_total_raw",
     "score_subcomponents_raw",
+    "selected_horizon",
+    "buy_score_total",
+    "buy_score_1w",
+    "buy_score_1m",
+    "buy_score_3m",
+    "score_components",
+    "sector_strength_score",
+    "relative_strength_score",
+    "liquidity_score",
+    "earnings_risk_score",
+    "overheating_penalty",
+    "abnormal_event_penalty",
+    "fallback_penalty",
+    "selected_reason",
+    "rejected_reason",
+    "horizon_fit_reason",
+    "entry_caution",
+    "fallback_used",
     "selected_flag",
     "unselected_reason",
     "display_reason_raw",
