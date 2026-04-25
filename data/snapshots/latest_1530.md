@@ -1,6 +1,6 @@
 # Snapshot 1530
 
-- generated_at: 2026-04-25T04:34:53.516366+00:00
+- generated_at: 2026-04-25T05:10:29.087156+00:00
 - mode: 1530
 - source_profile: local_kabu_jq_yanoshin
 - includes_kabu: True
@@ -23,8 +23,8 @@
 - ｶﾞﾗｽ: 3110 日東紡績 score=
 - ｻｰﾋﾞｽ: 6173 アクアライン score=
 - ﾊﾟﾙﾌﾟ: 3891 ニッポン高度紙工業 score=
-- 化学: 4971 メック score=
 - 化学: 4022 ラサ工業 score=
+- 化学: 4971 メック score=
 - 医薬: 4883 モダリス score=
 - 卸売業: 2737 トーメンデバイス score=
 - 卸売業: 8058 三菱商事 score=
