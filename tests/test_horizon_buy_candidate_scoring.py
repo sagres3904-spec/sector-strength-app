@@ -28,6 +28,7 @@ def _row(
     high_close=0.9,
     earnings_days=20,
     earnings_today=False,
+    earnings_date="2026-05-20",
     finance=0.0,
     sector_contribution=0.15,
     turnover_rank=2,
@@ -63,7 +64,7 @@ def _row(
         "sector_rank_3m": 1,
         "earnings_buffer_days": earnings_days,
         "earnings_today_announcement_flag": earnings_today,
-        "earnings_announcement_date": "2026-05-20",
+        "earnings_announcement_date": earnings_date,
         "finance_health_score": finance,
         "sector_contribution_full": sector_contribution,
         "turnover_rank_in_sector": turnover_rank,
@@ -94,8 +95,11 @@ def _build_tables():
     rows = [
         _row("1001", "短期モメンタム", "短期強", live_ret=2.4, ret_1w=4.5, rs_1w=3.5, rs_1m=1.0, price_vs_ma20=4.0, live_turnover_ratio=1.8),
         _row("1002", "決算過熱", "短期強", live_ret=9.0, ret_1w=14.0, rs_1w=8.0, price_vs_ma20=17.0, live_turnover_ratio=2.3, earnings_days=0, earnings_today=True),
+        _row("1003", "決算近接強い", "短期強", live_ret=2.0, ret_1w=5.0, ret_1m=2.0, rs_1w=4.0, rs_1m=2.0, price_vs_ma20=4.0, live_turnover_ratio=1.7, earnings_days=2, earnings_date="2026-04-27"),
+        _row("1004", "決算近接過熱", "短期強", live_ret=5.2, ret_1w=9.0, ret_1m=5.0, rs_1w=5.0, rs_1m=3.0, price_vs_ma20=13.0, live_turnover_ratio=2.0, earnings_days=2, earnings_date="2026-04-27"),
         _row("2001", "中期トレンド", "中期強", live_ret=0.6, ret_1m=7.0, ret_3m=12.0, rs_1m=7.0, rs_3m=9.0, price_vs_ma20=3.0, live_turnover_ratio=1.1),
         _row("2002", "一日急騰", "中期強", live_ret=9.0, ret_1w=18.0, ret_1m=8.0, ret_3m=10.0, rs_1m=8.0, rs_3m=8.0, price_vs_ma20=18.0, turnover=120_000_000.0, live_turnover_ratio=2.6, sector_contribution=0.02, turnover_rank=12, must_have_rank=12),
+        _row("2003", "決算通過後安定", "中期強", live_ret=0.8, ret_1w=1.5, ret_1m=6.5, ret_3m=11.0, rs_1m=6.0, rs_3m=8.0, price_vs_ma20=2.5, live_turnover_ratio=1.2, earnings_days=-2, earnings_date="2026-04-23"),
         _row("8058", "三菱商事", "長期強", live_ret=0.4, ret_1m=3.0, ret_3m=9.0, rs_1m=2.0, rs_3m=6.0, price_vs_ma20=2.0, turnover=5_000_000_000.0, volume=4_000_000.0, live_turnover_ratio=1.0, sector_contribution=0.40, turnover_rank=1, must_have_rank=1, was_must_have=True),
         _row("3002", "小型急騰", "長期強", live_ret=10.0, ret_1w=20.0, ret_1m=12.0, ret_3m=30.0, rs_1m=8.0, rs_3m=14.0, price_vs_ma20=19.0, turnover=80_000_000.0, live_turnover_ratio=2.8, sector_contribution=0.01, turnover_rank=18, must_have_rank=18),
     ]
@@ -170,6 +174,59 @@ class HorizonBuyCandidateScoringTests(unittest.TestCase):
             displayed_row = display.loc[display["code"].astype(str).eq(first_code)].iloc[0]
             self.assertEqual(displayed_row["horizon_fit_reason"], f"{horizon}検証理由")
             self.assertEqual(displayed_row["entry_caution"], "決算当日注意")
+
+    def test_earnings_near_strong_candidate_is_event_caution_not_hard_blocked(self):
+        tables = _build_tables()
+        audit = pd.DataFrame(tables["audit_1w"]).set_index("code")
+        row = audit.loc["1003"]
+
+        self.assertEqual(row["hard_block_reason_raw"], "")
+        self.assertTrue(bool(row["event_candidate_flag"]))
+        self.assertEqual(row["candidate_bucket"], "event_caution_candidate")
+        self.assertEqual(row["candidate_bucket_label"], "イベント注意候補")
+        self.assertIn("決算近い", row["event_caution_reason"])
+        self.assertGreater(row["buy_strength_score"], 1.0)
+        self.assertLess(row["entry_timing_adjustment"], 0.0)
+        self.assertGreater(row["entry_timing_adjustment"], -0.5)
+        self.assertAlmostEqual(row["buy_score_total"], row["buy_strength_score"] + row["entry_timing_adjustment"], places=6)
+
+    def test_display_retains_event_bucket_fields(self):
+        tables = _build_tables()
+        for horizon in ["1w", "1m", "3m"]:
+            frame = tables[horizon].copy()
+            self.assertFalse(frame.empty)
+            first_index = frame.index[0]
+            first_code = str(frame.loc[first_index, "code"])
+            frame.loc[first_index, "candidate_bucket_label"] = "イベント注意候補"
+            frame.loc[first_index, "event_caution_reason"] = "決算近い。強さは高いが値動き急変に注意"
+
+            display = app._build_swing_candidate_display_frame(frame, horizon=horizon)
+
+            self.assertIn("candidate_bucket_label", display.columns)
+            self.assertIn("event_caution_reason", display.columns)
+            displayed_row = display.loc[display["code"].astype(str).eq(first_code)].iloc[0]
+            self.assertEqual(displayed_row["candidate_bucket_label"], "イベント注意候補")
+            self.assertEqual(displayed_row["event_caution_reason"], "決算近い。強さは高いが値動き急変に注意")
+
+    def test_earnings_near_and_extended_candidate_is_chase_caution(self):
+        tables = _build_tables()
+        audit = pd.DataFrame(tables["audit_1w"]).set_index("code")
+        row = audit.loc["1004"]
+
+        self.assertTrue(bool(row["event_candidate_flag"]))
+        self.assertEqual(row["candidate_bucket"], "chase_caution_candidate")
+        self.assertEqual(row["candidate_bucket_label"], "追いかけ注意")
+        self.assertIn("追いかけ注意", row["event_caution_reason"])
+
+    def test_post_earnings_stable_trend_can_be_follow_candidate(self):
+        tables = _build_tables()
+        audit = pd.DataFrame(tables["audit_1m"]).set_index("code")
+        row = audit.loc["2003"]
+
+        self.assertTrue(bool(row["event_candidate_flag"]))
+        self.assertEqual(row["candidate_bucket"], "post_earnings_follow_candidate")
+        self.assertEqual(row["candidate_bucket_label"], "決算通過後候補")
+        self.assertIn("決算通過後", row["event_caution_reason"])
 
     def test_buy_candidate_storage_json_is_finite_and_compact(self):
         tables = _build_tables()

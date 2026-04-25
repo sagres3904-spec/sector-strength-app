@@ -707,6 +707,8 @@ UI_COLUMN_LABELS = {
     "selection_reason": "採用理由",
     "horizon_fit_reason": "時間軸理由",
     "entry_caution": "買い注意",
+    "candidate_bucket_label": "候補分類",
+    "event_caution_reason": "イベント注意",
     "risk_note": "注意点",
     "candidate_commentary": "コメント",
     "axis_rank": "順位",
@@ -741,6 +743,11 @@ UI_COLUMN_LABELS = {
     "swing_score_1w": "1週間候補スコア",
     "swing_score_1m": "1か月候補スコア",
     "swing_score_3m": "3か月候補スコア",
+    "buy_strength_score": "強さスコア",
+    "entry_timing_adjustment": "買いタイミング調整",
+    "event_candidate_flag": "イベント注意",
+    "event_candidate_type": "イベント種別",
+    "candidate_bucket": "候補分類",
     "material_title": "材料タイトル",
     "focus_reason": "注目理由",
     "total_score": "総合スコア",
@@ -7692,6 +7699,14 @@ def _build_swing_candidate_audit_frame(
                 "buy_score_1w": float(row.get("buy_score_1w", 0.0) or 0.0) if pd.notna(row.get("buy_score_1w", pd.NA)) else None,
                 "buy_score_1m": float(row.get("buy_score_1m", 0.0) or 0.0) if pd.notna(row.get("buy_score_1m", pd.NA)) else None,
                 "buy_score_3m": float(row.get("buy_score_3m", 0.0) or 0.0) if pd.notna(row.get("buy_score_3m", pd.NA)) else None,
+                "buy_strength_score": float(row.get(f"buy_strength_score_{horizon}", 0.0) or 0.0) if pd.notna(row.get(f"buy_strength_score_{horizon}", pd.NA)) else None,
+                "buy_strength_score_1w": float(row.get("buy_strength_score_1w", 0.0) or 0.0) if pd.notna(row.get("buy_strength_score_1w", pd.NA)) else None,
+                "buy_strength_score_1m": float(row.get("buy_strength_score_1m", 0.0) or 0.0) if pd.notna(row.get("buy_strength_score_1m", pd.NA)) else None,
+                "buy_strength_score_3m": float(row.get("buy_strength_score_3m", 0.0) or 0.0) if pd.notna(row.get("buy_strength_score_3m", pd.NA)) else None,
+                "entry_timing_adjustment": float(row.get(f"entry_timing_adjustment_{horizon}", 0.0) or 0.0) if pd.notna(row.get(f"entry_timing_adjustment_{horizon}", pd.NA)) else None,
+                "entry_timing_adjustment_1w": float(row.get("entry_timing_adjustment_1w", 0.0) or 0.0) if pd.notna(row.get("entry_timing_adjustment_1w", pd.NA)) else None,
+                "entry_timing_adjustment_1m": float(row.get("entry_timing_adjustment_1m", 0.0) or 0.0) if pd.notna(row.get("entry_timing_adjustment_1m", pd.NA)) else None,
+                "entry_timing_adjustment_3m": float(row.get("entry_timing_adjustment_3m", 0.0) or 0.0) if pd.notna(row.get("entry_timing_adjustment_3m", pd.NA)) else None,
                 "score_components": row.get(f"score_components_{horizon}", component_payload),
                 "sector_strength_score": float(row.get(f"sector_strength_score_{horizon}", 0.0) or 0.0) if pd.notna(row.get(f"sector_strength_score_{horizon}", pd.NA)) else None,
                 "relative_strength_score": float(row.get(f"relative_strength_score_{horizon}", 0.0) or 0.0) if pd.notna(row.get(f"relative_strength_score_{horizon}", pd.NA)) else None,
@@ -7704,6 +7719,11 @@ def _build_swing_candidate_audit_frame(
                 "rejected_reason": "" if bool(row.get("selected_flag", False)) else str(row.get("unselected_reason", "") or ""),
                 "horizon_fit_reason": str(row.get(f"horizon_fit_reason_{horizon}", "") or ""),
                 "entry_caution": str(row.get(f"entry_caution_{horizon}", "") or ""),
+                "event_candidate_flag": bool(row.get(f"event_candidate_flag_{horizon}", False)),
+                "event_candidate_type": str(row.get(f"event_candidate_type_{horizon}", "") or ""),
+                "candidate_bucket": str(row.get(f"candidate_bucket_{horizon}", "") or ""),
+                "candidate_bucket_label": str(row.get(f"candidate_bucket_label_{horizon}", "") or ""),
+                "event_caution_reason": str(row.get(f"event_caution_reason_{horizon}", "") or ""),
                 "fallback_used": bool(row.get(f"fallback_used_{horizon}", False)),
                 "selected_flag": bool(row.get("selected_flag", False)),
                 "unselected_reason": str(row.get("unselected_reason", "") or ""),
@@ -7743,11 +7763,45 @@ def _earnings_risk_score_series(frame: pd.DataFrame, *, horizon: str) -> pd.Seri
     today = frame.get("earnings_today_announcement_flag", pd.Series(False, index=index)).fillna(False).astype(bool)
     unknown = frame.get("earnings_unknown_flag", pd.Series(False, index=index)).fillna(False).astype(bool)
     score = pd.Series(0.0, index=index)
-    score.loc[unknown] -= 0.15
-    score.loc[days.le(7)] -= 0.35 if horizon == "1w" else 0.25
-    score.loc[days.le(3)] -= 0.45 if horizon == "1w" else 0.35
-    score.loc[today | days.eq(0)] -= 0.80 if horizon == "1w" else 0.65
+    before_or_today = days.ge(0)
+    score.loc[unknown] -= 0.05
+    score.loc[before_or_today & days.le(7)] -= 0.08 if horizon == "1w" else 0.05
+    score.loc[before_or_today & days.le(3)] -= 0.10 if horizon == "1w" else 0.07
+    score.loc[today | days.eq(0)] -= 0.24 if horizon == "1w" else 0.18
     return score
+
+
+_CANDIDATE_BUCKET_LABELS = {
+    "normal_candidate": "通常候補",
+    "event_caution_candidate": "イベント注意候補",
+    "chase_caution_candidate": "追いかけ注意",
+    "post_earnings_follow_candidate": "決算通過後候補",
+    "avoid_or_reject": "見送り寄り",
+}
+
+
+def _candidate_bucket_label(bucket: Any) -> str:
+    return _CANDIDATE_BUCKET_LABELS.get(str(bucket or ""), "")
+
+
+def _event_caution_reason_for_row(row: pd.Series, *, horizon: str) -> str:
+    bucket = str(row.get(f"candidate_bucket_{horizon}", "") or "")
+    event_type = str(row.get(f"event_candidate_type_{horizon}", "") or "")
+    if bucket == "avoid_or_reject":
+        return "重大な品質NG。見送り寄り"
+    if event_type == "earnings_today_overheated":
+        return "本日決算 + 20日線乖離大。追いかけ注意"
+    if event_type == "earnings_today":
+        return "本日決算。通常候補ではなくイベント注意候補"
+    if event_type == "earnings_near_overheated":
+        return "決算近い + 20日線乖離大。追いかけ注意"
+    if event_type == "earnings_near":
+        return "決算近い。強さは高いが値動き急変に注意"
+    if event_type == "post_earnings_follow":
+        return "決算通過後。中期トレンド継続"
+    if bucket == "chase_caution_candidate":
+        return "20日線乖離大。追いかけ注意"
+    return ""
 
 
 def _build_horizon_fit_reason(row: pd.Series, *, horizon: str) -> str:
@@ -7881,45 +7935,84 @@ def _apply_horizon_buy_scores(working: pd.DataFrame, *, selection_config: dict[s
         + _score_percentile(num("ret_3m")).fillna(0.0) * 0.30
     )
 
-    working["buy_score_1w"] = (
+    working["buy_strength_score_1w"] = (
         working["short_momentum_score_1w"] * 0.75
         + working["sector_strength_score_1w"] * 0.70
         + working["relative_strength_score_1w"] * 0.65
         + working["liquidity_score"] * 0.45
         + working["sector_rank_score_1w"] * 0.25
+    )
+    working["entry_timing_adjustment_1w"] = (
         + working["earnings_risk_score_1w"]
         + working["overheating_penalty_1w"]
         + working["abnormal_event_penalty_1w"]
         + working["fallback_penalty_1w"]
     )
-    working["buy_score_1m"] = (
+    working["buy_score_1w"] = working["buy_strength_score_1w"] + working["entry_timing_adjustment_1w"]
+    working["buy_strength_score_1m"] = (
         working["medium_trend_score_1m"] * 0.80
         + working["sector_strength_score_1m"] * 0.75
         + working["relative_strength_score_1m"] * 0.65
         + working["liquidity_score"] * 0.45
         + working["sector_rank_score_1m"] * 0.30
         + working["core_stock_score"] * 0.25
+    )
+    working["entry_timing_adjustment_1m"] = (
         + working["earnings_risk_score_1m"]
         + working["overheating_penalty_1m"]
         + working["abnormal_event_penalty_1m"]
         + working["fallback_penalty_1m"]
     )
-    working["buy_score_3m"] = (
+    working["buy_score_1m"] = working["buy_strength_score_1m"] + working["entry_timing_adjustment_1m"]
+    working["buy_strength_score_3m"] = (
         working["long_story_score_3m"] * 0.90
         + working["sector_strength_score_3m"] * 0.80
         + working["relative_strength_score_3m"] * 0.70
         + working["liquidity_score"] * 0.45
         + working["sector_rank_score_3m"] * 0.35
         + working["core_stock_score"] * 0.45
+    )
+    working["entry_timing_adjustment_3m"] = (
         + working["earnings_risk_score_3m"]
         + working["overheating_penalty_3m"]
         + working["abnormal_event_penalty_3m"]
         + working["fallback_penalty_3m"]
     )
+    working["buy_score_3m"] = working["buy_strength_score_3m"] + working["entry_timing_adjustment_3m"]
 
     for horizon in ["1w", "1m", "3m"]:
+        earnings_days = num("earnings_buffer_days", 999.0)
+        earnings_today = flag("earnings_today_announcement_flag") | earnings_days.eq(0)
+        earnings_near = earnings_days.ge(0) & earnings_days.le(3) & ~earnings_today
+        post_earnings = earnings_days.lt(0) & earnings_days.ge(-7)
+        overheat = flag("moderate_extension_flag_1w" if horizon == "1w" else "moderate_extension_flag_1m")
+        severe_or_abnormal = (
+            working.get(f"hard_block_reason_raw_{horizon}", pd.Series("", index=index)).fillna("").astype(str).str.strip().ne("")
+            | working[f"abnormal_event_penalty_{horizon}"].le(-0.80)
+        )
+        stable_post = post_earnings & flag(f"pass_trend_gate_{horizon}") & flag(f"pass_flow_gate_{horizon}") & working[f"abnormal_event_penalty_{horizon}"].ge(-0.20)
+        event_type = pd.Series("", index=index, dtype=object)
+        event_type.loc[earnings_today & overheat] = "earnings_today_overheated"
+        event_type.loc[earnings_today & ~overheat] = "earnings_today"
+        event_type.loc[earnings_near & overheat] = "earnings_near_overheated"
+        event_type.loc[earnings_near & ~overheat] = "earnings_near"
+        event_type.loc[stable_post & event_type.eq("")] = "post_earnings_follow"
+        event_type.loc[overheat & event_type.eq("")] = "overheat_chase"
+        bucket = pd.Series("normal_candidate", index=index, dtype=object)
+        bucket.loc[overheat] = "chase_caution_candidate"
+        bucket.loc[earnings_today | earnings_near] = "event_caution_candidate"
+        bucket.loc[(earnings_today | earnings_near) & overheat] = "chase_caution_candidate"
+        bucket.loc[stable_post] = "post_earnings_follow_candidate"
+        bucket.loc[severe_or_abnormal] = "avoid_or_reject"
+        working[f"event_candidate_type_{horizon}"] = event_type
+        working[f"event_candidate_flag_{horizon}"] = event_type.isin(["earnings_today_overheated", "earnings_today", "earnings_near_overheated", "earnings_near", "post_earnings_follow"])
+        working[f"candidate_bucket_{horizon}"] = bucket
+        working[f"candidate_bucket_label_{horizon}"] = bucket.apply(_candidate_bucket_label)
+        working[f"event_caution_reason_{horizon}"] = working.apply(lambda row, h=horizon: _event_caution_reason_for_row(row, horizon=h), axis=1)
         working[f"score_components_{horizon}"] = working.apply(
             lambda row, h=horizon: {
+                "buy_strength_score": float(row.get(f"buy_strength_score_{h}", 0.0) or 0.0),
+                "entry_timing_adjustment": float(row.get(f"entry_timing_adjustment_{h}", 0.0) or 0.0),
                 "sector_strength_score": float(row.get(f"sector_strength_score_{h}", 0.0) or 0.0),
                 "sector_rank_score": float(row.get(f"sector_rank_score_{h}", 0.0) or 0.0),
                 "relative_strength_score": float(row.get(f"relative_strength_score_{h}", 0.0) or 0.0),
@@ -7934,6 +8027,9 @@ def _apply_horizon_buy_scores(working: pd.DataFrame, *, selection_config: dict[s
         )
         working[f"horizon_fit_reason_{horizon}"] = working.apply(lambda row, h=horizon: _build_horizon_fit_reason(row, horizon=h), axis=1)
         working[f"entry_caution_{horizon}"] = working.apply(lambda row, h=horizon: str(row.get(f"risk_note_{h}", "") or "").strip(), axis=1)
+        working.loc[working[f"entry_caution_{horizon}"].astype(str).str.strip().eq(""), f"entry_caution_{horizon}"] = working.loc[
+            working[f"entry_caution_{horizon}"].astype(str).str.strip().eq(""), f"event_caution_reason_{horizon}"
+        ]
         working[f"rejected_reason_{horizon}"] = ""
         working[f"fallback_used_{horizon}"] = False
     return working
@@ -8613,6 +8709,8 @@ def _build_swing_candidate_tables_v2(
         source = source.copy()
         source["selected_horizon"] = horizon
         source["buy_score_total"] = source.get(f"buy_score_{horizon}", pd.Series(0.0, index=source.index))
+        source["buy_strength_score"] = source.get(f"buy_strength_score_{horizon}", pd.Series(0.0, index=source.index))
+        source["entry_timing_adjustment"] = source.get(f"entry_timing_adjustment_{horizon}", pd.Series(0.0, index=source.index))
         source["sector_strength_score"] = source.get(f"sector_strength_score_{horizon}", pd.Series(0.0, index=source.index))
         source["relative_strength_score"] = source.get(f"relative_strength_score_{horizon}", pd.Series(0.0, index=source.index))
         source["earnings_risk_score"] = source.get(f"earnings_risk_score_{horizon}", pd.Series(0.0, index=source.index))
@@ -8624,6 +8722,11 @@ def _build_swing_candidate_tables_v2(
         source["rejected_reason"] = source.get(f"rejected_reason_{horizon}", pd.Series("", index=source.index))
         source["horizon_fit_reason"] = source.get(f"horizon_fit_reason_{horizon}", pd.Series("", index=source.index))
         source["entry_caution"] = source.get(f"entry_caution_{horizon}", pd.Series("", index=source.index))
+        source["event_candidate_flag"] = source.get(f"event_candidate_flag_{horizon}", pd.Series(False, index=source.index)).fillna(False).astype(bool)
+        source["event_candidate_type"] = source.get(f"event_candidate_type_{horizon}", pd.Series("", index=source.index))
+        source["candidate_bucket"] = source.get(f"candidate_bucket_{horizon}", pd.Series("", index=source.index))
+        source["candidate_bucket_label"] = source.get(f"candidate_bucket_label_{horizon}", pd.Series("", index=source.index))
+        source["event_caution_reason"] = source.get(f"event_caution_reason_{horizon}", pd.Series("", index=source.index))
         source["fallback_used"] = source.get(f"fallback_used_{horizon}", pd.Series(False, index=source.index)).fillna(False).astype(bool)
         common_audit_columns = [
             "selected_horizon",
@@ -8631,6 +8734,14 @@ def _build_swing_candidate_tables_v2(
             "buy_score_1w",
             "buy_score_1m",
             "buy_score_3m",
+            "buy_strength_score",
+            "buy_strength_score_1w",
+            "buy_strength_score_1m",
+            "buy_strength_score_3m",
+            "entry_timing_adjustment",
+            "entry_timing_adjustment_1w",
+            "entry_timing_adjustment_1m",
+            "entry_timing_adjustment_3m",
             "score_components",
             "sector_strength_score",
             "relative_strength_score",
@@ -8643,6 +8754,11 @@ def _build_swing_candidate_tables_v2(
             "rejected_reason",
             "horizon_fit_reason",
             "entry_caution",
+            "event_candidate_flag",
+            "event_candidate_type",
+            "candidate_bucket",
+            "candidate_bucket_label",
+            "event_caution_reason",
             "fallback_used",
         ]
         selected_columns.extend([column for column in common_audit_columns if column in source.columns and column not in selected_columns])
@@ -8688,16 +8804,22 @@ def _build_swing_candidate_tables_v2(
                     final.loc[supplemented_mask, "fallback_used"] = True
                 if "fallback_penalty" in final.columns:
                     final.loc[supplemented_mask, "fallback_penalty"] = -0.85
+                if "entry_timing_adjustment" in final.columns:
+                    final.loc[supplemented_mask, "entry_timing_adjustment"] = _coerce_numeric(final.loc[supplemented_mask, "entry_timing_adjustment"]).fillna(0.0) - 0.85
                 if "buy_score_total" in final.columns:
                     final.loc[supplemented_mask, "buy_score_total"] = _coerce_numeric(final.loc[supplemented_mask, "buy_score_total"]).fillna(0.0) - 0.85
                 for score_horizon in ["1w", "1m", "3m"]:
                     score_column = f"buy_score_{score_horizon}"
+                    timing_column = f"entry_timing_adjustment_{score_horizon}"
                     if score_column in final.columns:
                         horizon_mask = supplemented_mask & final.get("selected_horizon", pd.Series("", index=final.index)).astype(str).eq(score_horizon)
                         final.loc[horizon_mask, score_column] = _coerce_numeric(final.loc[horizon_mask, score_column]).fillna(0.0) - 0.85
+                    if timing_column in final.columns:
+                        horizon_mask = supplemented_mask & final.get("selected_horizon", pd.Series("", index=final.index)).astype(str).eq(score_horizon)
+                        final.loc[horizon_mask, timing_column] = _coerce_numeric(final.loc[horizon_mask, timing_column]).fillna(0.0) - 0.85
                 if "score_components" in final.columns:
                     final.loc[supplemented_mask, "score_components"] = final.loc[supplemented_mask, "score_components"].apply(
-                        lambda value: {**(value if isinstance(value, dict) else {}), "fallback_penalty": -0.85}
+                        lambda value: {**(value if isinstance(value, dict) else {}), "fallback_penalty": -0.85, "entry_timing_adjustment": float((value if isinstance(value, dict) else {}).get("entry_timing_adjustment", 0.0) or 0.0) - 0.85}
                     )
                 for column in ["selection_reason", "candidate_commentary"]:
                     if column in final.columns:
@@ -8804,10 +8926,12 @@ def _build_swing_candidate_tables_v2(
         fallback_mask = working["code"].astype(str).isin(fallback_codes)
         working.loc[fallback_mask, f"fallback_used_{horizon}"] = True
         working.loc[fallback_mask, f"fallback_penalty_{horizon}"] = -0.85
+        if f"entry_timing_adjustment_{horizon}" in working.columns:
+            working.loc[fallback_mask, f"entry_timing_adjustment_{horizon}"] = _coerce_numeric(working.loc[fallback_mask, f"entry_timing_adjustment_{horizon}"]).fillna(0.0) - 0.85
         working.loc[fallback_mask, f"buy_score_{horizon}"] = _coerce_numeric(working.loc[fallback_mask, f"buy_score_{horizon}"]).fillna(0.0) - 0.85
         working.loc[fallback_mask, f"swing_score_{horizon}"] = working.loc[fallback_mask, f"buy_score_{horizon}"]
         working.loc[fallback_mask, f"score_components_{horizon}"] = working.loc[fallback_mask, f"score_components_{horizon}"].apply(
-            lambda value: {**(value if isinstance(value, dict) else {}), "fallback_penalty": -0.85}
+            lambda value: {**(value if isinstance(value, dict) else {}), "fallback_penalty": -0.85, "entry_timing_adjustment": float((value if isinstance(value, dict) else {}).get("entry_timing_adjustment", 0.0) or 0.0) - 0.85}
         )
     working["display_sector_cap_pruned_1w"] = working["code"].astype(str).isin(pruned_codes_1w)
     working["display_sector_cap_pruned_1m"] = working["code"].astype(str).isin(pruned_codes_1m)
@@ -10088,6 +10212,14 @@ SWING_CANDIDATE_AUDIT_COLUMNS = [
     "buy_score_1w",
     "buy_score_1m",
     "buy_score_3m",
+    "buy_strength_score",
+    "buy_strength_score_1w",
+    "buy_strength_score_1m",
+    "buy_strength_score_3m",
+    "entry_timing_adjustment",
+    "entry_timing_adjustment_1w",
+    "entry_timing_adjustment_1m",
+    "entry_timing_adjustment_3m",
     "score_components",
     "sector_strength_score",
     "relative_strength_score",
@@ -10100,6 +10232,11 @@ SWING_CANDIDATE_AUDIT_COLUMNS = [
     "rejected_reason",
     "horizon_fit_reason",
     "entry_caution",
+    "event_candidate_flag",
+    "event_candidate_type",
+    "candidate_bucket",
+    "candidate_bucket_label",
+    "event_caution_reason",
     "fallback_used",
     "selected_flag",
     "unselected_reason",
@@ -10130,6 +10267,8 @@ SWING_1W_DISPLAY_COLUMNS = [
     "selection_reason",
     "horizon_fit_reason",
     "entry_caution",
+    "candidate_bucket_label",
+    "event_caution_reason",
     "earnings_announcement_date",
     "risk_note",
     "candidate_commentary",
@@ -10152,6 +10291,8 @@ SWING_1M_DISPLAY_COLUMNS = [
     "selection_reason",
     "horizon_fit_reason",
     "entry_caution",
+    "candidate_bucket_label",
+    "event_caution_reason",
     "earnings_announcement_date",
     "risk_note",
     "candidate_commentary",
@@ -10177,6 +10318,8 @@ SWING_3M_DISPLAY_COLUMNS = [
     "selection_reason",
     "horizon_fit_reason",
     "entry_caution",
+    "candidate_bucket_label",
+    "event_caution_reason",
     "earnings_announcement_date",
     "risk_note",
     "candidate_commentary",
@@ -10559,7 +10702,7 @@ def _build_swing_candidate_display_frame(
     working = frame.copy()
     for column in columns:
         if column not in working.columns:
-            if column in {"sector_name", "code", "name", "candidate_quality", "entry_fit", "entry_stance_label", "stretch_caution_label", "watch_reason_label", "selection_reason", "horizon_fit_reason", "entry_caution", "earnings_announcement_date", "risk_note", "candidate_commentary", "finance_health_flag", "nikkei_search"}:
+            if column in {"sector_name", "code", "name", "candidate_quality", "entry_fit", "entry_stance_label", "stretch_caution_label", "watch_reason_label", "selection_reason", "horizon_fit_reason", "entry_caution", "candidate_bucket_label", "event_caution_reason", "earnings_announcement_date", "risk_note", "candidate_commentary", "finance_health_flag", "nikkei_search"}:
                 working[column] = ""
             else:
                 working[column] = pd.NA
@@ -10572,7 +10715,7 @@ def _build_swing_candidate_display_frame(
     working["sector_name"] = working["sector_name"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
     working["code"] = working["code"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
     working["name"] = working["name"].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
-    for column in ["candidate_quality", "entry_fit", "entry_stance_label", "stretch_caution_label", "watch_reason_label", "selection_reason", "horizon_fit_reason", "entry_caution", "risk_note", "candidate_commentary", "finance_health_flag"]:
+    for column in ["candidate_quality", "entry_fit", "entry_stance_label", "stretch_caution_label", "watch_reason_label", "selection_reason", "horizon_fit_reason", "entry_caution", "candidate_bucket_label", "event_caution_reason", "risk_note", "candidate_commentary", "finance_health_flag"]:
         if column in working.columns:
             working[column] = working[column].apply(lambda value: _normalize_display_text(value, missing=DISPLAY_UNAVAILABLE_MARK))
     working["live_ret_vs_prev_close"] = working["live_ret_vs_prev_close"].apply(_format_display_pct_1dp)
