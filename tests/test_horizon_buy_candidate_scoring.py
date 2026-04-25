@@ -303,7 +303,7 @@ class HorizonBuyCandidateScoringTests(unittest.TestCase):
 
         self.assertEqual(app._format_candidate_entry_decision(row), "補完・監視\n注意: 補完候補")
 
-    def test_candidate_basis_is_not_truncated_and_nikkei_link_is_kept(self):
+    def test_candidate_basis_is_not_truncated_and_link_column_is_removed(self):
         long_reason = " / ".join(
             [
                 "3か月の強さが続いている",
@@ -349,16 +349,24 @@ class HorizonBuyCandidateScoringTests(unittest.TestCase):
         self.assertIn("注意: 決算近い / 20日線乖離大 / 追いかけ注意", row["entry_stance_label"])
         self.assertIn(long_reason, row["candidate_basis"])
         self.assertNotIn("…", row["candidate_basis"])
-        self.assertEqual(row["nikkei_search"], "https://www.nikkei.com/search?keyword=レーザーテック")
+        self.assertNotIn("nikkei_search", view.columns)
 
-    def test_candidate_table_links_only_http_urls(self):
-        html = app._candidate_table_cell_html("https://www.nikkei.com/search?keyword=5801", column_label="日経リンク")
+    def test_sbi_stock_link_is_rendered_inside_stock_name_cell(self):
+        expected = (
+            "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
+            "WPLETsiR001Ilst10/getDetailOfStockPriceJP?"
+            "OutSide=on&exchange_code=JPN&getFlg=on&stock_sec_code_mul=5801"
+        )
 
-        self.assertIn('href="https://www.nikkei.com/search?keyword=5801"', html)
-        self.assertIn("日経リンク", html)
-        self.assertEqual(app._candidate_table_cell_html("javascript:alert(1)", column_label="日経リンク"), "")
+        cell_html = app._candidate_table_cell_html("古河電気工業", column_label="銘柄名", code="5801")
 
-    def test_persistence_representative_focus_keeps_reason_without_nikkei_link(self):
+        self.assertIn("古河電気工業<br>", cell_html)
+        self.assertIn(f'href="{expected.replace("&", "&amp;")}"', cell_html)
+        self.assertIn(">SBI証券</a>", cell_html)
+        self.assertNotIn("日経リンク", cell_html)
+        self.assertEqual(app._make_sbi_stock_link("javascript:alert(1)"), "")
+
+    def test_persistence_representative_focus_keeps_reason_without_link_column(self):
         frame = pd.DataFrame(
             [
                 {
@@ -421,6 +429,24 @@ class HorizonBuyCandidateScoringTests(unittest.TestCase):
         self.assertIn("representative_selected_reason", view.columns)
         self.assertIn("representative_quality_flag", view.columns)
         self.assertNotIn("nikkei_search", view.columns)
+
+    def test_stock_link_display_frame_removes_nikkei_column(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "code": "6920",
+                    "name": "レーザーテック",
+                    "nikkei_search": "https://www.nikkei.com/search?keyword=6920",
+                }
+            ]
+        )
+
+        display = app._prepare_stock_link_display_frame(frame)
+
+        self.assertIn("銘柄名", display.columns)
+        self.assertIn("コード", display.columns)
+        self.assertNotIn("日経リンク", display.columns)
+        self.assertNotIn("nikkei_search", display.columns)
 
 
 if __name__ == "__main__":

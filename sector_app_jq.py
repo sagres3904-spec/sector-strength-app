@@ -9296,11 +9296,20 @@ def _render_dataframe_or_reason(title: str, frame: pd.DataFrame, *, reason: str,
     kwargs: dict[str, Any] = {"width": "stretch", "hide_index": True}
     if link_columns:
         kwargs["column_config"] = {
-            "日経で検索": st.column_config.LinkColumn("日経で検索", display_text="日経で検索"),
-            "日経リンク": st.column_config.LinkColumn("日経リンク", display_text="日経リンク"),
             "材料リンク": st.column_config.LinkColumn("材料リンク", display_text="リンクを開く"),
         }
-    st.dataframe(frame.rename(columns=UI_COLUMN_LABELS), **kwargs)
+    st.dataframe(frame.drop(columns=["nikkei_search"], errors="ignore").rename(columns=UI_COLUMN_LABELS), **kwargs)
+
+
+def _make_sbi_stock_link(code: Any) -> str:
+    normalized = _normalize_security_code(code)
+    if not re.fullmatch(r"\d{4,5}", normalized or ""):
+        return ""
+    return (
+        "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
+        "WPLETsiR001Ilst10/getDetailOfStockPriceJP?"
+        f"OutSide=on&exchange_code=JPN&getFlg=on&stock_sec_code_mul={normalized}"
+    )
 
 
 def _safe_link_url(value: Any) -> str:
@@ -9313,37 +9322,63 @@ def _safe_link_url(value: Any) -> str:
     return text
 
 
-def _candidate_table_cell_html(value: Any, *, column_label: str) -> str:
+def _prepare_stock_link_display_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    return frame.drop(columns=["nikkei_search"], errors="ignore").rename(columns=UI_COLUMN_LABELS)
+
+
+def _stock_name_cell_html(name: Any, code: Any) -> str:
+    text = _normalize_display_text(name, missing="")
+    escaped_name = html.escape(text)
+    url = _make_sbi_stock_link(code)
+    if not url:
+        return escaped_name
+    return (
+        f"{escaped_name}<br>"
+        f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">SBI証券</a>'
+    )
+
+
+def _candidate_table_cell_html(value: Any, *, column_label: str, code: Any = "") -> str:
     text = _normalize_display_text(value, missing="")
-    if column_label == "日経リンク":
-        url = _safe_link_url(text)
-        if not url:
-            return ""
-        return f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">日経リンク</a>'
+    if column_label == "銘柄名":
+        return _stock_name_cell_html(text, code)
+    if column_label in {"日経リンク", "日経で検索"}:
+        return ""
     return html.escape(text)
 
 
-def _render_candidate_table_or_reason(title: str, frame: pd.DataFrame, *, reason: str, note: str = "") -> None:
+def _render_stock_link_table_or_reason(
+    title: str,
+    frame: pd.DataFrame,
+    *,
+    reason: str,
+    note: str = "",
+    table_class: str = "stock-link-table",
+    width_by_label: dict[str, str] | None = None,
+) -> None:
     st.subheader(title)
     if str(note or "").strip():
         st.caption(str(note).strip())
     if frame.empty:
         st.caption(reason)
         return
-    display = frame.rename(columns=UI_COLUMN_LABELS)
+    display = _prepare_stock_link_display_frame(frame)
     labels = [str(column) for column in display.columns]
-    width_by_label = {
+    resolved_width_by_label = {
         "順位": "4.2rem",
         "コード": "5rem",
         "現在値": "6rem",
         "前日終値比(%)": "7rem",
         "決算発表予定日": "8rem",
-        "日経リンク": "5.5rem",
         "エントリー判断": "13rem",
         "根拠": "38%",
     }
+    if width_by_label:
+        resolved_width_by_label.update(width_by_label)
     colgroup = "".join(
-        f'<col style="width:{html.escape(width_by_label.get(label, "auto"), quote=True)}">'
+        f'<col style="width:{html.escape(resolved_width_by_label.get(label, "auto"), quote=True)}">'
         for label in labels
     )
     header_html = "".join(f"<th>{html.escape(label)}</th>" for label in labels)
@@ -9353,42 +9388,45 @@ def _render_candidate_table_or_reason(title: str, frame: pd.DataFrame, *, reason
         for label in labels:
             css_class = "reason-cell" if label == "根拠" else ("entry-cell" if label == "エントリー判断" else "")
             class_attr = f' class="{css_class}"' if css_class else ""
-            cells.append(f"<td{class_attr}>{_candidate_table_cell_html(row.get(label, ''), column_label=label)}</td>")
+            cells.append(
+                f"<td{class_attr}>{_candidate_table_cell_html(row.get(label, ''), column_label=label, code=row.get('コード', ''))}</td>"
+            )
         body_rows.append("<tr>" + "".join(cells) + "</tr>")
+    table_class = re.sub(r"[^a-zA-Z0-9_-]", "", str(table_class or "stock-link-table")) or "stock-link-table"
     table_html = f"""
 <style>
-.buy-candidate-table-wrap {{
+.{table_class}-wrap {{
   width: 100%;
   overflow-x: auto;
 }}
-.buy-candidate-table {{
+.{table_class} {{
   width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
   font-size: 0.92rem;
   line-height: 1.45;
 }}
-.buy-candidate-table th,
-.buy-candidate-table td {{
+.{table_class} th,
+.{table_class} td {{
   border-bottom: 1px solid rgba(49, 51, 63, 0.14);
   padding: 0.45rem 0.5rem;
   vertical-align: top;
   overflow-wrap: anywhere;
   word-break: break-word;
 }}
-.buy-candidate-table th {{
+.{table_class} th {{
   font-weight: 600;
   background: rgba(49, 51, 63, 0.04);
 }}
-.buy-candidate-table .entry-cell {{
+.{table_class} .entry-cell {{
   white-space: pre-line;
 }}
-.buy-candidate-table .reason-cell {{
+.{table_class} .reason-cell {{
   white-space: normal;
 }}
 </style>
-<div class="buy-candidate-table-wrap">
-  <table class="buy-candidate-table">
+<div class="{table_class}-wrap">
+  <table class="{table_class}">
     <colgroup>{colgroup}</colgroup>
     <thead><tr>{header_html}</tr></thead>
     <tbody>{''.join(body_rows)}</tbody>
@@ -9396,6 +9434,16 @@ def _render_candidate_table_or_reason(title: str, frame: pd.DataFrame, *, reason
 </div>
 """
     st.markdown(table_html, unsafe_allow_html=True)
+
+
+def _render_candidate_table_or_reason(title: str, frame: pd.DataFrame, *, reason: str, note: str = "") -> None:
+    _render_stock_link_table_or_reason(
+        title,
+        frame,
+        reason=reason,
+        note=note,
+        table_class="buy-candidate-table",
+    )
 
 
 def _build_earnings_candidate_table_note(base_meta: dict[str, Any] | None) -> str:
@@ -9934,7 +9982,6 @@ def _build_candidate_focus_view(
         "live_ret_vs_prev_close",
         "candidate_basis",
         "earnings_announcement_date",
-        "nikkei_search",
     ]
     if frame is None or frame.empty:
         return pd.DataFrame(columns=columns), "", ""
@@ -10005,7 +10052,6 @@ def _build_today_purchase_candidate_view(
         "live_ret_vs_prev_close",
         "candidate_basis",
         "earnings_announcement_date",
-        "nikkei_search",
     ]
     normalized_sector_lookup = {_normalize_industry_key(key): value for key, value in sector_rank_lookup.items() if _normalize_industry_key(key)}
     dedicated = pd.DataFrame(columns=columns)
@@ -10151,7 +10197,7 @@ def _render_timeframe_panel(
 ) -> None:
     st.caption(f"{timeframe_label}: {timeframe_note}")
     _render_dataframe_or_reason(sector_title, sector_frame, reason=sector_reason)
-    _render_dataframe_or_reason("セクター代表銘柄", center_frame, reason=center_reason)
+    _render_stock_link_table_or_reason("セクター代表銘柄", center_frame, reason=center_reason, table_class="representative-table")
     _render_candidate_table_or_reason(candidate_title, candidate_frame, reason=candidate_reason, note=candidate_note)
 
 
