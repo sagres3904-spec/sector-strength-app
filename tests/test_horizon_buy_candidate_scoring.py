@@ -1,6 +1,7 @@
 import json
 import math
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import pandas as pd
@@ -447,6 +448,59 @@ class HorizonBuyCandidateScoringTests(unittest.TestCase):
         self.assertIn("コード", display.columns)
         self.assertNotIn("日経リンク", display.columns)
         self.assertNotIn("nikkei_search", display.columns)
+
+    def test_timeframe_panel_renders_primary_candidates_before_sector_rank(self):
+        frame = pd.DataFrame([{"code": "6920", "name": "レーザーテック"}])
+        cases = [
+            ("today", "短期注目銘柄"),
+            ("1w", "購入候補"),
+            ("1m", "購入候補"),
+            ("3m", "購入候補"),
+        ]
+
+        for timeframe_label, candidate_title in cases:
+            with self.subTest(timeframe=timeframe_label):
+                calls: list[tuple[str, str]] = []
+
+                with (
+                    mock.patch.object(app.st, "caption"),
+                    mock.patch.object(
+                        app,
+                        "_render_candidate_table_or_reason",
+                        side_effect=lambda title, *_args, **_kwargs: calls.append(("candidate", title)),
+                    ),
+                    mock.patch.object(
+                        app,
+                        "_render_dataframe_or_reason",
+                        side_effect=lambda title, *_args, **_kwargs: calls.append(("sector", title)),
+                    ),
+                    mock.patch.object(
+                        app,
+                        "_render_stock_link_table_or_reason",
+                        side_effect=lambda title, *_args, **_kwargs: calls.append(("representative", title)),
+                    ),
+                ):
+                    app._render_timeframe_panel(
+                        timeframe_label=timeframe_label,
+                        timeframe_note="note",
+                        sector_title="セクター順位",
+                        sector_frame=frame,
+                        sector_reason="",
+                        center_frame=frame,
+                        center_reason="",
+                        candidate_frame=frame,
+                        candidate_reason="",
+                        candidate_title=candidate_title,
+                    )
+
+                self.assertEqual(
+                    calls,
+                    [
+                        ("candidate", candidate_title),
+                        ("sector", "セクター順位"),
+                        ("representative", "セクター代表銘柄"),
+                    ],
+                )
 
 
 if __name__ == "__main__":

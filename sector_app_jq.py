@@ -10196,9 +10196,9 @@ def _render_timeframe_panel(
     candidate_title: str = "購入候補",
 ) -> None:
     st.caption(f"{timeframe_label}: {timeframe_note}")
+    _render_candidate_table_or_reason(candidate_title, candidate_frame, reason=candidate_reason, note=candidate_note)
     _render_dataframe_or_reason(sector_title, sector_frame, reason=sector_reason)
     _render_stock_link_table_or_reason("セクター代表銘柄", center_frame, reason=center_reason, table_class="representative-table")
-    _render_candidate_table_or_reason(candidate_title, candidate_frame, reason=candidate_reason, note=candidate_note)
 
 
 def _persistence_gate_fail_warn_label(reason: Any) -> str:
