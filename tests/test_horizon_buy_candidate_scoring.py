@@ -509,12 +509,17 @@ class HorizonBuyCandidateScoringTests(unittest.TestCase):
         representative_display = pd.DataFrame(
             [
                 {
+                    "今日の順位": 1,
                     "セクター名": "卸売業",
                     "コード": "2737",
                     "銘柄名": "トーメンデバイス",
+                    "前日終値比(%)": "19.1",
+                    "現在値": "14,620",
+                    "売買代金": "16,649,533,000",
                     "代表理由": "材料・出来高を伴う上昇",
                     "品質/注意": "本日決算発表日",
                     "決算発表予定日": "2026-04-25",
+                    "補足": "出来高を伴う牽引",
                 }
             ]
         )
@@ -542,9 +547,21 @@ class HorizonBuyCandidateScoringTests(unittest.TestCase):
         )
 
         self.assertIn("representative-card", representative_html)
+        self.assertIn("前日終値比(%)", representative_html)
+        self.assertIn("19.1", representative_html)
+        self.assertIn("現在値", representative_html)
+        self.assertIn("14,620", representative_html)
+        self.assertIn("売買代金", representative_html)
+        self.assertIn("16,649,533,000", representative_html)
         self.assertIn("材料・出来高を伴う上昇", representative_html)
         self.assertIn("本日決算発表日", representative_html)
+        self.assertIn("決算発表予定日", representative_html)
+        self.assertIn("2026-04-25", representative_html)
+        self.assertIn("補足", representative_html)
+        self.assertIn("出来高を伴う牽引", representative_html)
         self.assertIn(">SBI証券</a>", representative_html)
+        self.assertNotIn("日経リンク", representative_html)
+        self.assertNotIn("nikkei.com", representative_html)
         self.assertIn("sector-card", sector_html)
         self.assertIn("電気機器", sector_html)
         self.assertIn("資金流入が継続", sector_html)

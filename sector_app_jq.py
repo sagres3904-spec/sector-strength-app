@@ -9384,9 +9384,26 @@ def _build_mobile_card_html(row: pd.Series, *, card_kind: str) -> str:
         parts.append(_field_html("決算", _row_value(row, "決算発表予定日")))
         parts.append(_field_html("根拠", _row_value(row, "根拠", "採用理由", "時間軸理由"), css_class="reason"))
     elif card_kind == "representative-card":
-        parts.append(_field_html("代表理由", _row_value(row, "代表理由", "代表抽出理由")))
-        parts.append(_field_html("品質/注意", _row_value(row, "品質/注意", "補足")))
-        parts.append(_field_html("決算", _row_value(row, "決算発表予定日")))
+        detail_labels = [
+            label
+            for label in row.index
+            if str(label)
+            not in {
+                "順位",
+                "表示順位",
+                "今日の順位",
+                "継続順位",
+                "セクター名",
+                "コード",
+                "銘柄名",
+                "日経リンク",
+                "日経で検索",
+                "nikkei_search",
+            }
+        ]
+        for label in detail_labels:
+            css_class = "reason" if str(label) in {"代表理由", "代表抽出理由", "補足"} else ""
+            parts.append(_field_html(str(label), row.get(label, ""), css_class=css_class))
     else:
         detail_labels = [
             label
