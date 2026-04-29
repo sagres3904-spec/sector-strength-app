@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-04-29T02:30:04.001061+00:00",
-  "status": "running",
-  "message": "Forced 1130 snapshot refresh is running.",
+  "last_run_at": "2026-04-29T02:34:08.482689+00:00",
+  "status": "failed",
+  "message": "fail-closed: kabu token request failed status=401 body={\"Code\":4001007,\"Message\":\"ログイン認証エラー\"}",
   "request_mode": "1130"
 }
