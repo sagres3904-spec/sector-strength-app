@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-05-04T00:14:09.478254+00:00",
-  "status": "running",
-  "message": "Forced 0915 snapshot refresh is running.",
+  "last_run_at": "2026-05-04T00:18:16.534033+00:00",
+  "status": "failed",
+  "message": "HTTPConnectionPool(host='localhost', port=18080): Max retries exceeded with url: /kabusapi/token (Caused by NewConnectionError(\"HTTPConnection(host='localhost', port=18080): Failed",
   "request_mode": "0915"
 }
