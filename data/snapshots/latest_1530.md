@@ -1,44 +1,46 @@
 # Snapshot 1530
 
-- generated_at: 2026-05-14T06:37:36.099108+00:00
+- generated_at: 2026-05-15T06:35:56.915997+00:00
 - mode: 1530
 - source_profile: local_kabu_jq_yanoshin
 - includes_kabu: True
 - snapshot_backend: 
 
 ## 強いセクター
-- ｶﾞﾗｽ: live_ret= turnover_score=
-- 水産: live_ret= turnover_score=
-- ﾊﾟﾙﾌﾟ: live_ret= turnover_score=
-- ｺﾞﾑ: live_ret= turnover_score=
 - 輸送: live_ret= turnover_score=
-- 化学: live_ret= turnover_score=
-- 卸売業: live_ret= turnover_score=
-- 鉄鋼: live_ret= turnover_score=
-- 海運業: live_ret= turnover_score=
-- 医薬: live_ret= turnover_score=
+- 保険業: live_ret= turnover_score=
+- 石油: live_ret= turnover_score=
+- ｻｰﾋﾞｽ: live_ret= turnover_score=
+- 情報・通信: live_ret= turnover_score=
+- 陸運: live_ret= turnover_score=
+- 銀行業: live_ret= turnover_score=
+- 小売業: live_ret= turnover_score=
+- 証券: live_ret= turnover_score=
+- 水産: live_ret= turnover_score=
 
 ## セクター別中心銘柄
-- 製品:  代表なし score=
-- ｶﾞﾗｽ: 5301 東海カーボン score=
-- ｶﾞﾗｽ: 5288 アジアパイルホールディングス score=
-- ｺﾞﾑ: 5186 ニッタ score=
-- ｺﾞﾑ: 5161 西川ゴム工業 score=
-- ｺﾞﾑ: 5184 ニチリン score=
-- ｻｰﾋﾞｽ: 2180 サニーサイドアップグループ score=
-- ﾊﾟﾙﾌﾟ: 3941 レンゴー score=
+- ｺﾞﾑ:  代表なし score=
+- ｻｰﾋﾞｽ: 6195 ホープ score=
+- ｻｰﾋﾞｽ: 6098 リクルートホールディングス score=
+- ｻｰﾋﾞｽ: 2475 ＷＤＢホールディングス score=
 - 不動:  代表なし score=
-- 化学: 4005 住友化学 score=
-- 化学: 4401 ＡＤＥＫＡ score=
-- 医薬: 4889 レナサイエンス score=
-- 卸売業: 8283 ＰＡＬＴＡＣ score=
-- 卸売業: 8058 三菱商事 score=
-- 建設:  代表なし score=
+- 保険業: 8766 東京海上ホールディングス score=
+- 保険業: 8729 ソニーフィナンシャルグループ score=
+- 化学:  代表なし score=
+- 卸売業:  代表なし score=
+- 小売業: 3034 クオールホールディングス score=
+- 小売業: 5892 ｙｕｔｏｒｉ score=
+- 情報・通信: 3907 シリコンスタジオ score=
+- 情報・通信: 4392 ＦＩＧ score=
+- 水産: 1377 サカタのタネ score=
+- 水産: 1332 ニッスイ score=
 
 ## 需給ブレイク候補
-- 7203 トヨタ自動車: 表示件数不足のため補完。通常の買い候補より信頼度は低い / 1wセクター強い / todayも崩れず / 出来高あり
-- 7267 本田技研工業: 表示件数不足のため補完。通常の買い候補より信頼度は低い / 1wセクター強い / todayも崩れず / 出来高あり
-- 8119 三栄コーポレーション: 表示件数不足のため補完。通常の買い候補より信頼度は低い / todayも崩れず / 出来高あり / 押し待ち
+- 8316 三井住友フィナンシャルグループ: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 8766 東京海上ホールディングス: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 8725 ＭＳ＆ＡＤインシュアランスグループホールディングス: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 8308 りそなホールディングス: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 7267 本田技研工業: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
 
 ## 注意点
 - 過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。
