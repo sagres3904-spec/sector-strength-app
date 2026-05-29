@@ -1,44 +1,46 @@
 # Snapshot 1130
 
-- generated_at: 2026-05-27T02:37:16.459032+00:00
+- generated_at: 2026-05-29T02:36:43.832174+00:00
 - mode: 1130
 - source_profile: local_kabu_jq_yanoshin
 - includes_kabu: True
 - snapshot_backend: 
 
 ## 強いセクター
-- 精密: live_ret= turnover_score=
-- 化学: live_ret= turnover_score=
-- 水産: live_ret= turnover_score=
-- 製品: live_ret= turnover_score=
+- 金属: live_ret= turnover_score=
+- 空運業: live_ret= turnover_score=
+- 情報・通信: live_ret= turnover_score=
 - ｻｰﾋﾞｽ: live_ret= turnover_score=
 - 電気: live_ret= turnover_score=
-- 鉄鋼: live_ret= turnover_score=
-- 石油: live_ret= turnover_score=
+- ｺﾞﾑ: live_ret= turnover_score=
+- 製品: live_ret= turnover_score=
+- 証券: live_ret= turnover_score=
 - 小売業: live_ret= turnover_score=
-- 鉱業: live_ret= turnover_score=
+- 鉄鋼: live_ret= turnover_score=
 
 ## セクター別中心銘柄
-- 製品: 7885 タカノ score=
-- 製品: 7822 永大産業 score=
-- 製品: 7867 タカラトミー score=
-- ｻｰﾋﾞｽ: 9227 マイクロ波化学 score=
-- ｻｰﾋﾞｽ: 9348 ｉｓｐａｃｅ score=
-- ｻｰﾋﾞｽ: 6072 地盤ネットホールディングス score=
-- 保険業:  代表なし score=
-- 化学: 4022 ラサ工業 score=
-- 化学: 4063 信越化学工業 score=
-- 医薬:  代表なし score=
-- 小売業:  代表なし score=
-- 情報・通信: 3624 アクセルマーク score=
-- 情報・通信: 3936 グローバルウェイ score=
-- 機械: 6464 ツバキ・ナカシマ score=
-- 水産: 1301 極洋 score=
+- 製品: 7974 任天堂 score=
+- 製品: 7912 大日本印刷 score=
+- ｺﾞﾑ: 5110 住友ゴム工業 score=
+- ｺﾞﾑ: 5101 横浜ゴム score=
+- ｺﾞﾑ: 5105 ＴＯＹＯ　ＴＩＲＥ score=
+- ｻｰﾋﾞｽ: 6173 アクアライン score=
+- ｻｰﾋﾞｽ: 9166 ＧＥＮＤＡ score=
+- 不動:  代表なし score=
+- 卸売業: 7435 ナ・デックス score=
+- 小売業: 9983 ファーストリテイリング score=
+- 情報・通信: 4800 オリコン score=
+- 情報・通信: 3905 データセクション score=
+- 情報・通信: 9984 ソフトバンクグループ score=
+- 機械: 6203 豊和工業 score=
+- 空運業: 9202 ＡＮＡホールディングス score=
 
 ## 需給ブレイク候補
-- 7701 島津製作所: 1wセクター強い / todayも崩れず / TOPIX比で強い / 1m崩れ小
-- 7729 東京精密: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い
-- 5406 神戸製鋼所: 表示件数不足のため補完。通常の買い候補より信頼度は低い / todayも崩れず / TOPIX比で強い / 1m崩れ小
+- 9201 日本航空: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 9202 ＡＮＡホールディングス: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 5101 横浜ゴム: 1wセクター強い / todayも崩れず / TOPIX比で強い / 1m崩れ小
+- 5110 住友ゴム工業: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い
+- 6408 小倉クラッチ: 表示件数不足のため補完。通常の買い候補より信頼度は低い / 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い
 
 ## 注意点
 - 過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。
