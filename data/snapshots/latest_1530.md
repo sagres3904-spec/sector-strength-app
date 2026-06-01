@@ -1,46 +1,44 @@
 # Snapshot 1530
 
-- generated_at: 2026-05-29T06:36:08.468696+00:00
+- generated_at: 2026-06-01T06:37:23.712556+00:00
 - mode: 1530
 - source_profile: local_kabu_jq_yanoshin
 - includes_kabu: True
 - snapshot_backend: 
 
 ## 強いセクター
-- 金属: live_ret= turnover_score=
-- 電気: live_ret= turnover_score=
-- 繊維: live_ret= turnover_score=
-- 空運業: live_ret= turnover_score=
-- 小売業: live_ret= turnover_score=
-- ｶﾞﾗｽ: live_ret= turnover_score=
-- 化学: live_ret= turnover_score=
 - 情報・通信: live_ret= turnover_score=
-- 医薬: live_ret= turnover_score=
-- 石油: live_ret= turnover_score=
+- 金属: live_ret= turnover_score=
+- ｻｰﾋﾞｽ: live_ret= turnover_score=
+- ｶﾞﾗｽ: live_ret= turnover_score=
+- 電気: live_ret= turnover_score=
+- 非鉄: live_ret= turnover_score=
+- 製品: live_ret= turnover_score=
+- 銀行業: live_ret= turnover_score=
+- 証券: live_ret= turnover_score=
+- 保険業: live_ret= turnover_score=
 
 ## セクター別中心銘柄
-- ｶﾞﾗｽ: 5367 ニッカトー score=
-- 化学: 4078 堺化学工業 score=
-- 医薬: 4568 第一三共 score=
-- 医薬: 4507 塩野義製薬 score=
-- 卸売業: 7435 ナ・デックス score=
-- 小売業: 9983 ファーストリテイリング score=
-- 情報・通信: 4800 オリコン score=
-- 情報・通信: 3905 データセクション score=
-- 機械: 6203 豊和工業 score=
-- 石油: 5011 ニチレキグループ score=
-- 石油: 5018 ＭＯＲＥＳＣＯ score=
-- 空運業: 9202 ＡＮＡホールディングス score=
-- 空運業: 9201 日本航空 score=
-- 精密:  代表なし score=
-- 繊維: 3402 東レ score=
+- 製品: 7814 日本創発グループ score=
+- 製品: 7826 フルヤ金属 score=
+- 金融: 8783 ａｂｃ score=
+- ｶﾞﾗｽ: 5331 ノリタケ score=
+- ｶﾞﾗｽ: 3110 日東紡績 score=
+- ｻｰﾋﾞｽ: 6072 地盤ネットホールディングス score=
+- 保険業: 8766 東京海上ホールディングス score=
+- 保険業: 8630 ＳＯＭＰＯホールディングス score=
+- 化学:  代表なし score=
+- 卸売業: 8105 Ｂｉｔｃｏｉｎ　Ｊａｐａｎ score=
+- 小売業:  代表なし score=
+- 情報・通信: 9984 ソフトバンクグループ score=
+- 機械:  代表なし score=
+- 証券: 8628 松井証券 score=
+- 証券: 7148 ＦＰＧ score=
 
 ## 需給ブレイク候補
-- 4004 レゾナック・ホールディングス: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
-- 4063 信越化学工業: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
-- 9202 ＡＮＡホールディングス: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
-- 9201 日本航空: 1wセクター強い / todayも崩れず / TOPIX比で強い / 1m崩れ小
-- 9983 ファーストリテイリング: todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 5332 ＴＯＴＯ: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 4531 有機合成薬品工業: 表示件数不足のため補完。通常の買い候補より信頼度は低い / 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い
+- 4627 ナトコ: 表示件数不足のため補完。通常の買い候補より信頼度は低い / 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小 / 押し待ち
 
 ## 注意点
 - 過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。
