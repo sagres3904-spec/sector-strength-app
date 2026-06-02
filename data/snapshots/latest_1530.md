@@ -1,44 +1,46 @@
 # Snapshot 1530
 
-- generated_at: 2026-06-01T06:37:23.712556+00:00
+- generated_at: 2026-06-02T06:36:39.068587+00:00
 - mode: 1530
 - source_profile: local_kabu_jq_yanoshin
 - includes_kabu: True
 - snapshot_backend: 
 
 ## 強いセクター
-- 情報・通信: live_ret= turnover_score=
-- 金属: live_ret= turnover_score=
-- ｻｰﾋﾞｽ: live_ret= turnover_score=
-- ｶﾞﾗｽ: live_ret= turnover_score=
-- 電気: live_ret= turnover_score=
-- 非鉄: live_ret= turnover_score=
 - 製品: live_ret= turnover_score=
-- 銀行業: live_ret= turnover_score=
 - 証券: live_ret= turnover_score=
-- 保険業: live_ret= turnover_score=
+- 鉱業: live_ret= turnover_score=
+- 銀行業: live_ret= turnover_score=
+- 石油: live_ret= turnover_score=
+- 情報・通信: live_ret= turnover_score=
+- 海運業: live_ret= turnover_score=
+- 不動: live_ret= turnover_score=
+- 小売業: live_ret= turnover_score=
+- 電気: live_ret= turnover_score=
 
 ## セクター別中心銘柄
-- 製品: 7814 日本創発グループ score=
-- 製品: 7826 フルヤ金属 score=
-- 金融: 8783 ａｂｃ score=
-- ｶﾞﾗｽ: 5331 ノリタケ score=
-- ｶﾞﾗｽ: 3110 日東紡績 score=
-- ｻｰﾋﾞｽ: 6072 地盤ネットホールディングス score=
-- 保険業: 8766 東京海上ホールディングス score=
-- 保険業: 8630 ＳＯＭＰＯホールディングス score=
-- 化学:  代表なし score=
-- 卸売業: 8105 Ｂｉｔｃｏｉｎ　Ｊａｐａｎ score=
-- 小売業:  代表なし score=
-- 情報・通信: 9984 ソフトバンクグループ score=
-- 機械:  代表なし score=
-- 証券: 8628 松井証券 score=
-- 証券: 7148 ＦＰＧ score=
+- 製品: 7974 任天堂 score=
+- ｻｰﾋﾞｽ: 2162 ｎｍｓ　ホールディングス score=
+- ｻｰﾋﾞｽ: 6031 ＺＥＴＡ score=
+- 不動:  代表なし score=
+- 倉庫:  代表なし score=
+- 小売業: 3099 三越伊勢丹ホールディングス score=
+- 小売業: 9983 ファーストリテイリング score=
+- 情報・通信: 3687 フィックスターズ score=
+- 機械: 6298 ワイエイシイホールディングス score=
+- 海運業: 9101 日本郵船 score=
+- 海運業: 9107 川崎汽船 score=
+- 海運業: 9110 ＮＳユナイテッド海運 score=
+- 石油: 5021 コスモエネルギーホールディングス score=
+- 石油: 5019 出光興産 score=
+- 石油: 3315 日本コークス工業 score=
 
 ## 需給ブレイク候補
-- 5332 ＴＯＴＯ: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
-- 4531 有機合成薬品工業: 表示件数不足のため補完。通常の買い候補より信頼度は低い / 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い
-- 4627 ナトコ: 表示件数不足のため補完。通常の買い候補より信頼度は低い / 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小 / 押し待ち
+- 3099 三越伊勢丹ホールディングス: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 9983 ファーストリテイリング: 1wセクター強い / todayも崩れず / TOPIX比で強い / 1m崩れ小
+- 9101 日本郵船: todayも崩れず / 出来高あり
+- 5019 出光興産: 1wセクター強い / todayも崩れず / TOPIX比で強い
+- 9107 川崎汽船: 表示件数不足のため補完。通常の買い候補より信頼度は低い / todayも崩れず / TOPIX比で強い / 1m崩れ小
 
 ## 注意点
 - 過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。
