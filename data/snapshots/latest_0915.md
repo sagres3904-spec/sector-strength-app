@@ -1,44 +1,46 @@
 # Snapshot 0915
 
-- generated_at: 2026-06-04T00:19:16.616574+00:00
+- generated_at: 2026-06-05T00:19:10.662689+00:00
 - mode: 0915
 - source_profile: local_kabu_jq_yanoshin
 - includes_kabu: True
 - snapshot_backend: 
 
 ## 強いセクター
-- 医薬: live_ret= turnover_score=
-- 建設: live_ret= turnover_score=
-- 空運業: live_ret= turnover_score=
+- 製品: live_ret= turnover_score=
 - 海運業: live_ret= turnover_score=
-- 倉庫: live_ret= turnover_score=
-- 金融: live_ret= turnover_score=
-- 機械: live_ret= turnover_score=
-- 小売業: live_ret= turnover_score=
-- ｺﾞﾑ: live_ret= turnover_score=
-- 金属: live_ret= turnover_score=
+- 銀行業: live_ret= turnover_score=
+- 保険業: live_ret= turnover_score=
+- 医薬: live_ret= turnover_score=
+- 証券: live_ret= turnover_score=
+- 不動: live_ret= turnover_score=
+- 卸売業: live_ret= turnover_score=
+- ｶﾞｽ: live_ret= turnover_score=
+- 鉱業: live_ret= turnover_score=
 
 ## セクター別中心銘柄
-- 金融: 8591 オリックス score=
-- 金融: 8697 日本取引所グループ score=
-- ｺﾞﾑ: 5108 ブリヂストン score=
-- ｺﾞﾑ: 5186 ニッタ score=
-- ｻｰﾋﾞｽ: 9791 ビケンテクノ score=
-- 倉庫: 9369 キユーソー流通システム score=
-- 倉庫: 9304 澁澤倉庫 score=
-- 医薬: 4503 アステラス製薬 score=
-- 医薬: 4578 大塚ホールディングス score=
-- 小売業: 2730 エディオン score=
-- 建設: 1961 三機工業 score=
-- 情報・通信: 3915 テラスカイ score=
-- 情報・通信: 3667 ｅｎｉｓｈ score=
-- 機械: 6323 ローツェ score=
-- 海運業: 9101 日本郵船 score=
+- 製品: 7974 任天堂 score=
+- 製品: 7851 カワセコンピュータサプライ score=
+- ｻｰﾋﾞｽ: 6573 ＣＲＡＶＩＡ score=
+- ｻｰﾋﾞｽ: 7361 ヒューマンクリエイションホールディングス score=
+- ｻｰﾋﾞｽ: 2415 ヒューマンホールディングス score=
+- 不動: 8918 ランド score=
+- 不動: 3465 ケイアイスター不動産 score=
+- 不動: 6625 ＪＡＬＣＯホールディングス score=
+- 保険業: 8750 第一ライフグループ score=
+- 保険業: 8729 ソニーフィナンシャルグループ score=
+- 医薬: 4889 レナサイエンス score=
+- 医薬: 4582 シンバイオ製薬 score=
+- 卸売業: 9824 泉州電業 score=
+- 卸売業: 2751 テンポスホールディングス score=
+- 情報・通信: 3664 ＷＩＺＥ score=
 
 ## 需給ブレイク候補
-- 6146 ディスコ: todayも崩れず / 出来高あり / TOPIX比で強い
-- 9107 川崎汽船: todayも崩れず / TOPIX比で強い
-- 9101 日本郵船: 表示件数不足のため補完。通常の買い候補より信頼度は低い / todayも崩れず / 出来高あり
+- 8306 三菱ＵＦＪフィナンシャル・グループ: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 8316 三井住友フィナンシャルグループ: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 8750 第一ライフグループ: todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 8729 ソニーフィナンシャルグループ: todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 9107 川崎汽船: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
 
 ## 注意点
 - 過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。
