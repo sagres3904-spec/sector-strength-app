@@ -1,46 +1,46 @@
 # Snapshot 1130
 
-- generated_at: 2026-06-04T02:36:56.498494+00:00
+- generated_at: 2026-06-05T02:36:52.858051+00:00
 - mode: 1130
 - source_profile: local_kabu_jq_yanoshin
 - includes_kabu: True
 - snapshot_backend: 
 
 ## 強いセクター
+- 製品: live_ret= turnover_score=
+- 保険業: live_ret= turnover_score=
 - 海運業: live_ret= turnover_score=
-- 空運業: live_ret= turnover_score=
-- 機械: live_ret= turnover_score=
-- 倉庫: live_ret= turnover_score=
+- 陸運: live_ret= turnover_score=
 - 医薬: live_ret= turnover_score=
-- 小売業: live_ret= turnover_score=
-- 銀行業: live_ret= turnover_score=
-- 建設: live_ret= turnover_score=
 - 不動: live_ret= turnover_score=
-- 水産: live_ret= turnover_score=
+- 証券: live_ret= turnover_score=
+- 空運業: live_ret= turnover_score=
+- 銀行業: live_ret= turnover_score=
+- 卸売業: live_ret= turnover_score=
 
 ## セクター別中心銘柄
-- ｻｰﾋﾞｽ:  代表なし score=
-- 不動: 3231 野村不動産ホールディングス score=
-- 不動: 8894 ＲＥＶＯＬＵＴＩＯＮ score=
-- 倉庫: 9369 キユーソー流通システム score=
-- 倉庫: 9303 住友倉庫 score=
-- 医薬: 4503 アステラス製薬 score=
-- 医薬: 4578 大塚ホールディングス score=
-- 小売業: 8254 さいか屋 score=
-- 小売業: 2730 エディオン score=
-- 建設:  代表なし score=
-- 情報・通信: 3667 ｅｎｉｓｈ score=
-- 情報・通信: 3915 テラスカイ score=
-- 機械: 6227 ＡＩメカテック score=
-- 機械: 6247 日阪製作所 score=
-- 機械: 7011 三菱重工業 score=
+- 製品: 7974 任天堂 score=
+- ｻｰﾋﾞｽ: 6573 ＣＲＡＶＩＡ score=
+- ｻｰﾋﾞｽ: 2415 ヒューマンホールディングス score=
+- 不動: 2980 ＳＲＥホールディングス score=
+- 不動: 6625 ＪＡＬＣＯホールディングス score=
+- 保険業: 8750 第一ライフグループ score=
+- 保険業: 8725 ＭＳ＆ＡＤインシュアランスグループホールディングス score=
+- 保険業: 8766 東京海上ホールディングス score=
+- 医薬: 4588 オンコリスバイオファーマ score=
+- 医薬: 2160 ジーエヌアイグループ score=
+- 卸売業:  代表なし score=
+- 情報・通信: 3664 ＷＩＺＥ score=
+- 情報・通信: 4179 ジーネクスト score=
+- 情報・通信: 5137 スマートドライブ score=
+- 機械: 6166 中村超硬 score=
 
 ## 需給ブレイク候補
-- 8306 三菱ＵＦＪフィナンシャル・グループ: todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
-- 9107 川崎汽船: todayも崩れず / 出来高あり / TOPIX比で強い
-- 6146 ディスコ: todayも崩れず / 出来高あり / TOPIX比で強い
-- 6227 ＡＩメカテック: todayも崩れず / 出来高あり / TOPIX比で強い
-- 8411 みずほフィナンシャルグループ: 表示件数不足のため補完。通常の買い候補より信頼度は低い / todayも崩れず / TOPIX比で強い / 1m崩れ小
+- 8306 三菱ＵＦＪフィナンシャル・グループ: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 8411 みずほフィナンシャルグループ: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 8729 ソニーフィナンシャルグループ: todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 8750 第一ライフグループ: todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
+- 9107 川崎汽船: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
 
 ## 注意点
 - 過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。
