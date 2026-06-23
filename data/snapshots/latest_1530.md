@@ -1,46 +1,44 @@
 # Snapshot 1530
 
-- generated_at: 2026-06-22T06:35:48.520318+00:00
+- generated_at: 2026-06-23T06:36:30.888620+00:00
 - mode: 1530
 - source_profile: local_kabu_jq_yanoshin
 - includes_kabu: True
 - snapshot_backend: 
 
 ## 強いセクター
-- 非鉄: live_ret= turnover_score=
-- ｶﾞﾗｽ: live_ret= turnover_score=
-- 電気: live_ret= turnover_score=
-- 銀行業: live_ret= turnover_score=
-- 金融: live_ret= turnover_score=
-- 証券: live_ret= turnover_score=
+- 水産: live_ret= turnover_score=
+- 陸運: live_ret= turnover_score=
+- 海運業: live_ret= turnover_score=
+- 倉庫: live_ret= turnover_score=
+- 小売業: live_ret= turnover_score=
+- ｻｰﾋﾞｽ: live_ret= turnover_score=
+- 医薬: live_ret= turnover_score=
+- 鉱業: live_ret= turnover_score=
+- 石油: live_ret= turnover_score=
 - 保険業: live_ret= turnover_score=
-- 機械: live_ret= turnover_score=
-- 鉄鋼: live_ret= turnover_score=
-- 食料: live_ret= turnover_score=
 
 ## セクター別中心銘柄
-- 金融: 8591 オリックス score=
-- 金融: 7383 ネットプロテクションズホールディングス score=
-- ｶﾞﾗｽ: 5332 ＴＯＴＯ score=
-- ｻｰﾋﾞｽ:  代表なし score=
-- 保険業: 8795 Ｔ＆Ｄホールディングス score=
+- ｶﾞﾗｽ:  代表なし score=
+- ｻｰﾋﾞｽ: 9256 サクシード score=
+- 不動:  代表なし score=
+- 保険業: 8766 東京海上ホールディングス score=
 - 保険業: 8630 ＳＯＭＰＯホールディングス score=
-- 保険業: 8750 第一ライフグループ score=
-- 化学:  代表なし score=
-- 卸売業:  代表なし score=
-- 情報・通信: 4169 ＥＮＥＣＨＡＮＧＥ score=
-- 情報・通信: 4667 アイサンテクノロジー score=
-- 機械: 6433 ヒーハイスト score=
-- 機械: 6217 津田駒工業 score=
-- 機械: 6327 北川精機 score=
-- 繊維:  代表なし score=
+- 倉庫: 9304 澁澤倉庫 score=
+- 倉庫: 9301 三菱倉庫 score=
+- 倉庫: 9369 キユーソー流通システム score=
+- 医薬: 4564 オンコセラピー・サイエンス score=
+- 医薬: 4578 大塚ホールディングス score=
+- 医薬: 4523 エーザイ score=
+- 小売業: 7412 アトム score=
+- 情報・通信: 9444 トーシンホールディングス score=
+- 情報・通信: 4265 Ｉｎｓｔｉｔｕｔｉｏｎ　ｆｏｒ　ａ　Ｇｌｏｂａｌ　Ｓｏｃｉｅｔｙ score=
+- 機械:  代表なし score=
 
 ## 需給ブレイク候補
-- 5802 住友電気工業: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
-- 7011 三菱重工業: 1wセクター強い / todayも崩れず / TOPIX比で強い / 1m崩れ小
-- 6723 ルネサスエレクトロニクス: 1wセクター強い / todayも崩れず / 出来高あり / TOPIX比で強い / 1m崩れ小
-- 8750 第一ライフグループ: todayも崩れず / TOPIX比で強い / 1m崩れ小
-- 8795 Ｔ＆Ｄホールディングス: todayも崩れず / TOPIX比で強い / 1m崩れ小
+- 9130 共栄タンカー: 表示件数不足のため補完。通常の買い候補より信頼度は低い / todayも崩れず / TOPIX比で強い / 1m崩れ小
+- 9983 ファーストリテイリング: 表示件数不足のため補完。通常の買い候補より信頼度は低い / todayも崩れず / 出来高あり / 1m崩れ小
+- 6659 メディアリンクス: 表示件数不足のため補完。通常の買い候補より信頼度は低い / 1wセクター強い / todayも崩れず / 出来高あり
 
 ## 注意点
 - 過去の任意時点を後から再取得することはできず、保存済み snapshot のみ再表示できます。
