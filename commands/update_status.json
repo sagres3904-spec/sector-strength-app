@@ -1,6 +1,6 @@
 {
-  "last_run_at": "2026-06-26T02:37:22.825538+00:00",
-  "status": "failed",
-  "message": "cannot convert float infinity to integer",
-  "request_mode": "1130"
+  "last_run_at": "2026-06-26T06:30:01.599193+00:00",
+  "status": "running",
+  "message": "Forced 1530 snapshot refresh is running.",
+  "request_mode": "1530"
 }
